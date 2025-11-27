@@ -19,7 +19,7 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 <!-- markdownlint-disable MD013 -->
 
 - **🔧 Auto-Fix**: Automatically fix invalid references and pin actions to commit SHAs
-- **🧪 Testing Skip**: Auto-fixing skips actions with 'test' in comments by default (use `--update-test-actions` to enable)
+- **🧪 Testing Skip**: Auto-fixing skips actions with 'test' in comments by default (use `--fix-test-calls` to enable)
 - **🔒 SHA Pinning Enforcement**: Requires actions using commit SHAs for security (configurable)
 - **🔑 Automatic Authentication**: Auto-detects GitHub tokens from GitHub CLI when available
 - **📦 Local Caching**: Stores validation results locally to improve performance and reduce API calls
@@ -167,7 +167,7 @@ gha-workflow-linter lint --no-require-pinned-sha
 gha-workflow-linter lint --auto-fix
 
 # Auto-fix including actions with 'test' in comments (default skips them)
-gha-workflow-linter lint --auto-fix --update-test-actions
+gha-workflow-linter lint --auto-fix --fix-test-calls
 
 # Auto-fix without using latest versions (keeps current version)
 gha-workflow-linter lint --auto-fix --no-auto-latest
@@ -194,11 +194,11 @@ gha-workflow-linter lint --auto-fix --no-auto-latest
 
 **Skip Testing Actions**: By default, auto-fix skips actions with 'test' in
 their comments (case-insensitive). This is useful when you have experimental or
-testing branches that you don't want to update yet. Use `--update-test-actions` to
+testing branches that you don't want to update yet. Use `--fix-test-calls` to
 enable auto-fixing for these actions:
 
 ```yaml
-# The tool skips these by default (unless you use --update-test-actions)
+# The tool skips these by default (unless you use --fix-test-calls)
 - uses: actions/checkout@master  # Testing
 - uses: myorg/my-action@test-branch  # testing new feature
 - uses: myorg/my-action@experimental  # Test version

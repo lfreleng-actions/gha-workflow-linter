@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""Tests for --update-test-actions flag functionality."""
+"""Tests for --fix-test-calls flag functionality."""
 
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
-class TestUpdateTestActionsFlag:
-    """Test --update-test-actions flag behavior."""
+class TestFixTestCallsFlag:
+    """Test --fix-test-calls flag behavior."""
 
     @pytest.fixture
     def runner(self) -> CliRunner:
@@ -76,10 +76,10 @@ jobs:
             # Should be marked as test reference, not a hard error
             assert "test" in clean_output.lower() or "Testing" in clean_output
 
-    def test_update_test_actions_flag_enables_fixing(
+    def test_fix_test_calls_flag_enables_fixing(
         self, temp_workflow_dir: Path, runner: CliRunner
     ) -> None:
-        """Test that --update-test-actions flag enables fixing of test actions."""
+        """Test that --fix-test-calls flag enables fixing of test actions."""
         workflow_file = (
             temp_workflow_dir / ".github" / "workflows" / "test.yaml"
         )
@@ -99,12 +99,12 @@ jobs:
                 "lint",
                 str(temp_workflow_dir),
                 "--no-cache",
-                "--update-test-actions",
+                "--fix-test-calls",
                 "--auto-fix",
             ],
         )
 
-        # With --update-test-actions, the action with test comment should be fixed
+        # With --fix-test-calls, the action with test comment should be fixed
         updated_content = workflow_file.read_text()
 
         # The action should be updated (SHA or newer version)
@@ -113,10 +113,10 @@ jobs:
         # Should have been updated to a SHA or newer version
         assert "actions/checkout@" in updated_content
 
-    def test_no_update_test_actions_preserves_test_actions(
+    def test_no_fix_test_calls_preserves_test_actions(
         self, temp_workflow_dir: Path, runner: CliRunner
     ) -> None:
-        """Test that without --update-test-actions, test actions are not modified."""
+        """Test that without --fix-test-calls, test actions are not modified."""
         workflow_file = (
             temp_workflow_dir / ".github" / "workflows" / "test.yaml"
         )
@@ -243,10 +243,10 @@ jobs:
       - uses: actions/checkout@v3  # Testing
 """)
 
-        # Create config with no_fix_testing=True (default)
+        # Create config with fix_test_calls=False (default)
         config = Config(
             auto_fix=True,
-            no_fix_testing=True,
+            fix_test_calls=False,
         )
 
         # Create validation errors
@@ -287,7 +287,7 @@ jobs:
     async def test_auto_fixer_fixes_test_actions_when_enabled(
         self, temp_file: Path
     ) -> None:
-        """Test that AutoFixer fixes test actions when no_fix_testing=False (via --update-test-actions)."""
+        """Test that AutoFixer fixes test actions when fix_test_calls=True (via --fix-test-calls)."""
         temp_file.write_text("""name: Test
 on: [push]
 jobs:
@@ -297,54 +297,50 @@ jobs:
       - uses: actions/checkout@v3  # Testing
 """)
 
-        # Create config with no_fix_testing=False (enabled via --update-test-actions)
+        # Create config with fix_test_calls=True (enabled via --fix-test-calls)
         config = Config(
             auto_fix=True,
-            no_fix_testing=False,
+            fix_test_calls=True,
         )
 
         # Note: This test would need mocking of network calls to actually fix
         # For now, we just verify the config is set correctly
         async with AutoFixer(config) as fixer:
-            assert fixer.config.no_fix_testing is False
+            assert fixer.config.fix_test_calls is True
 
 
-class TestCLIUpdateTestActionsIntegration:
-    """Test CLI integration with --update-test-actions flag."""
+class TestCLIFixTestCallsIntegration:
+    """Test CLI integration with --fix-test-calls flag."""
 
     @pytest.fixture
     def runner(self) -> CliRunner:
         """Create a CLI runner."""
         return CliRunner()
 
-    def test_update_test_actions_flag_accepted(self, runner: CliRunner) -> None:
-        """Test that --update-test-actions flag is accepted by CLI."""
+    def test_fix_test_calls_flag_accepted(self, runner: CliRunner) -> None:
+        """Test that --fix-test-calls flag is accepted by CLI."""
         with tempfile.TemporaryDirectory() as temp_dir:
             result = runner.invoke(
                 app,
-                ["lint", temp_dir, "--update-test-actions", "--help"],
+                ["lint", temp_dir, "--fix-test-calls", "--help"],
             )
 
             # Should not error on the flag
-            assert (
-                "--update-test-actions" in result.output
-                or result.exit_code
-                in [
-                    0,
-                    2,
-                ]
-            )
+            assert "--fix-test-calls" in result.output or result.exit_code in [
+                0,
+                2,
+            ]
 
-    def test_update_test_actions_in_help_text(self, runner: CliRunner) -> None:
-        """Test that --update-test-actions appears in help text."""
+    def test_fix_test_calls_in_help_text(self, runner: CliRunner) -> None:
+        """Test that --fix-test-calls appears in help text."""
         result = runner.invoke(app, ["lint", "--help"])
 
         clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
-        assert "--update-test-actions" in clean_output
+        assert "--fix-test-calls" in clean_output
         assert "test" in clean_output.lower()
 
-    def test_update_test_actions_with_auto_fix(self, runner: CliRunner) -> None:
-        """Test that --update-test-actions works with --auto-fix."""
+    def test_fix_test_calls_with_auto_fix(self, runner: CliRunner) -> None:
+        """Test that --fix-test-calls works with --auto-fix."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             workflows_dir = temp_path / ".github" / "workflows"
@@ -367,17 +363,17 @@ jobs:
                     str(temp_dir),
                     "--no-cache",
                     "--auto-fix",
-                    "--update-test-actions",
+                    "--fix-test-calls",
                 ],
             )
 
             # Should execute without error
             assert result.exit_code in [0, 1]
 
-    def test_no_update_test_actions_without_auto_fix(
+    def test_no_fix_test_calls_without_auto_fix(
         self, runner: CliRunner
     ) -> None:
-        """Test that --update-test-actions has no effect without --auto-fix."""
+        """Test that --fix-test-calls has no effect without --auto-fix."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             workflows_dir = temp_path / ".github" / "workflows"
@@ -401,7 +397,7 @@ jobs:
                     str(temp_dir),
                     "--no-cache",
                     "--no-auto-fix",
-                    "--update-test-actions",
+                    "--fix-test-calls",
                 ],
             )
 

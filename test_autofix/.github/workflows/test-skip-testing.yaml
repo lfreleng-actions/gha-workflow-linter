@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Test workflow for --update-test-actions flag behavior
+# Test workflow for --fix-test-calls flag behavior
 name: 'Test Skip Testing'
 
 # yamllint disable-line rule:truthy
@@ -15,20 +15,20 @@ jobs:
     runs-on: ubuntu-latest
     # yamllint disable rule:line-length
     steps:
-      # This should be skipped by default (unless --update-test-actions is used)
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      # This should be skipped by default (unless --fix-test-calls is used)
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0 - testing
 
       # This should also be skipped (case-insensitive)
-      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0 - TEST
 
       # This should be skipped
-      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0 - test branch
 
       # This should be skipped
-      - uses: modeseven-lfreleng-actions/python-build-action@03a07d633766b8b26eeb12ef8b43cea43114dd69 # v0.1.21
+      - uses: modeseven-lfreleng-actions/python-build-action@03a07d633766b8b26eeb12ef8b43cea43114dd69 # v0.1.21 - Testing new feature
 
       # This should be skipped (uppercase)
-      - uses: lfreleng-actions/tag-validate-action@fdc054551b7cb082e4f283934c0878d5f15478f1 # v0.1.0
+      - uses: lfreleng-actions/tag-validate-action@fdc054551b7cb082e4f283934c0878d5f15478f1 # v0.1.0 - Test
 
       # This should be skipped
-      - uses: modeseven-lfreleng-actions/release-assets-action@bc8ee1a28ea2395febba0872422eec8383e3e4d3 # initial-update
+      - uses: modeseven-lfreleng-actions/release-assets-action@bc8ee1a28ea2395febba0872422eec8383e3e4d3 # initial-update - test version

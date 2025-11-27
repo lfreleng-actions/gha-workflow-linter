@@ -383,8 +383,8 @@ class Config(BaseModel):  # type: ignore[misc]
     skip_actions: bool = Field(
         False, description="Skip scanning action.yaml/action.yml files"
     )
-    no_fix_testing: bool = Field(
-        True, description="Skip auto-fixing action calls with 'test' in comments"
+    fix_test_calls: bool = Field(
+        False, description="Enable action call fixes with test-related keywords in comments (e.g., test, testing)"
     )
 
     network: NetworkConfig = Field(
@@ -454,8 +454,8 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     skip_actions: bool = Field(
         False, description="Skip scanning action.yaml/action.yml files"
     )
-    no_fix_testing: bool = Field(
-        True, description="Skip auto-fixing action calls with 'test' in comments"
+    fix_test_calls: bool = Field(
+        False, description="Enable auto-fixing action calls with 'test' in comments"
     )
 
     @field_validator("output_format")  # type: ignore[misc]

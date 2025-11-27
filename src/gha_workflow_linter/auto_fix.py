@@ -87,8 +87,8 @@ class AutoFixer:
             For skipped items, dict will have 'skipped': True
         """
         if not self.config.auto_fix:
-            # Even if auto_fix is disabled, still collect skipped testing items if no_fix_testing is enabled
-            if self.config.no_fix_testing:
+            # Even if auto_fix is disabled, still collect skipped testing items if fix_test_calls is disabled
+            if not self.config.fix_test_calls:
                 return self._collect_skipped_testing_items(errors)
             return {}
 
@@ -100,8 +100,8 @@ class AutoFixer:
                 ValidationResult.INVALID_REFERENCE,
                 ValidationResult.NOT_PINNED_TO_SHA,
             ]:
-                # Check if this action should be skipped due to no_fix_testing flag
-                if self.config.no_fix_testing and has_test_comment(error.action_call):
+                # Check if this action should be skipped due to fix_test_calls flag
+                if not self.config.fix_test_calls and has_test_comment(error.action_call):
                     # Track as skipped
                     if error.file_path not in skipped_by_file:
                         skipped_by_file[error.file_path] = {}
@@ -158,7 +158,7 @@ class AutoFixer:
     ) -> dict[Path, list[dict[str, str]]]:
         """
         Collect items that would be skipped due to testing comments.
-        Used when auto_fix is disabled but no_fix_testing is enabled.
+        Used when auto_fix is disabled but fix_test_calls is disabled (default).
 
         Args:
             errors: List of validation errors

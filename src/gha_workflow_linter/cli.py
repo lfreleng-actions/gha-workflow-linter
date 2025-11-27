@@ -302,9 +302,9 @@ def lint(
         "--skip-actions/--no-skip-actions",
         help="Skip scanning action.yaml/action.yml files (default: disabled, actions ARE scanned)",
     ),
-    update_test_actions: bool = typer.Option(
+    fix_test_calls: bool = typer.Option(
         False,
-        "--update-test-actions",
+        "--fix-test-calls",
         help="Enable auto-fixing action calls with 'test' in comments (default: disabled, test actions are skipped)",
     ),
     _help: bool = typer.Option(
@@ -382,7 +382,7 @@ def lint(
         gha-workflow-linter lint --auto-fix --two-space-comments
 
         # Enable auto-fixing for actions with 'test' in comments (default is to skip them)
-        gha-workflow-linter lint --auto-fix --update-test-actions
+        gha-workflow-linter lint --auto-fix --fix-test-calls
     """
     # Handle mutually exclusive options
     if verbose and quiet:
@@ -425,7 +425,7 @@ def lint(
             auto_latest=auto_latest,
             two_space_comments=two_space_comments,
             skip_actions=skip_actions,
-            no_fix_testing=not update_test_actions,  # Invert the flag
+            fix_test_calls=fix_test_calls,
         )
 
         # Apply CLI overrides to config
@@ -442,7 +442,7 @@ def lint(
         config.auto_latest = auto_latest
         config.two_space_comments = two_space_comments
         config.skip_actions = skip_actions
-        config.no_fix_testing = not update_test_actions  # Invert the flag
+        config.fix_test_calls = fix_test_calls
 
         # Apply validation method override if specified
         if validation_method is not None:
@@ -764,7 +764,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
     # Auto-fix validation errors if enabled, or collect skipped testing items
     fixed_files = {}
-    if (config.auto_fix or config.no_fix_testing) and validation_errors:
+    if (config.auto_fix or not config.fix_test_calls) and validation_errors:
         try:
             async def run_auto_fix() -> dict[Path, list[dict[str, str]]]:
                 async with AutoFixer(config) as auto_fixer:
