@@ -39,6 +39,7 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
+from .utils import has_test_comment
 
 
 class ActionCallValidator:
@@ -750,6 +751,7 @@ class ActionCallValidator:
             ValidationResult.NETWORK_ERROR: "Network error during validation",
             ValidationResult.TIMEOUT: "Timeout during validation",
             ValidationResult.NOT_PINNED_TO_SHA: "Action not pinned to commit SHA",
+            ValidationResult.TEST_REFERENCE: "Test action reference",
         }
 
         return messages.get(result, "Unknown validation error")
@@ -781,6 +783,7 @@ class ActionCallValidator:
             "syntax_errors": 0,
             "network_errors": 0,
             "timeouts": 0,
+            "test_references": 0,
             "not_pinned_to_sha": 0,
             # API call statistics
             "api_calls_total": self.api_stats.total_calls,
@@ -794,7 +797,10 @@ class ActionCallValidator:
 
         # Count error types
         for error in errors:
-            if error.result == ValidationResult.INVALID_REPOSITORY:
+            # Check if this is a test reference for any error type
+            if has_test_comment(error.action_call):
+                summary["test_references"] += 1
+            elif error.result == ValidationResult.INVALID_REPOSITORY:
                 summary["invalid_repositories"] += 1
             elif error.result == ValidationResult.INVALID_REFERENCE:
                 summary["invalid_references"] += 1

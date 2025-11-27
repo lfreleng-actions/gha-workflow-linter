@@ -18,6 +18,8 @@ Actions workflows reference valid repositories, branches, tags, and commit SHAs.
 
 <!-- markdownlint-disable MD013 -->
 
+- **🔧 Auto-Fix**: Automatically fix invalid references and pin actions to commit SHAs
+- **🧪 Testing Skip**: Auto-fixing skips actions with 'test' in comments by default (use `--update-test-actions` to enable)
 - **🔒 SHA Pinning Enforcement**: Requires actions using commit SHAs for security (configurable)
 - **🔑 Automatic Authentication**: Auto-detects GitHub tokens from GitHub CLI when available
 - **📦 Local Caching**: Stores validation results locally to improve performance and reduce API calls
@@ -161,10 +163,62 @@ gha-workflow-linter lint --exclude "**/test/**" --exclude "**/docs/**"
 # Disable SHA pinning policy (allow tags/branches)
 gha-workflow-linter lint --no-require-pinned-sha
 
+# Auto-fix invalid references and pin to SHAs
+gha-workflow-linter lint --auto-fix
+
+# Auto-fix including actions with 'test' in comments (default skips them)
+gha-workflow-linter lint --auto-fix --update-test-actions
+
+# Auto-fix without using latest versions (keeps current version)
+gha-workflow-linter lint --auto-fix --no-auto-latest
+
 # Run without any authentication (limited to 60 requests/hour)
 # This happens when GitHub CLI is not installed/authenticated AND no token exists
 # Shows: ⚠️ No GitHub token available; API requests may be rate-limited
 gha-workflow-linter lint
+```
+
+### Auto-Fix Feature
+
+The linter can automatically fix invalid action references and pin them to
+commit SHAs:
+
+```bash
+# Enable auto-fix (default: disabled)
+gha-workflow-linter lint --auto-fix
+
+# Auto-fix uses latest versions by default
+# Disable to keep current versions
+gha-workflow-linter lint --auto-fix --no-auto-latest
+```
+
+**Skip Testing Actions**: By default, auto-fix skips actions with 'test' in
+their comments (case-insensitive). This is useful when you have experimental or
+testing branches that you don't want to update yet. Use `--update-test-actions` to
+enable auto-fixing for these actions:
+
+```yaml
+# The tool skips these by default (unless you use --update-test-actions)
+- uses: actions/checkout@master  # Testing
+- uses: myorg/my-action@test-branch  # testing new feature
+- uses: myorg/my-action@experimental  # Test version
+```
+
+Example output (default behavior, test actions skipped):
+
+```text
+⏩ Skipped 3 testing action(s) in 1 file(s):
+
+📄 .github/workflows/build.yaml
+  ⏩ uses: actions/checkout@master  # Testing
+  ⏩ uses: myorg/my-action@test-branch  # testing new feature
+  ⏩ uses: myorg/my-action@experimental  # Test version
+
+🔧 Auto-fixed issues in 1 file(s):
+
+📄 .github/workflows/build.yaml
+  - - uses: actions/cache@v3
+  + - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
 ```
 
 ### As a Pre-commit Hook
