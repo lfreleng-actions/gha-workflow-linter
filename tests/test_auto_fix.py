@@ -208,9 +208,24 @@ jobs:
                 patch.object(
                     AutoFixer, "_get_commit_sha_for_reference"
                 ) as mock_get_sha,
+                patch.object(
+                    AutoFixer, "_get_latest_release_or_tag"
+                ) as mock_get_latest,
             ):
                 # Configure mocks to return expected data
                 mock_repo_info.return_value = {"default_branch": "main"}
+
+                # Mock latest release/tag retrieval
+                async def mock_get_latest_impl(repo_key: str) -> str | None:
+                    latest_map = {
+                        "actions/checkout": "v5.0.0",
+                        "actions/setup-python": "v6.0.0",
+                        "actions/setup-node": "v6.0.0",
+                        "actions/upload-artifact": "v5.0.0",
+                    }
+                    return latest_map.get(repo_key)
+
+                mock_get_latest.side_effect = mock_get_latest_impl
 
                 # Mock reference finding - invalid-branch should fallback to main
                 async def mock_find_ref_impl(

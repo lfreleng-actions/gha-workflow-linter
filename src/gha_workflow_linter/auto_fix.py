@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
+import re
 from typing import Any
 
 import httpx
 
 from .cache import ValidationCache
-from .exceptions import GitHubAPIError, GitError, NetworkError
-from .git_validator import GitValidationClient, _get_remote_branches, _get_remote_tags
+from .exceptions import GitError
+from .git_validator import (
+    GitValidationClient,
+    _get_remote_branches,
+    _get_remote_tags,
+)
 from .models import (
     ActionCall,
     Config,
@@ -23,6 +27,7 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
+from .utils import has_test_comment
 
 
 class AutoFixer:
@@ -79,17 +84,34 @@ class AutoFixer:
         Returns:
             Dictionary mapping file paths to lists of change dictionaries
             Each change dict has 'old_line', 'new_line', and 'line_number' keys
+            For skipped items, dict will have 'skipped': True
         """
         if not self.config.auto_fix:
+            # Even if auto_fix is disabled, still collect skipped testing items if no_fix_testing is enabled
+            if self.config.no_fix_testing:
+                return self._collect_skipped_testing_items(errors)
             return {}
 
         fixes_by_file: dict[Path, dict[int, tuple[str, str]]] = {}
+        skipped_by_file: dict[Path, dict[int, str]] = {}
 
         for error in errors:
             if error.result in [
                 ValidationResult.INVALID_REFERENCE,
                 ValidationResult.NOT_PINNED_TO_SHA,
             ]:
+                # Check if this action should be skipped due to no_fix_testing flag
+                if self.config.no_fix_testing and has_test_comment(error.action_call):
+                    # Track as skipped
+                    if error.file_path not in skipped_by_file:
+                        skipped_by_file[error.file_path] = {}
+                    skipped_by_file[error.file_path][error.action_call.line_number] = error.action_call.raw_line.strip()
+                    self.logger.info(
+                        f"Skipped testing action {error.action_call.organization}/{error.action_call.repository}@{error.action_call.reference} "
+                        f"in {error.file_path}:{error.action_call.line_number}"
+                    )
+                    continue
+
                 try:
                     fixed_line = await self._fix_action_call(error.action_call, error.result)
                     if fixed_line:
@@ -117,7 +139,48 @@ class AutoFixer:
             except Exception as e:
                 self.logger.error(f"Failed to apply fixes to {file_path}: {e}")
 
+        # Add skipped items to the output
+        for file_path, skipped_lines in skipped_by_file.items():
+            if file_path not in applied_fixes:
+                applied_fixes[file_path] = []
+            for line_num, old_line in skipped_lines.items():
+                applied_fixes[file_path].append({
+                    "old_line": old_line,
+                    "new_line": old_line,
+                    "line_number": str(line_num),
+                    "skipped": "true"
+                })
+
         return applied_fixes
+
+    def _collect_skipped_testing_items(
+        self, errors: list[ValidationError]
+    ) -> dict[Path, list[dict[str, str]]]:
+        """
+        Collect items that would be skipped due to testing comments.
+        Used when auto_fix is disabled but no_fix_testing is enabled.
+
+        Args:
+            errors: List of validation errors
+
+        Returns:
+            Dictionary mapping file paths to lists of skipped items
+        """
+        skipped_by_file: dict[Path, list[dict[str, str]]] = {}
+
+        for error in errors:
+            # Collect actions with test comments
+            if has_test_comment(error.action_call):
+                if error.file_path not in skipped_by_file:
+                    skipped_by_file[error.file_path] = []
+                skipped_by_file[error.file_path].append({
+                    "old_line": error.action_call.raw_line.strip(),
+                    "new_line": error.action_call.raw_line.strip(),
+                    "line_number": str(error.action_call.line_number),
+                    "skipped": "true"
+                })
+
+        return skipped_by_file
 
     async def _fix_action_call(self, action_call: ActionCall, validation_result: ValidationResult) -> str | None:
         """
@@ -144,20 +207,19 @@ class AutoFixer:
             if not target_ref:
                 # Fall back to default branch
                 target_ref = default_branch
-        else:
-            # Try to fix the current reference based on validation error type
-            if validation_result == ValidationResult.INVALID_REFERENCE:
-                # Invalid reference, try to find a valid one
-                target_ref = await self._find_valid_reference(repo_key, action_call.reference)
-                if not target_ref:
-                    target_ref = await self._get_fallback_reference(repo_key, action_call.reference)
+        # Try to fix the current reference based on validation error type
+        elif validation_result == ValidationResult.INVALID_REFERENCE:
+            # Invalid reference, try to find a valid one
+            target_ref = await self._find_valid_reference(repo_key, action_call.reference)
+            if not target_ref:
+                target_ref = await self._get_fallback_reference(repo_key, action_call.reference)
 
-                if not target_ref:
-                    # Fall back to default branch
-                    target_ref = default_branch
-            else:
-                # Keep the current reference for NOT_PINNED_TO_SHA cases
-                target_ref = action_call.reference
+            if not target_ref:
+                # Fall back to default branch
+                target_ref = default_branch
+        else:
+            # Keep the current reference for NOT_PINNED_TO_SHA cases
+            target_ref = action_call.reference
 
         # Get commit SHA for the target reference if we need to pin to SHA
         target_sha = None
@@ -169,18 +231,15 @@ class AutoFixer:
             if sha_info:
                 target_sha = sha_info["sha"]
                 # If target_ref looks like a version tag, use it in comment
-                if re.match(r"^v?\d+\.\d+", target_ref):
-                    version_comment = target_ref
-                elif target_ref != default_branch:
+                if re.match(r"^v?\d+\.\d+", target_ref) or target_ref != default_branch:
                     version_comment = target_ref
                 elif original_ref != default_branch and validation_result == ValidationResult.NOT_PINNED_TO_SHA:
                     # Preserve original branch name when falling back to default branch
                     version_comment = original_ref
-            else:
-                # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA issues
-                if validation_result == ValidationResult.NOT_PINNED_TO_SHA:
-                    self.logger.debug(f"Cannot resolve SHA for {repo_key}@{target_ref}, skipping SHA pinning")
-                    return None
+            # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA issues
+            elif validation_result == ValidationResult.NOT_PINNED_TO_SHA:
+                self.logger.debug(f"Cannot resolve SHA for {repo_key}@{target_ref}, skipping SHA pinning")
+                return None
 
         # Check if we actually have a change to make
         final_ref = target_sha or target_ref
@@ -303,7 +362,7 @@ class AutoFixer:
                     tag_list = sorted(git_tags, reverse=True)
 
                     # Try to find semantic version tags first
-                    version_tags = [tag for tag in tag_list if re.match(r'^v?\d+\.\d+', tag)]
+                    version_tags = [tag for tag in tag_list if re.match(r"^v?\d+\.\d+", tag)]
                     if version_tags:
                         return version_tags[0]
 
@@ -320,9 +379,12 @@ class AutoFixer:
         # Check cache first for known references
         for potential_ref in [invalid_ref, "main", "master"]:
             cached_entry = self._cache.get(repo_key, potential_ref)
-            if cached_entry and cached_entry.result == ValidationResult.VALID:
-                if potential_ref != invalid_ref:
-                    return potential_ref
+            if (
+                cached_entry
+                and cached_entry.result == ValidationResult.VALID
+                and potential_ref != invalid_ref
+            ):
+                return potential_ref
 
         # Use API if we're in GitHub API validation mode
         if self.config.validation_method == ValidationMethod.GITHUB_API and self._http_client:
@@ -501,7 +563,7 @@ class AutoFixer:
                         timeout=self.config.git.timeout_seconds, check=True
                     )
                     if result.stdout.strip():
-                        sha = result.stdout.strip().split('\t')[0]
+                        sha = result.stdout.strip().split("\t")[0]
                         return {"sha": sha, "type": "branch"}
                 except subprocess.CalledProcessError:
                     pass
@@ -514,7 +576,7 @@ class AutoFixer:
                         timeout=self.config.git.timeout_seconds, check=True
                     )
                     if result.stdout.strip():
-                        sha = result.stdout.strip().split('\t')[0]
+                        sha = result.stdout.strip().split("\t")[0]
                         return {"sha": sha, "type": "tag"}
                 except subprocess.CalledProcessError:
                     pass
@@ -531,17 +593,17 @@ class AutoFixer:
 
         # Match the full structure with optional dash
         # First try: indentation + "- " + "uses: "
-        structure_match = re.match(r'^(\s*-\s*uses:\s*)', original_line)
+        structure_match = re.match(r"^(\s*-\s*uses:\s*)", original_line)
         if structure_match:
             prefix = structure_match.group(1)
         else:
             # Second try: indentation + "uses: " (no dash)
-            structure_match = re.match(r'^(\s*uses:\s*)', original_line)
+            structure_match = re.match(r"^(\s*uses:\s*)", original_line)
             if structure_match:
                 prefix = structure_match.group(1)
             else:
                 # Fallback: extract indentation and add basic "uses: "
-                indent_match = re.match(r'^(\s*)', original_line)
+                indent_match = re.match(r"^(\s*)", original_line)
                 indent = indent_match.group(1) if indent_match else ""
                 prefix = f"{indent}uses: "
 
@@ -566,23 +628,23 @@ class AutoFixer:
     ) -> list[dict[str, str]]:
         """Apply fixes to a workflow file."""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, encoding="utf-8") as f:
                 lines = f.readlines()
 
             # Apply fixes (line numbers are 1-based)
             changes = []
-            for i, line in enumerate(lines, 1):
+            for i, _line in enumerate(lines, 1):
                 if i in line_fixes:
                     old_line, new_line = line_fixes[i]
-                    lines[i - 1] = new_line + '\n'
+                    lines[i - 1] = new_line + "\n"
                     changes.append({
-                        'line_number': str(i),
-                        'old_line': old_line,
-                        'new_line': new_line
+                        "line_number": str(i),
+                        "old_line": old_line,
+                        "new_line": new_line
                     })
 
             # Write back to file
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with open(file_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
 
             return changes

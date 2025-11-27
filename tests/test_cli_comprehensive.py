@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import re
 import tempfile
 from unittest.mock import Mock, patch
 
@@ -921,25 +922,18 @@ class TestCLIIntegration:
             assert result.exit_code == 1
             assert "cannot be used together" in result.stdout
 
-    @patch("gha_workflow_linter.cli.ConfigManager")
-    @patch("gha_workflow_linter.cli.ValidationCache")
-    def test_lint_command_purge_cache(
-        self, mock_cache_class, mock_config_manager
-    ) -> None:
-        """Test lint command with purge cache option."""
-        mock_config_manager.return_value.load_config.return_value = Config()
-
-        mock_cache = Mock()
-        mock_cache.purge.return_value = 5
-        mock_cache_class.return_value = mock_cache
-
+    def test_lint_command_purge_cache(self) -> None:
+        """Test that lint command does NOT have --purge-cache flag (it was removed)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             result = self.runner.invoke(
                 app, ["lint", temp_dir, "--purge-cache"]
             )
 
-            assert result.exit_code == 0
-            mock_cache.purge.assert_called_once()
+            # Should fail because --purge-cache is not a valid option for lint
+            assert result.exit_code == 2
+            # Strip ANSI color codes for assertion
+            clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+            assert "No such option: --purge-cache" in clean_output
 
     def test_lint_command_nonexistent_path(self) -> None:
         """Test lint command with nonexistent path."""

@@ -39,6 +39,7 @@ class ValidationResult(str, Enum):
     NETWORK_ERROR = "network_error"
     TIMEOUT = "timeout"
     NOT_PINNED_TO_SHA = "not_pinned_to_sha"
+    TEST_REFERENCE = "test_reference"
 
 
 class ActionCallType(str, Enum):
@@ -382,6 +383,9 @@ class Config(BaseModel):  # type: ignore[misc]
     skip_actions: bool = Field(
         False, description="Skip scanning action.yaml/action.yml files"
     )
+    no_fix_testing: bool = Field(
+        True, description="Skip auto-fixing action calls with 'test' in comments"
+    )
 
     network: NetworkConfig = Field(
         default_factory=lambda: NetworkConfig(),
@@ -429,7 +433,6 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     parallel: bool = Field(True, description="Enable parallel processing")
     require_pinned_sha: bool = Field(True, description="Require SHA pinning")
     no_cache: bool = Field(False, description="Bypass local cache")
-    purge_cache: bool = Field(False, description="Purge cache and exit")
     cache_ttl: int | None = Field(
         None, description="Override cache TTL in seconds"
     )
@@ -450,6 +453,9 @@ class CLIOptions(BaseModel):  # type: ignore[misc]
     )
     skip_actions: bool = Field(
         False, description="Skip scanning action.yaml/action.yml files"
+    )
+    no_fix_testing: bool = Field(
+        True, description="Skip auto-fixing action calls with 'test' in comments"
     )
 
     @field_validator("output_format")  # type: ignore[misc]

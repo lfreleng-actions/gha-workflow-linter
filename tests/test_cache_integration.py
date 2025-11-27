@@ -6,6 +6,7 @@
 from collections.abc import Generator
 import json
 from pathlib import Path
+import re
 import tempfile
 
 import pytest
@@ -223,16 +224,8 @@ cache:
         assert "_metadata" in cache_data
 
     def test_main_command_purge_cache_flag(self, temp_cache_dir: Path) -> None:
-        """Test --purge-cache flag on main command."""
+        """Test that --purge-cache flag is NOT available on lint command (it was removed)."""
         runner = CliRunner()
-
-        # Create some cache entries first
-        cache_config = CacheConfig(
-            enabled=True, cache_dir=temp_cache_dir, cache_file="test_cache.json"
-        )
-        cache = ValidationCache(cache_config)
-        cache.put("actions/checkout", "v4", ValidationResult.VALID, "graphql")
-        cache.save()
 
         # Create config
         config_content = f"""
@@ -248,17 +241,15 @@ cache:
             config_file = f.name
 
         try:
-            # Use --purge-cache flag
+            # Try to use --purge-cache flag (should fail)
             result = runner.invoke(
                 app, ["lint", "--config", config_file, "--purge-cache"]
             )
-            assert result.exit_code == 0
-            assert "Purged 1 cache entries" in result.stdout
-
-            # Verify cache is empty
-            new_cache = ValidationCache(cache_config)
-            info = new_cache.get_cache_info()
-            assert info["entries"] == 0
+            # Should fail because --purge-cache is not a valid option for lint
+            assert result.exit_code == 2
+            # Strip ANSI color codes for assertion
+            clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+            assert "No such option: --purge-cache" in clean_output
 
         finally:
             Path(config_file).unlink()
