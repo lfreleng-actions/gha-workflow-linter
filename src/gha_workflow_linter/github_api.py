@@ -54,6 +54,9 @@ class GitHubGraphQLClient:
         self._repository_cache: dict[str, bool] = {}
         self._reference_cache: dict[str, dict[str, bool]] = {}
 
+        # Parallel workers for concurrent operations (set by validator)
+        self.parallel_workers: int = 10  # Default, will be overridden
+
     async def __aenter__(self) -> GitHubGraphQLClient:
         """Async context manager entry."""
         headers = {
@@ -114,42 +117,57 @@ class GitHubGraphQLClient:
             f"(cache hits: {len(results)})"
         )
 
-        # Process in batches
+        # Process in batches - create all tasks for parallel execution
         batch_size = self.config.max_repositories_per_query
+        batches = []
         for i in range(0, len(uncached_repos), batch_size):
             batch = uncached_repos[i : i + batch_size]
+            batches.append(batch)
 
-            await self._check_rate_limit()
+        # Use semaphore to limit concurrent batches (respects parallel_workers config)
+        semaphore = asyncio.Semaphore(self.parallel_workers)
 
-            try:
-                batch_results = await self._validate_repositories_graphql_batch(
-                    batch
-                )
-                results.update(batch_results)
+        async def process_batch_with_limit(batch: list[str]) -> dict[str, bool]:
+            """Process a single batch with rate limiting."""
+            async with semaphore:
+                await self._check_rate_limit()
+                try:
+                    batch_results = await self._validate_repositories_graphql_batch(
+                        batch
+                    )
+                    # Cache results
+                    for repo_key, is_valid in batch_results.items():
+                        self._repository_cache[repo_key] = is_valid
+                    return batch_results
+                except (
+                    NetworkError,
+                    GitHubAPIError,
+                    AuthenticationError,
+                    RateLimitError,
+                ) as e:
+                    # Re-raise known API/network errors - don't treat as validation failure
+                    self.logger.error(f"Error validating repository batch: {e}")
+                    raise
+                except Exception as e:
+                    self.logger.error(
+                        f"Unexpected error validating repository batch: {e}"
+                    )
+                    self.api_stats.increment_failed_call()
+                    # Mark all as invalid on error
+                    batch_results = {}
+                    for repo_key in batch:
+                        batch_results[repo_key] = False
+                        self._repository_cache[repo_key] = False
+                    return batch_results
 
-                # Cache results
-                for repo_key, is_valid in batch_results.items():
-                    self._repository_cache[repo_key] = is_valid
+        # Execute all batches concurrently
+        batch_results_list = await asyncio.gather(
+            *[process_batch_with_limit(batch) for batch in batches]
+        )
 
-            except (
-                NetworkError,
-                GitHubAPIError,
-                AuthenticationError,
-                RateLimitError,
-            ) as e:
-                # Re-raise known API/network errors - don't treat as validation failure
-                self.logger.error(f"Error validating repository batch: {e}")
-                raise
-            except Exception as e:
-                self.logger.error(
-                    f"Unexpected error validating repository batch: {e}"
-                )
-                self.api_stats.increment_failed_call()
-
-                # Mark all as invalid on error
-                for repo_key in batch:
-                    results[repo_key] = False
-                    self._repository_cache[repo_key] = False
+        # Merge all results
+        for batch_result in batch_results_list:
+            results.update(batch_result)
 
         return results
 
@@ -195,31 +213,37 @@ class GitHubGraphQLClient:
                 refs_by_repo[repo_key] = []
             refs_by_repo[repo_key].append(ref)
 
-        # Process each repository's references
+        # Process each repository's references - create all tasks for parallel execution
+        all_tasks: list[tuple[str, list[str]]] = []
+
         for repo_key, refs in refs_by_repo.items():
             # Process references in batches
             batch_size = self.config.max_references_per_query
             for i in range(0, len(refs), batch_size):
                 ref_batch = refs[i : i + batch_size]
+                all_tasks.append((repo_key, ref_batch))
 
+        # Use semaphore to limit concurrent batches (respects parallel_workers config)
+        semaphore = asyncio.Semaphore(self.parallel_workers)
+
+        async def process_ref_batch_with_limit(
+            repo_key: str, ref_batch: list[str]
+        ) -> tuple[str, dict[str, bool]]:
+            """Process a single reference batch with rate limiting."""
+            async with semaphore:
                 await self._check_rate_limit()
-
                 try:
-                    batch_results = (
-                        await self._validate_references_graphql_batch(
-                            repo_key, ref_batch
-                        )
+                    batch_results = await self._validate_references_graphql_batch(
+                        repo_key, ref_batch
                     )
 
-                    # Update results
+                    # Cache results
+                    if repo_key not in self._reference_cache:
+                        self._reference_cache[repo_key] = {}
                     for ref, is_valid in batch_results.items():
-                        results[(repo_key, ref)] = is_valid
-
-                        # Cache results
-                        if repo_key not in self._reference_cache:
-                            self._reference_cache[repo_key] = {}
                         self._reference_cache[repo_key][ref] = is_valid
 
+                    return repo_key, batch_results
                 except (
                     NetworkError,
                     GitHubAPIError,
@@ -238,11 +262,24 @@ class GitHubGraphQLClient:
                     self.api_stats.increment_failed_call()
 
                     # Mark all as invalid on error
+                    batch_results = {}
+                    if repo_key not in self._reference_cache:
+                        self._reference_cache[repo_key] = {}
                     for ref in ref_batch:
-                        results[(repo_key, ref)] = False
-                        if repo_key not in self._reference_cache:
-                            self._reference_cache[repo_key] = {}
+                        batch_results[ref] = False
                         self._reference_cache[repo_key][ref] = False
+
+                    return repo_key, batch_results
+
+        # Execute all batches concurrently
+        batch_results_list = await asyncio.gather(
+            *[process_ref_batch_with_limit(rk, rb) for rk, rb in all_tasks]
+        )
+
+        # Merge all results
+        for repo_key, batch_result in batch_results_list:
+            for ref, is_valid in batch_result.items():
+                results[(repo_key, ref)] = is_valid
 
         return results
 
@@ -425,7 +462,7 @@ class GitHubGraphQLClient:
         Returns:
             Dictionary mapping references to validation results
         """
-        # Query both branches and tags
+        # Query both branches and tags with pagination info
         query = f"""
         query {{
             repository(owner: "{owner}", name: "{name}") {{
@@ -433,11 +470,21 @@ class GitHubGraphQLClient:
                     nodes {{
                         name
                     }}
+                    pageInfo {{
+                        hasNextPage
+                        endCursor
+                    }}
+                    totalCount
                 }}
                 tags: refs(refPrefix: "refs/tags/", first: 100) {{
                     nodes {{
                         name
                     }}
+                    pageInfo {{
+                        hasNextPage
+                        endCursor
+                    }}
+                    totalCount
                 }}
             }}
         }}
@@ -449,28 +496,119 @@ class GitHubGraphQLClient:
         repo_data = response_data.get("data", {}).get("repository", {})
 
         branches = set()
-        if repo_data.get("refs", {}).get("nodes"):
-            branches = {node["name"] for node in repo_data["refs"]["nodes"]}
+        branches_has_more = False
+        branches_total = 0
+        if repo_data.get("refs"):
+            refs_data = repo_data["refs"]
+            if refs_data.get("nodes"):
+                branches = {node["name"] for node in refs_data["nodes"]}
+            page_info = refs_data.get("pageInfo", {})
+            branches_has_more = page_info.get("hasNextPage", False)
+            branches_total = refs_data.get("totalCount", 0)
 
         tags = set()
-        if repo_data.get("tags", {}).get("nodes"):
-            tags = {node["name"] for node in repo_data["tags"]["nodes"]}
+        tags_has_more = False
+        tags_total = 0
+        if repo_data.get("tags"):
+            tags_data = repo_data["tags"]
+            if tags_data.get("nodes"):
+                tags = {node["name"] for node in tags_data["nodes"]}
+            page_info = tags_data.get("pageInfo", {})
+            tags_has_more = page_info.get("hasNextPage", False)
+            tags_total = tags_data.get("totalCount", 0)
+
+        # Check if we need to warn about pagination limits
+        if branches_has_more or tags_has_more:
+            self.logger.warning(
+                f"Repository {owner}/{name} has more than 100 branches or tags "
+                f"(branches: {branches_total}, tags: {tags_total}). "
+                f"Validation may be incomplete for references not in the first 100. "
+                f"Using fallback validation for references not found in initial fetch."
+            )
 
         # Validate each reference
         results = {}
         for ref in refs:
             is_valid = ref in branches or ref in tags
-            results[ref] = is_valid
 
-            if is_valid:
-                ref_type = "branch" if ref in branches else "tag"
+            # If not found and we have more pages, we can't be sure it doesn't exist
+            # Try individual validation as fallback
+            if not is_valid and (branches_has_more or tags_has_more):
                 self.logger.debug(
-                    f"{ref_type.title()} exists: {owner}/{name}@{ref}"
+                    f"Reference {ref} not in first 100, attempting individual validation for {owner}/{name}"
                 )
+                # Fallback to individual ref query
+                fallback_valid = await self._validate_single_ref_graphql(owner, name, ref)
+                results[ref] = fallback_valid
+                if fallback_valid:
+                    self.logger.debug(f"Reference found via fallback: {owner}/{name}@{ref}")
+                else:
+                    self.logger.debug(f"Reference not found: {owner}/{name}@{ref}")
             else:
-                self.logger.debug(f"Reference not found: {owner}/{name}@{ref}")
+                results[ref] = is_valid
+                if is_valid:
+                    ref_type = "branch" if ref in branches else "tag"
+                    self.logger.debug(
+                        f"{ref_type.title()} exists: {owner}/{name}@{ref}"
+                    )
+                else:
+                    self.logger.debug(f"Reference not found: {owner}/{name}@{ref}")
 
         return results
+
+    async def _validate_single_ref_graphql(
+        self, owner: str, name: str, ref: str
+    ) -> bool:
+        """
+        Validate a single reference using GraphQL (fallback for pagination limits).
+
+        Args:
+            owner: Repository owner
+            name: Repository name
+            ref: Reference name to validate
+
+        Returns:
+            True if reference exists, False otherwise
+        """
+        # Try as branch first
+        query = f"""
+        query {{
+            repository(owner: "{owner}", name: "{name}") {{
+                ref(qualifiedName: "refs/heads/{ref}") {{
+                    name
+                }}
+            }}
+        }}
+        """
+
+        try:
+            response_data = await self._execute_graphql_query(query)
+            repo_data = response_data.get("data", {}).get("repository", {})
+            if repo_data.get("ref"):
+                return True
+        except Exception:
+            pass
+
+        # Try as tag
+        query = f"""
+        query {{
+            repository(owner: "{owner}", name: "{name}") {{
+                ref(qualifiedName: "refs/tags/{ref}") {{
+                    name
+                }}
+            }}
+        }}
+        """
+
+        try:
+            response_data = await self._execute_graphql_query(query)
+            repo_data = response_data.get("data", {}).get("repository", {})
+            if repo_data.get("ref"):
+                return True
+        except Exception:
+            pass
+
+        return False
 
     async def _execute_graphql_query(self, query: str) -> dict[Any, Any]:
         """

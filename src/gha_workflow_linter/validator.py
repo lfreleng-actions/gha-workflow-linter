@@ -67,6 +67,8 @@ class ActionCallValidator:
 
         if self._validation_method == ValidationMethod.GITHUB_API:
             self._github_client = GitHubGraphQLClient(self.config.github_api)
+            # Store parallel_workers from parent config for concurrent operations
+            self._github_client.parallel_workers = self.config.parallel_workers
             await self._github_client.__aenter__()
         else:
             self._git_client = GitValidationClient(self.config.git)
@@ -139,7 +141,7 @@ class ActionCallValidator:
         """
         # If explicitly specified in config, use that
         if self.config.validation_method:
-            self.logger.info(
+            self.logger.debug(
                 f"Using explicitly specified validation method: {self.config.validation_method}"
             )
             return self.config.validation_method
@@ -177,7 +179,7 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
-        self.logger.info(
+        self.logger.debug(
             "Starting action call validation using GitHub GraphQL API"
         )
 
@@ -202,7 +204,7 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
-        self.logger.info("Starting action call validation using Git operations")
+        self.logger.debug("Starting action call validation using Git operations")
         return await self._perform_validation(
             action_calls, progress, task_id, use_github_api=False
         )
@@ -259,7 +261,7 @@ class ActionCallValidator:
         validation_method_str = (
             "GitHub GraphQL API" if use_github_api else "Git operations"
         )
-        self.logger.info(
+        self.logger.debug(
             f"Validating {total_calls} action calls "
             f"({unique_count} unique calls) using {validation_method_str}"
         )
@@ -267,7 +269,7 @@ class ActionCallValidator:
         # Deduplication savings
         saved_validations = total_calls - unique_count
         if saved_validations > 0:
-            self.logger.info(
+            self.logger.debug(
                 f"Deduplication saved {saved_validations} validations "
                 f"({saved_validations / total_calls * 100:.1f}% reduction)"
             )
@@ -301,13 +303,23 @@ class ActionCallValidator:
             repos_to_validate.add(repo)
             refs_to_validate.append((repo, ref))
 
-        # Update progress
+        # Update progress - don't set total to 0 if everything is cached
         if progress and task_id:
-            progress.update(
-                task_id,
-                total=len(repos_to_validate) + len(refs_to_validate),
-                description="Validating repositories...",
-            )
+            new_total = len(repos_to_validate) + len(refs_to_validate)
+            if new_total > 0:
+                progress.update(
+                    task_id,
+                    total=new_total,
+                    description="Validating repositories...",
+                )
+            else:
+                # Everything is cached, mark as complete immediately
+                task = progress.tasks[task_id]
+                progress.update(
+                    task_id,
+                    completed=task.total,
+                    description="Validation complete (all cached)",
+                )
 
         # Step 1: Validate repositories in batch (only for cache misses)
         self.logger.debug(
@@ -564,20 +576,20 @@ class ActionCallValidator:
                         errors.append(error)
 
         # Log final statistics
-        self.logger.info(
+        self.logger.debug(
             f"Validation complete: {len(errors)} errors out of "
             f"{total_calls} calls ({unique_count} unique calls validated)"
         )
 
         if use_github_api and self._github_client:
             rate_limit_info = self._github_client.get_rate_limit_info()
-            self.logger.info(
+            self.logger.debug(
                 f"API Statistics: {self.api_stats.total_calls} total calls "
                 f"(GraphQL: {self.api_stats.graphql_calls}, "
                 f"REST: {self.api_stats.rest_calls}, "
                 f"Cache hits: {self.api_stats.cache_hits})"
             )
-            self.logger.info(
+            self.logger.debug(
                 f"GitHub Rate Limit: {rate_limit_info.remaining}/{rate_limit_info.limit} remaining"
             )
         else:
@@ -595,6 +607,14 @@ class ActionCallValidator:
             self.logger.warning(
                 f"Rate limit delays encountered: {self.api_stats.rate_limit_delays}"
             )
+
+        # Mark progress as complete by getting the task's current total
+        if progress and task_id:
+            # Get the task to find its total
+            task = progress.tasks[task_id]
+            # Only update if not already completed
+            if task.total is not None and task.completed < task.total:
+                progress.update(task_id, completed=task.total, description="Validation complete")
 
         return errors
 
