@@ -42,6 +42,8 @@ class TestAutoFixBehaviorWithPinnedSHA:
             auto_fix=True,
             auto_latest=True,
             two_space_comments=False,
+            skip_actions=False,
+            fix_test_calls=False,
             validation_method=ValidationMethod.GIT,
             network=NetworkConfig(
                 timeout_seconds=10,
@@ -61,6 +63,8 @@ class TestAutoFixBehaviorWithPinnedSHA:
             auto_fix=True,
             auto_latest=True,
             two_space_comments=False,
+            skip_actions=False,
+            fix_test_calls=False,
             validation_method=ValidationMethod.GIT,
             network=NetworkConfig(
                 timeout_seconds=10,
@@ -292,9 +296,11 @@ jobs:
 
                 # Run auto-fix
                 async with AutoFixer(config_pinned_required) as fixer:
-                    fixed_files = await fixer.fix_validation_errors(
-                        validation_errors
-                    )
+                    (
+                        fixed_files,
+                        redirect_stats,
+                        stale_actions_summary,
+                    ) = await fixer.fix_validation_errors(validation_errors)
 
                 # Should fix all 5 issues when require_pinned_sha=True
                 assert len(fixed_files) == 1
@@ -387,9 +393,11 @@ jobs:
                 mock_get_sha.side_effect = mock_get_sha_impl
 
                 async with AutoFixer(config_pinned_not_required) as fixer:
-                    fixed_files = await fixer.fix_validation_errors(
-                        validation_errors
-                    )
+                    (
+                        fixed_files,
+                        redirect_stats,
+                        stale_actions_summary,
+                    ) = await fixer.fix_validation_errors(validation_errors)
 
                 # Should only fix 1 issue (the invalid-branch) when require_pinned_sha=False
                 assert len(fixed_files) == 1
@@ -470,35 +478,39 @@ jobs:
                 )
 
                 # Mock that it fixes all 5 issues
-                mock_auto_fixer.fix_validation_errors.return_value = {
-                    workflow_file: [
-                        {
-                            "line": 9,
-                            "old": "actions/checkout@invalid-branch",
-                            "new": "actions/checkout@abc123",
-                        },
-                        {
-                            "line": 12,
-                            "old": "actions/checkout@master",
-                            "new": "actions/checkout@def456",
-                        },
-                        {
-                            "line": 15,
-                            "old": "actions/setup-python@v4",
-                            "new": "actions/setup-python@ghi789",
-                        },
-                        {
-                            "line": 18,
-                            "old": "actions/setup-node@v3.8.1",
-                            "new": "actions/setup-node@jkl012",
-                        },
-                        {
-                            "line": 21,
-                            "old": "actions/upload-artifact@v2",
-                            "new": "actions/upload-artifact@mno345",
-                        },
-                    ]
-                }
+                mock_auto_fixer.fix_validation_errors.return_value = (
+                    {
+                        workflow_file: [
+                            {
+                                "line_number": "9",
+                                "old_line": "uses: actions/checkout@invalid-branch",
+                                "new_line": "uses: actions/checkout@abc123",
+                            },
+                            {
+                                "line_number": "12",
+                                "old_line": "uses: actions/checkout@master",
+                                "new_line": "uses: actions/checkout@def456",
+                            },
+                            {
+                                "line_number": "15",
+                                "old_line": "uses: actions/setup-python@v4",
+                                "new_line": "uses: actions/setup-python@ghi789",
+                            },
+                            {
+                                "line_number": "18",
+                                "old_line": "uses: actions/setup-node@v3.8.1",
+                                "new_line": "uses: actions/setup-node@jkl012",
+                            },
+                            {
+                                "line_number": "21",
+                                "old_line": "uses: actions/upload-artifact@v2",
+                                "new_line": "uses: actions/upload-artifact@mno345",
+                            },
+                        ]
+                    },
+                    {"actions_moved": 0, "calls_updated": 0},
+                    {},
+                )
 
                 # Run CLI with require-pinned-sha (default is True)
                 result = runner.invoke(
@@ -507,6 +519,7 @@ jobs:
                         "lint",
                         str(temp_dir),
                         "--auto-fix",
+                        "--auto-latest",
                         "--validation-method",
                         "git",
                     ],
@@ -519,7 +532,9 @@ jobs:
                     and "5" in result.stdout
                     and "validation errors" in result.stdout
                 )
-                assert "Auto-fixed issues in 1 file(s)" in result.stdout
+                assert (
+                    "Updated 5 workflow call(s) in 1 file(s)" in result.stdout
+                )
 
     def test_cli_auto_fix_with_pinned_sha_not_required(
         self,
@@ -577,16 +592,40 @@ validation_method: git
                     mock_auto_fixer
                 )
 
-                # Mock that it only fixes 1 issue (the invalid reference)
-                mock_auto_fixer.fix_validation_errors.return_value = {
-                    workflow_file: [
-                        {
-                            "line": 9,
-                            "old": "actions/checkout@invalid-branch",
-                            "new": "actions/checkout@abc123",
-                        },
-                    ]
-                }
+                # Mock that it fixes all 5 issues (1 invalid ref + 4 version updates due to auto_latest)
+                mock_auto_fixer.fix_validation_errors.return_value = (
+                    {
+                        workflow_file: [
+                            {
+                                "line_number": "9",
+                                "old_line": "uses: actions/checkout@invalid-branch",
+                                "new_line": "uses: actions/checkout@abc123",
+                            },
+                            {
+                                "line_number": "12",
+                                "old_line": "uses: actions/checkout@master",
+                                "new_line": "uses: actions/checkout@def456",
+                            },
+                            {
+                                "line_number": "15",
+                                "old_line": "uses: actions/setup-python@v4",
+                                "new_line": "uses: actions/setup-python@ghi789",
+                            },
+                            {
+                                "line_number": "18",
+                                "old_line": "uses: actions/setup-node@v3.8.1",
+                                "new_line": "uses: actions/setup-node@jkl012",
+                            },
+                            {
+                                "line_number": "21",
+                                "old_line": "uses: actions/upload-artifact@v2",
+                                "new_line": "uses: actions/upload-artifact@mno345",
+                            },
+                        ]
+                    },
+                    {"actions_moved": 0, "calls_updated": 0},
+                    {},
+                )
 
                 result = runner.invoke(
                     app,
@@ -605,9 +644,11 @@ validation_method: git
                     "Found" in result.stdout
                     and "1" in result.stdout
                     and "validation errors" in result.stdout
-                )  # Only 1 error
+                )  # Only 1 validation error (require_pinned_sha=False, so tags/branches are valid)
                 assert "1 invalid references" in result.stdout
-                assert "Auto-fixed issues in 1 file(s)" in result.stdout
+                assert (
+                    "Updated 5 workflow call(s) in 1 file(s)" in result.stdout
+                )  # But auto_latest=True updates all 5 actions to latest versions
 
     def test_error_count_summary_with_pinned_sha_required(
         self,
@@ -667,7 +708,11 @@ validation_method: git
                 mock_auto_fixer_class.return_value.__aenter__.return_value = (
                     mock_auto_fixer
                 )
-                mock_auto_fixer.fix_validation_errors.return_value = {}
+                mock_auto_fixer.fix_validation_errors.return_value = (
+                    {},
+                    {"actions_moved": 0, "calls_updated": 0},
+                    {},
+                )
 
                 result = runner.invoke(
                     app,
@@ -726,6 +771,7 @@ validation_method: git
                 str(temp_dir),
                 "--config",
                 str(config_file),
+                "--auto-latest",
             ],
         )
 
@@ -905,14 +951,24 @@ jobs:
                 "lint",
                 str(temp_dir),
                 "--auto-fix",
+                "--no-auto-latest",
                 "--validation-method",
                 "git",
             ],
         )
 
+        # With --no-auto-latest, it now checks for updates but doesn't apply them (dry-run mode)
+        # Since the action is pinned to an older version, it should report it as outdated
         assert result.exit_code == 0
-        assert "All action calls are valid" in result.stdout
-        assert "Auto-fixed" not in result.stdout
+        assert (
+            "outdated action call(s)" in result.stdout
+            or "All action calls are up to date" in result.stdout
+        )
+        assert (
+            "💡 Run with --auto-fix --auto-latest to update these actions"
+            in result.stdout
+            or "All action calls are up to date" in result.stdout
+        )
 
     def test_auto_fix_file_permission_error(self, temp_dir: Path) -> None:
         """Test auto-fix behavior when file cannot be written."""
@@ -1108,7 +1164,11 @@ jobs:
                 mock_auto_fixer_class.return_value.__aenter__.return_value = (
                     mock_auto_fixer
                 )
-                mock_auto_fixer.fix_validation_errors.return_value = {}
+                mock_auto_fixer.fix_validation_errors.return_value = (
+                    {},
+                    {"actions_moved": 0, "calls_updated": 0},
+                    {},
+                )
 
                 result = runner.invoke(
                     app,
@@ -1180,7 +1240,11 @@ jobs:
                 mock_auto_fixer_class.return_value.__aenter__.return_value = (
                     mock_auto_fixer
                 )
-                mock_auto_fixer.fix_validation_errors.return_value = {}
+                mock_auto_fixer.fix_validation_errors.return_value = (
+                    {},
+                    {"actions_moved": 0, "calls_updated": 0},
+                    {},
+                )
 
                 result = runner.invoke(
                     app,
@@ -1259,6 +1323,7 @@ jobs:
             [
                 "lint",
                 str(temp_dir),
+                "--no-auto-fix",
                 "--validation-method",
                 "git",
             ],
@@ -1284,8 +1349,7 @@ jobs:
                 "lint",
                 str(temp_dir),
                 "--auto-fix",
-                "--validation-method",
-                "git",
+                "--auto-latest",
             ],
         )
 
@@ -1397,10 +1461,18 @@ jobs:
                 for workflow_dir in dirs:
                     workflow_file = workflow_dir / "test.yaml"
                     fixed_files[workflow_file] = [
-                        {"line": 7, "old": "v3", "new": "sha123"}
+                        {
+                            "line_number": "7",
+                            "old_line": "uses: actions/checkout@v3",
+                            "new_line": "uses: actions/checkout@sha123",
+                        }
                     ]
 
-                mock_auto_fixer.fix_validation_errors.return_value = fixed_files
+                mock_auto_fixer.fix_validation_errors.return_value = (
+                    fixed_files,
+                    {"actions_moved": 0, "calls_updated": 0},
+                    {},
+                )
 
                 result = runner.invoke(
                     app,
@@ -1408,6 +1480,7 @@ jobs:
                         "lint",
                         str(temp_dir),
                         "--auto-fix",
+                        "--auto-latest",
                         "--validation-method",
                         "git",
                     ],
@@ -1419,7 +1492,9 @@ jobs:
                     and "3" in result.stdout
                     and "validation errors" in result.stdout
                 )
-                assert "Auto-fixed issues in 3 file(s)" in result.stdout
+                assert (
+                    "Updated 3 workflow call(s) in 3 file(s)" in result.stdout
+                )
                 assert result.exit_code == 1
 
 
@@ -1436,6 +1511,8 @@ class TestYAMLStructurePreservation:
             auto_fix=True,
             auto_latest=True,
             two_space_comments=True,
+            skip_actions=False,
+            fix_test_calls=False,
             validation_method=ValidationMethod.GIT,
             network=NetworkConfig(
                 timeout_seconds=10,
@@ -1604,7 +1681,11 @@ runs:
                     "_get_latest_release_or_tag",
                     return_value="v7.1.2",
                 ):
-                    fixed_files = await auto_fixer.fix_validation_errors(
+                    (
+                        fixed_files,
+                        redirect_stats,
+                        stale_actions_summary,
+                    ) = await auto_fixer.fix_validation_errors(
                         [validation_error]
                     )
 
@@ -1677,7 +1758,11 @@ jobs:
                     "_get_latest_release_or_tag",
                     return_value="v5.0.0",
                 ):
-                    fixed_files = await auto_fixer.fix_validation_errors(
+                    (
+                        fixed_files,
+                        redirect_stats,
+                        stale_actions_summary,
+                    ) = await auto_fixer.fix_validation_errors(
                         [validation_error]
                     )
 

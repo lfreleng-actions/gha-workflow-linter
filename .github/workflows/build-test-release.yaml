@@ -34,7 +34,7 @@ jobs:
       - name: 'Verify Pushed Tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tag-push-verify-action@80e2bdbbb9ee7b67557a31705892b75e75d2859e  # v0.1.1
+        uses: lfreleng-actions/tag-push-verify-action@a4e2147dc784ddc46e7c3acead9e01e19ff2ac5a # v0.1.1
         with:
           versioning: 'semver'
 
@@ -97,12 +97,12 @@ jobs:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: 'Build Python project'
         id: 'python-build'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-build-action@48381cece78a990a6ba93bd5924bcd40bf0d1a7d  # v0.1.20
+        uses: lfreleng-actions/python-build-action@7cff4964bc5d197f0a4411c3e47d4b192ccf19b7 # v0.1.22
         with:
           sigstore_sign: true
           attestations: true
@@ -126,11 +126,11 @@ jobs:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: 'Test Python project [PYTEST]'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-test-action@b997656111c9b547f8458b18baf6be139e2d2c6c  # v0.1.12
+        uses: lfreleng-actions/python-test-action@dd3ed8a782b96ec9abc3f0c63bb075311f50f962 # v1.0.0
         with:
           python_version: "${{ matrix.python-version }}"
 
@@ -153,11 +153,11 @@ jobs:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: 'Audit Python project'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-audit-action@d2a271bdbf08572dbd8addd3358e5e937ab3739b  # v0.2.3
+        uses: lfreleng-actions/python-audit-action@d9f8db3c56d8d2475c839fcf4e0c43f672801646 # v0.2.3
         with:
           python_version: "${{ matrix.python-version }}"
           permit_fail: true
@@ -171,12 +171,12 @@ jobs:
       contents: read
     steps:
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: "Generate SBOM"
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/python-sbom-action@ae4aca2ef28d7da4ec95049cc78be43e632d322a  # v0.1.0
+        uses: lfreleng-actions/python-sbom-action@184145f43d876b40a6cadc8720b34592f801dca1 # v0.1.0
         with:
           include_dev: "false"
           sbom_format: "both"
@@ -193,7 +193,7 @@ jobs:
 
       - name: "Security scan with Grype"
         # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@568b89d27fc18c60e56937bff480c91c772cd993  # v7.1.0
+        uses: anchore/scan-action@40a61b52209e9d50e87917c5b901783d546b12d0 # v7.2.1
         with:
           sbom: "${{ steps.sbom.outputs.sbom_json_path }}"
 
@@ -224,11 +224,11 @@ jobs:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: 'Test PyPI publishing'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/pypi-publish-action@81a056957ed050f8305760055b1fd8103a916989  # v0.1.1
+        uses: lfreleng-actions/pypi-publish-action@b5dfe505ba3bf1c8543ccf178e145e065a64220b # v0.1.1
         with:
           environment: 'development'
           tag: "${{ needs.tag-validate.outputs.tag }}"
@@ -254,11 +254,11 @@ jobs:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: 'PyPI release'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/pypi-publish-action@81a056957ed050f8305760055b1fd8103a916989  # v0.1.1
+        uses: lfreleng-actions/pypi-publish-action@b5dfe505ba3bf1c8543ccf178e145e065a64220b # v0.1.1
         with:
           environment: 'production'
           attestations: true
@@ -287,7 +287,7 @@ jobs:
           egress-policy: 'audit'
 
       # yamllint disable-line rule:line-length
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: 'Check if release is already promoted'
         id: 'check-promoted'
@@ -310,7 +310,7 @@ jobs:
         id: 'promote-release'
         if: steps.check-promoted.outputs.already_promoted == 'false'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/draft-release-promote-action@d7e7df12e32fa26b28dbc2f18a12766482785399  # v0.1.2
+        uses: lfreleng-actions/draft-release-promote-action@b0dad56b43df80ad589e76953e0d01a4fe9306fa # v0.1.3
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"
           tag: "${{ needs.tag-validate.outputs.tag }}"

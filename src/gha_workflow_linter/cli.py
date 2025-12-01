@@ -282,15 +282,20 @@ def lint(
         "--validation-method",
         help="Validation method: github-api or git (auto-detected if not specified)",
     ),
-    auto_fix: bool = typer.Option(
-        True,
+    auto_fix: bool | None = typer.Option(
+        None,
         "--auto-fix/--no-auto-fix",
         help="Automatically fix broken/invalid SHA pins, versions, and branches (default: enabled)",
     ),
-    auto_latest: bool = typer.Option(
-        True,
+    auto_latest: bool | None = typer.Option(
+        None,
         "--auto-latest/--no-auto-latest",
-        help="When auto-fixing, use the latest version of actions (default: enabled)",
+        help="When auto-fixing, use the latest version of actions (default: disabled)",
+    ),
+    allow_prerelease: bool = typer.Option(
+        False,
+        "--allow-prerelease/--no-allow-prerelease",
+        help="Allow prerelease versions when finding latest versions (default: disabled)",
     ),
     two_space_comments: bool = typer.Option(
         False,
@@ -307,6 +312,7 @@ def lint(
         "--fix-test-calls",
         help="Enable auto-fixing action calls with 'test' in comments (default: disabled, test actions are skipped)",
     ),
+
     _help: bool = typer.Option(
         False,
         "--help",
@@ -423,6 +429,7 @@ def lint(
             validation_method=validation_method,
             auto_fix=auto_fix,
             auto_latest=auto_latest,
+            allow_prerelease=allow_prerelease,
             two_space_comments=two_space_comments,
             skip_actions=skip_actions,
             fix_test_calls=fix_test_calls,
@@ -437,12 +444,19 @@ def lint(
             config.parallel_workers = 1
         config.require_pinned_sha = require_pinned_sha
 
-        # Apply auto-fix overrides
-        config.auto_fix = auto_fix
-        config.auto_latest = auto_latest
-        config.two_space_comments = two_space_comments
-        config.skip_actions = skip_actions
-        config.fix_test_calls = fix_test_calls
+        # Apply auto-fix overrides (only if explicitly provided)
+        if auto_fix is not None:
+            config.auto_fix = auto_fix
+        if auto_latest is not None:
+            config.auto_latest = auto_latest
+        if allow_prerelease is not None:
+            config.allow_prerelease = allow_prerelease
+        if two_space_comments is not None:
+            config.two_space_comments = two_space_comments
+        if skip_actions is not None:
+            config.skip_actions = skip_actions
+        if fix_test_calls is not None:
+            config.fix_test_calls = fix_test_calls
 
         # Apply validation method override if specified
         if validation_method is not None:
@@ -457,7 +471,7 @@ def lint(
             config.cache.default_ttl_seconds = cache_ttl
             logger.debug(f"Cache TTL overridden to {cache_ttl} seconds")
 
-        logger.info(f"Starting gha-workflow-linter {__version__}")
+        logger.debug(f"Starting gha-workflow-linter {__version__}")
 
         # Skip GitHub token operations if Git method is explicitly chosen
         effective_token = None
@@ -509,7 +523,7 @@ def lint(
                 raise
 
         # Only show scanning path if we're actually going to proceed
-        logger.info(f"Scanning path: {path}")
+        logger.debug(f"Scanning path: {path}")
 
         # Run the linting process
         exit_code = run_linter(config, cli_options)
@@ -763,14 +777,25 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             return 1
 
     # Auto-fix validation errors if enabled, or collect skipped testing items
-    fixed_files = {}
-    if (config.auto_fix or not config.fix_test_calls) and validation_errors:
-        try:
-            async def run_auto_fix() -> dict[Path, list[dict[str, str]]]:
-                async with AutoFixer(config) as auto_fixer:
-                    return await auto_fixer.fix_validation_errors(validation_errors)
+    fixed_files: dict[Path, list[dict[str, str]]] = {}
+    redirect_stats: dict[str, int] = {"actions_moved": 0, "calls_updated": 0}
+    stale_actions_summary: dict[str, list[dict[str, Any]]] = {}
 
-            fixed_files = asyncio.run(run_auto_fix())
+    # Determine if we should check for updates:
+    # - If auto_fix is enabled, always check all action calls for updates
+    # - Pass dry_run=True when auto_latest is disabled (report mode)
+    should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (validation_errors or config.auto_fix)
+    if should_run_auto_fix:
+        try:
+            async def run_auto_fix() -> tuple[dict[Path, list[dict[str, str]]], dict[str, int], dict[str, list[dict[str, Any]]]]:
+                async with AutoFixer(config, base_path=options.path) as auto_fixer:
+                    # When auto_fix is enabled, always pass all action calls
+                    # dry_run mode when auto_latest is disabled (just report, don't fix)
+                    all_calls = workflow_calls if config.auto_fix else None
+                    dry_run = config.auto_fix and not config.auto_latest
+                    return await auto_fixer.fix_validation_errors(validation_errors, all_calls, dry_run=dry_run)
+
+            fixed_files, redirect_stats, stale_actions_summary = asyncio.run(run_auto_fix())
 
             if fixed_files and not options.quiet:
                 # Separate skipped items from actual fixes
@@ -807,15 +832,16 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
                 # Display actual fixes
                 if files_with_fixes:
-                    console.print(f"\n[yellow]🔧 Auto-fixed issues in {len(files_with_fixes)} file(s):[/yellow]")
+                    total_workflow_calls_updated = sum(len(changes) for changes in files_with_fixes.values())
+                    console.print(f"\n[yellow]🔧 Updated {total_workflow_calls_updated} workflow call(s) in {len(files_with_fixes)} file(s):[/yellow]")
                     for file_path, changes in files_with_fixes.items():
                         console.print(f"\n[bold]📄 {_get_relative_path(file_path, options.path)}[/bold]")
                         for change in changes:
                             console.print(f"[red]  - {change['old_line'].strip()}[/red]")
                             console.print(f"[green]  + {change['new_line'].strip()}[/green]")
+                    console.print()  # Add blank line after changes
 
-                    console.print("\n[yellow]⚠️ Files have been modified. Please review changes and commit them.[/yellow]")
-                    console.print("[yellow]💡 Run the linter again after committing to verify fixes.[/yellow]")
+
 
         except Exception as e:
             logger.warning(f"Auto-fix failed: {e}")
@@ -847,7 +873,15 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             validation_errors,
             options.path,
             options.quiet,
+            fixed_files,
+            redirect_stats,
         )
+
+    # Handle dry-run mode (auto_fix enabled but auto_latest disabled)
+    # Display stale actions report after scan summary
+    if stale_actions_summary and not config.auto_latest and not options.quiet:
+        _display_stale_actions_from_summary(stale_actions_summary, options)
+        return 0
 
     # Determine exit code
     # If we auto-fixed files (not just skipped testing items), always exit with error to indicate changes were made
@@ -876,13 +910,20 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
 
 def _create_scan_summary_table(
-    scan_summary: dict[str, Any], validation_summary: dict[str, Any]
+    scan_summary: dict[str, Any],
+    validation_summary: dict[str, Any],
+    total_fixes: int = 0,
+    redirect_stats: dict[str, int] | None = None
 ) -> Table:
-    """Create the scan summary table."""
+    """Create the scan summary table.
+
+    This table is always displayed with the same structure regardless of CLI flags.
+    """
     table = Table(title="Scan Summary")
     table.add_column("Metric", style="cyan")
     table.add_column("Count", justify="right", style="magenta")
 
+    # Core metrics - always displayed
     table.add_row("Workflow files", str(scan_summary["total_files"]))
     table.add_row("Total action calls", str(scan_summary["total_calls"]))
     table.add_row("Action calls", str(scan_summary["action_calls"]))
@@ -891,7 +932,7 @@ def _create_scan_summary_table(
     table.add_row("Tag references", str(scan_summary["tag_references"]))
     table.add_row("Branch references", str(scan_summary["branch_references"]))
 
-    # Add validation efficiency metrics
+    # Validation efficiency metrics - always displayed when available
     if validation_summary.get("unique_calls_validated", 0) > 0:
         table.add_row(
             "Unique calls validated",
@@ -907,6 +948,15 @@ def _create_scan_summary_table(
             / validation_summary["total_calls"]
         ) * 100
         table.add_row("Validation efficiency", f"{efficiency:.1f}%")
+
+    # Update statistics - always displayed when checking for updates
+    if total_fixes > 0:
+        table.add_row("Action calls updated", str(total_fixes))
+
+    # Redirect statistics - always displayed when redirects are found
+    if redirect_stats and redirect_stats.get("actions_moved", 0) > 0:
+        table.add_row("Actions moved/relocated", str(redirect_stats["actions_moved"]))
+        table.add_row("Calls updated (relocated)", str(redirect_stats["calls_updated"]))
 
     return table
 
@@ -946,14 +996,15 @@ def _create_api_stats_table(validation_summary: dict[str, Any]) -> Table | None:
     return api_table
 
 
-def _display_validation_summary(validation_summary: dict[str, Any]) -> None:
+def _display_validation_summary(validation_summary: dict[str, Any], skip_success: bool = False) -> None:
     """Display validation results summary."""
     # Calculate actual errors (excluding test references)
     actual_errors = validation_summary["total_errors"] - validation_summary.get("test_references", 0)
     test_refs = validation_summary.get("test_references", 0)
 
     if actual_errors == 0 and test_refs == 0:
-        console.print("[green]✅ All action calls are valid![/green]")
+        if not skip_success:
+            console.print("[green]✅ All action calls are valid![/green]")
         return
 
     # Show actual errors
@@ -1009,12 +1060,60 @@ def _display_validation_summary(validation_summary: dict[str, Any]) -> None:
         )
 
 
+
+
+def _display_stale_actions_from_summary(
+    stale_actions: dict[str, list[dict[str, Any]]],
+    options: CLIOptions,
+) -> None:
+    """
+    Display a report of outdated action calls from a pre-built summary.
+
+    Args:
+        stale_actions: Dictionary mapping relative file paths to lists of stale action info
+        options: CLI options
+    """
+    console = Console()
+
+    if not stale_actions:
+        console.print("[green]✅ All action calls are up to date![/green]\n")
+        return
+
+    stale_count = sum(len(actions) for actions in stale_actions.values())
+
+    console.print(f"\n[yellow]Found {stale_count} outdated action call(s) in {len(stale_actions)} file(s):[/yellow]\n")
+
+    for file_path in sorted(stale_actions.keys()):
+        console.print(f"[bold]📄 {file_path}[/bold]")
+        for action_info in stale_actions[file_path]:
+            current_display = action_info['current_ref'][:12] + "..." if len(action_info['current_ref']) > 40 else action_info['current_ref']
+            latest_display = action_info['latest_ref'][:12] + "..." if len(action_info['latest_ref']) > 40 else action_info['latest_ref']
+
+            # Show action with redirect indicator if applicable
+            action_display = action_info['action']
+            if action_info.get('redirected', False):
+                action_display += " [orange3](moved/relocated)[/orange3]"
+
+            console.print(f"  [yellow]Line {action_info['line']}:[/yellow] {action_display}")
+            console.print(f"    [red]Current:[/red]  @{current_display}", end="")
+            if action_info['current_comment']:
+                console.print(f" [dim]# {action_info['current_comment'].lstrip('#').strip()}[/dim]")
+            else:
+                console.print()
+            console.print(f"    [green]Latest:[/green]   @{latest_display} [dim]# {action_info['latest_version']}[/dim]")
+        console.print()
+
+    console.print(f"[cyan]💡 Run with [bold]--auto-fix --auto-latest[/bold] to update these actions[/cyan]\n")
+
+
 def output_text_results(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
     errors: list[Any],
     scan_path: Path,
     quiet: bool = False,
+    fixed_files: dict[Path, list[dict[str, str]]] | None = None,
+    redirect_stats: dict[str, int] | None = None,
 ) -> None:
     """
     Output results in human-readable text format.
@@ -1025,10 +1124,20 @@ def output_text_results(
         errors: List of validation errors
         scan_path: Base path for computing relative paths
         quiet: Whether to suppress non-error output
+        fixed_files: Dictionary of files that were auto-fixed
+        redirect_stats: Statistics about redirected/relocated actions
     """
     if not quiet:
-        # Display scan summary
-        table = _create_scan_summary_table(scan_summary, validation_summary)
+        # Count total action calls fixed
+        total_fixes = 0
+        if fixed_files:
+            for changes in fixed_files.values():
+                for change in changes:
+                    if change.get("skipped") != "true":
+                        total_fixes += 1
+
+        # Display scan summary (with redirect stats if available)
+        table = _create_scan_summary_table(scan_summary, validation_summary, total_fixes, redirect_stats)
 
         # Display API statistics if available
         api_table = _create_api_stats_table(validation_summary)
@@ -1036,10 +1145,24 @@ def output_text_results(
             console.print(api_table)
 
         console.print(table)
-        console.print()
 
-        # Display validation summary
-        _display_validation_summary(validation_summary)
+        # Check if files were modified
+        has_actual_fixes = False
+        if fixed_files:
+            for changes in fixed_files.values():
+                for change in changes:
+                    if change.get("skipped") != "true":
+                        has_actual_fixes = True
+                        break
+                if has_actual_fixes:
+                    break
+
+        # Display validation summary (but skip "all valid" message if files were modified)
+        _display_validation_summary(validation_summary, skip_success=has_actual_fixes)
+
+        # Display modification message after scan summary if files were modified
+        if has_actual_fixes:
+            console.print("\n[yellow]⚠️ Files have been modified; please review the changes and commit them.[/yellow]")
 
     # Separate errors by type
     if errors:

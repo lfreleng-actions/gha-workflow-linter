@@ -54,7 +54,7 @@ class WorkflowScanner:
         Yields:
             Path objects for workflow files and action definition files
         """
-        self.logger.info(f"Scanning for workflows and actions in: {root_path}")
+        self.logger.debug(f"Scanning for workflows and actions in: {root_path}")
 
         # Look for .github/workflows directories
         workflow_dirs = self._find_workflow_directories(root_path)
@@ -101,7 +101,7 @@ class WorkflowScanner:
                 self.logger.debug(f"Found action file: {action_file}")
                 yield action_file
 
-        self.logger.info(f"Found {total_files} workflow and action files")
+        self.logger.debug(f"Found {total_files} workflow and action files")
 
     def _find_workflow_directories(self, root_path: Path) -> set[Path]:
         """
@@ -264,7 +264,7 @@ class WorkflowScanner:
                 continue
 
         total_calls = sum(len(calls) for calls in results.values())
-        self.logger.info(
+        self.logger.debug(
             f"Scan complete: {len(results)} files, {total_calls} action/workflow calls"
         )
 
