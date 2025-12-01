@@ -25,6 +25,25 @@ __all__ = [
 ]
 
 
+class RepositoryRedirect(BaseModel):  # type: ignore[misc]
+    """Represents a repository that has moved to a new location."""
+
+    model_config = ConfigDict(frozen=True)
+
+    old_repository: str = Field(..., description="Original repository name (org/repo)")
+    new_repository: str = Field(..., description="New repository name (org/repo)")
+    timestamp: float = Field(..., description="Unix timestamp when redirect was discovered")
+
+    def is_expired(self, ttl_seconds: int) -> bool:
+        """Check if the redirect entry has expired."""
+        return time.time() - self.timestamp > ttl_seconds
+
+    @property
+    def age_seconds(self) -> float:
+        """Get the age of this redirect entry in seconds."""
+        return time.time() - self.timestamp
+
+
 class CachedValidationEntry(BaseModel):  # type: ignore[misc]
     """Represents a cached validation result entry."""
 
@@ -105,6 +124,7 @@ class ValidationCache:
             cleanup_removed=0,
         )
         self._cache: dict[str, CachedValidationEntry] = {}
+        self._redirects: dict[str, RepositoryRedirect] = {}
         self._cache_version: str = __version__
         self._loaded = False
 
@@ -137,6 +157,14 @@ class ValidationCache:
             with open(self.config.cache_file_path, encoding="utf-8") as f:
                 cache_data = json.load(f)
 
+            # Load repository redirects
+            redirects_data = cache_data.get("redirects", {})
+            for old_repo, redirect_info in redirects_data.items():
+                try:
+                    self._redirects[old_repo] = RepositoryRedirect(**redirect_info)
+                except Exception as e:
+                    self.logger.debug(f"Failed to load redirect for {old_repo}: {e}")
+
             # Check cache version compatibility
             cache_version = cache_data.get("_metadata", {}).get("version")
             if cache_version != __version__:
@@ -154,10 +182,10 @@ class ValidationCache:
                 self._loaded = True
                 return
 
-            # Load cache entries (skip metadata)
+            # Load cache entries (skip metadata and redirects)
             entry_count = 0
             for key, entry_data in cache_data.items():
-                if key == "_metadata":
+                if key in ("_metadata", "redirects"):
                     continue
                 try:
                     entry = CachedValidationEntry(**entry_data)
@@ -168,7 +196,7 @@ class ValidationCache:
                         f"Invalid cache entry for key {key}: {e}"
                     )
 
-            self.logger.info(
+            self.logger.debug(
                 f"Loaded {entry_count} entries from cache (version {cache_version})"
             )
 
@@ -204,11 +232,19 @@ class ValidationCache:
                     "version": __version__,
                     "created_timestamp": time.time(),
                     "entry_count": len(self._cache),
+                    "redirect_count": len(self._redirects),
                 }
             }
 
             for key, entry in self._cache.items():
                 cache_data[key] = entry.model_dump()
+
+            # Add repository redirects
+            if self._redirects:
+                cache_data["redirects"] = {
+                    old_repo: redirect.model_dump()
+                    for old_repo, redirect in self._redirects.items()
+                }
 
             # Use atomic write to prevent corruption
             temp_file = self.config.cache_file_path.with_suffix(".tmp")
@@ -640,6 +676,56 @@ class ValidationCache:
             return True
 
         return False
+
+    def get_redirect(self, old_repository: str) -> str | None:
+        """
+        Get the new repository location if it has been redirected.
+
+        Args:
+            old_repository: Original repository name (org/repo)
+
+        Returns:
+            New repository name if a redirect exists, None otherwise
+        """
+        if not self.config.enabled:
+            return None
+
+        self._load_cache()
+
+        redirect = self._redirects.get(old_repository)
+        if redirect:
+            # Check if redirect has expired
+            if redirect.is_expired(self.config.default_ttl_seconds):
+                self.logger.debug(f"Redirect for {old_repository} has expired")
+                del self._redirects[old_repository]
+                return None
+
+            self.logger.debug(f"Found redirect: {old_repository} -> {redirect.new_repository}")
+            return redirect.new_repository
+
+        return None
+
+    def put_redirect(self, old_repository: str, new_repository: str) -> None:
+        """
+        Record a repository redirect.
+
+        Args:
+            old_repository: Original repository name (org/repo)
+            new_repository: New repository name (org/repo)
+        """
+        if not self.config.enabled:
+            return
+
+        self._load_cache()
+
+        redirect = RepositoryRedirect(
+            old_repository=old_repository,
+            new_repository=new_repository,
+            timestamp=time.time()
+        )
+
+        self._redirects[old_repository] = redirect
+        self.logger.debug(f"Recorded repository redirect: {old_repository} -> {new_repository}")
 
     def save(self) -> None:
         """Force save cache to disk."""
