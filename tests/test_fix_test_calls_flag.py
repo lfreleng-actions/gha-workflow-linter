@@ -269,7 +269,11 @@ jobs:
         ]
 
         async with AutoFixer(config) as fixer:
-            fixed_files = await fixer.fix_validation_errors(validation_errors)
+            (
+                fixed_files,
+                redirect_stats,
+                stale_actions_summary,
+            ) = await fixer.fix_validation_errors(validation_errors)
 
         # Should return empty dict or skipped items, not actual fixes
         if temp_file in fixed_files:

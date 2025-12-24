@@ -46,14 +46,16 @@ class ActionCallPatterns:
     # Pattern to detect commit SHA (40 hex characters)
     COMMIT_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$", re.IGNORECASE)
 
-    # Pattern to detect semantic version tags
-    SEMVER_PATTERN = re.compile(
-        r"^v?(?P<major>0|[1-9]\d*)"
-        r"\.(?P<minor>0|[1-9]\d*)"
-        r"\.(?P<patch>0|[1-9]\d*)"
-        r"(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
-        r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))"
-        r"?(?:\+(?P<buildmetadata>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
+    # Pattern to detect clean version tags (sanitized version pattern)
+    # This is NOT strict semver - it accepts version tags with optional patch numbers
+    # Accepts: v4.31.0, v4.31, 4.31, v0.9, 0.9, 1.0
+    # Rejects: v4.31.6alpha, v4.31.6-test, v4.31.6-rc1, codeql-bundle-v2.23.6
+    VERSION_TAG_PATTERN = re.compile(
+        r"^v?"  # Optional 'v' prefix
+        r"(?P<major>0|[1-9]\d*)"  # Major version
+        r"\.(?P<minor>0|[1-9]\d*)"  # Minor version (required)
+        r"(?:\.(?P<patch>0|[1-9]\d*))?"  # Patch version (optional)
+        r"$"  # End of string - no trailing characters allowed
     )
 
     @classmethod
@@ -117,8 +119,8 @@ class ActionCallPatterns:
         if cls.COMMIT_SHA_PATTERN.match(reference):
             return ReferenceType.COMMIT_SHA
 
-        # Check if it's a semantic version tag
-        if cls.SEMVER_PATTERN.match(reference):
+        # Check if it's a clean version tag
+        if cls.VERSION_TAG_PATTERN.match(reference):
             return ReferenceType.TAG
 
         # Check for other common tag patterns
