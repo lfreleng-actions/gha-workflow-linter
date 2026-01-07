@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
     from rich.progress import Progress, TaskID
 
@@ -54,7 +54,7 @@ class WorkflowScanner:
         Yields:
             Path objects for workflow files and action definition files
         """
-        self.logger.info(f"Scanning for workflows and actions in: {root_path}")
+        self.logger.debug(f"Scanning for workflows and actions in: {root_path}")
 
         # Look for .github/workflows directories
         workflow_dirs = self._find_workflow_directories(root_path)
@@ -101,7 +101,7 @@ class WorkflowScanner:
                 self.logger.debug(f"Found action file: {action_file}")
                 yield action_file
 
-        self.logger.info(f"Found {total_files} workflow and action files")
+        self.logger.debug(f"Found {total_files} workflow and action files")
 
     def _find_workflow_directories(self, root_path: Path) -> set[Path]:
         """
@@ -235,6 +235,7 @@ class WorkflowScanner:
         root_path: Path,
         progress: Progress | None = None,
         task_id: TaskID | None = None,
+        specific_files: list[str] | None = None,
     ) -> dict[Path, dict[int, ActionCall]]:
         """
         Scan directory for workflows and parse all action calls.
@@ -243,6 +244,7 @@ class WorkflowScanner:
             root_path: Root directory to scan
             progress: Optional progress bar
             task_id: Optional task ID for progress updates
+            specific_files: Optional list of specific files to scan (supports wildcards)
 
         Returns:
             Dictionary mapping file paths to their action calls
@@ -250,25 +252,148 @@ class WorkflowScanner:
 
         results: dict[Path, dict[int, ActionCall]] = {}
 
-        for workflow_file in self.find_workflow_files(
-            root_path, progress, task_id
-        ):
-            try:
-                action_calls = self.parse_workflow_file(workflow_file)
-                if action_calls:
-                    results[workflow_file] = action_calls
-            except Exception as e:
-                self.logger.error(
-                    f"Error processing workflow file {workflow_file}: {e}"
-                )
-                continue
+        # If specific files are provided, scan only those files
+        if specific_files:
+            workflow_files = self._resolve_specific_files(root_path, specific_files)
+            for workflow_file in workflow_files:
+                if progress and task_id:
+                    progress.update(
+                        task_id,
+                        description=f"Scanning {workflow_file.name}...",
+                    )
+                try:
+                    action_calls = self.parse_workflow_file(workflow_file)
+                    if action_calls:
+                        results[workflow_file] = action_calls
+                except Exception as e:
+                    self.logger.error(
+                        f"Error processing workflow file {workflow_file}: {e}"
+                    )
+                    continue
+        else:
+            # Default behavior: scan all workflow files
+            for workflow_file in self.find_workflow_files(
+                root_path, progress, task_id
+            ):
+                try:
+                    action_calls = self.parse_workflow_file(workflow_file)
+                    if action_calls:
+                        results[workflow_file] = action_calls
+                except Exception as e:
+                    self.logger.error(
+                        f"Error processing workflow file {workflow_file}: {e}"
+                    )
+                    continue
 
         total_calls = sum(len(calls) for calls in results.values())
-        self.logger.info(
+        self.logger.debug(
             f"Scan complete: {len(results)} files, {total_calls} action/workflow calls"
         )
 
         return results
+
+    def _resolve_specific_files(
+        self, root_path: Path, file_patterns: list[str]
+    ) -> list[Path]:
+        """
+        Resolve specific file patterns to actual file paths.
+
+        Supports:
+        - Absolute paths
+        - Relative paths (resolved from root_path)
+        - Wildcards (glob patterns)
+
+        Args:
+            root_path: Root directory for resolving relative paths
+            file_patterns: List of file patterns (can include wildcards)
+
+        Returns:
+            List of resolved file paths
+        """
+        resolved_files: list[Path] = []
+
+        for pattern in file_patterns:
+            pattern_path = Path(pattern)
+
+            # Handle absolute paths
+            if pattern_path.is_absolute():
+                if "*" in pattern or "?" in pattern:
+                    # Glob pattern with absolute path
+                    parent = pattern_path.parent
+                    if parent.exists():
+                        matches = list(parent.glob(pattern_path.name))
+                        for match in matches:
+                            if match.is_file() and self._is_workflow_or_action_file(match):
+                                resolved_files.append(match)
+                elif pattern_path.is_file():
+                    if self._is_workflow_or_action_file(pattern_path):
+                        resolved_files.append(pattern_path)
+                    else:
+                        self.logger.warning(
+                            f"File {pattern_path} is not a workflow or action file"
+                        )
+                else:
+                    self.logger.warning(f"File not found: {pattern_path}")
+            else:
+                # Handle relative paths
+                if "*" in pattern or "?" in pattern:
+                    # Glob pattern - search from root_path
+                    matches = list(root_path.glob(pattern))
+                    for match in matches:
+                        if match.is_file() and self._is_workflow_or_action_file(match):
+                            resolved_files.append(match)
+
+                    # Also try recursive glob if pattern doesn't start with **
+                    if not pattern.startswith("**"):
+                        recursive_pattern = f"**/{pattern}"
+                        matches = list(root_path.glob(recursive_pattern))
+                        for match in matches:
+                            if match.is_file() and self._is_workflow_or_action_file(match):
+                                if match not in resolved_files:
+                                    resolved_files.append(match)
+                else:
+                    # Direct file path relative to root_path
+                    full_path = root_path / pattern
+                    if full_path.is_file():
+                        if self._is_workflow_or_action_file(full_path):
+                            resolved_files.append(full_path)
+                        else:
+                            self.logger.warning(
+                                f"File {full_path} is not a workflow or action file"
+                            )
+                    else:
+                        self.logger.warning(f"File not found: {full_path}")
+
+        if not resolved_files:
+            self.logger.warning(
+                f"No workflow or action files found matching patterns: {file_patterns}"
+            )
+
+        return resolved_files
+
+    def _is_workflow_or_action_file(self, file_path: Path) -> bool:
+        """
+        Check if a file is a workflow or action definition file.
+
+        Args:
+            file_path: Path to check
+
+        Returns:
+            True if file is a workflow or action file
+        """
+        # Check extension
+        if file_path.suffix not in self.config.scan_extensions:
+            return False
+
+        # Check if it's an action file
+        if file_path.name in ["action.yml", "action.yaml"]:
+            return True
+
+        # Check if it's in a workflows directory
+        if ".github/workflows" in str(file_path):
+            return True
+
+        return False
 
     def get_scan_summary(
         self, results: dict[Path, dict[int, ActionCall]]

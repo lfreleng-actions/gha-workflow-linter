@@ -11,6 +11,8 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .system_utils import get_default_workers
+
 
 class LogLevel(str, Enum):
     """Available log levels."""
@@ -357,7 +359,10 @@ class Config(BaseModel):
     model_config = ConfigDict()
 
     log_level: LogLevel = Field(LogLevel.INFO, description="Logging level")
-    parallel_workers: int = Field(4, description="Number of parallel workers")
+    parallel_workers: int = Field(
+        default_factory=get_default_workers,
+        description="Number of parallel workers (auto-detects based on CPU count)"
+    )
     scan_extensions: list[str] = Field(
         default_factory=lambda: [".yml", ".yaml"],
         description="Workflow file extensions to scan",
@@ -375,7 +380,10 @@ class Config(BaseModel):
         True, description="Automatically fix broken/invalid references"
     )
     auto_latest: bool = Field(
-        True, description="Use latest versions when auto-fixing"
+        False, description="Use latest versions when auto-fixing"
+    )
+    allow_prerelease: bool = Field(
+        False, description="Allow prerelease versions when finding latest versions"
     )
     two_space_comments: bool = Field(
         False, description="Use two spaces before inline comments"
@@ -442,20 +450,26 @@ class CLIOptions(BaseModel):
     exclude: list[str] | None = Field(
         None, description="Patterns to exclude from scanning"
     )
-    auto_fix: bool = Field(
-        True, description="Automatically fix broken/invalid references"
+    auto_fix: bool | None = Field(
+        None, description="Automatically fix broken/invalid references"
     )
-    auto_latest: bool = Field(
-        True, description="Use latest versions when auto-fixing"
+    auto_latest: bool | None = Field(
+        None, description="Use latest versions when auto-fixing"
     )
-    two_space_comments: bool = Field(
-        False, description="Use two spaces before inline comments"
+    allow_prerelease: bool | None = Field(
+        None, description="Allow prerelease versions when finding latest versions"
     )
-    skip_actions: bool = Field(
-        False, description="Skip scanning action.yaml/action.yml files"
+    two_space_comments: bool | None = Field(
+        None, description="Use two spaces before inline comments"
     )
-    fix_test_calls: bool = Field(
-        False, description="Enable auto-fixing action calls with 'test' in comments"
+    skip_actions: bool | None = Field(
+        None, description="Skip scanning action.yaml/action.yml files"
+    )
+    fix_test_calls: bool | None = Field(
+        None, description="Fix action calls with test comments"
+    )
+    files: list[str] | None = Field(
+        None, description="Specific files to scan (supports wildcards)"
     )
 
     @field_validator("output_format")
