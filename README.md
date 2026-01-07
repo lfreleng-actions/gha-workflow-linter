@@ -188,11 +188,16 @@ The linter can automatically fix invalid action references and pin them to
 commit SHAs:
 
 ```bash
-# Enable auto-fix (default: disabled)
+# Enable auto-fix (default: enabled unless overridden in config)
 gha-workflow-linter lint --auto-fix
 
-# Auto-fix uses latest versions by default
-# Disable to keep current versions
+# Disable auto-fix
+gha-workflow-linter lint --no-auto-fix
+
+# Auto-fix with latest versions (default: disabled unless overridden in config)
+gha-workflow-linter lint --auto-fix --auto-latest
+
+# Auto-fix without using latest versions (keeps current version)
 gha-workflow-linter lint --auto-fix --no-auto-latest
 ```
 
@@ -289,7 +294,7 @@ Create `~/.config/gha-workflow-linter/config.yaml` or use `--config`:
 # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
 log_level: INFO
 
-# Number of parallel workers (1-32)
+# Number of parallel workers (1-32, auto-detected if not specified)
 parallel_workers: 4
 
 # File extensions to scan
@@ -304,6 +309,24 @@ exclude_patterns:
 
 # Require actions using commit SHAs (default: true)
 require_pinned_sha: true
+
+# Auto-fix broken/invalid references (default: true)
+auto_fix: true
+
+# Use latest versions when auto-fixing (default: false)
+auto_latest: false
+
+# Allow prerelease versions when finding latest versions (default: false)
+allow_prerelease: false
+
+# Use two spaces before inline comments when fixing (default: false)
+two_space_comments: false
+
+# Skip scanning action.yaml/action.yml files (default: false)
+skip_actions: false
+
+# Enable auto-fixing action calls with 'test' in comments (default: false)
+fix_test_calls: false
 
 # Git configuration
 git:
@@ -607,18 +630,24 @@ gha-workflow-linter lint --format json
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                | Description                           | Required | Default |
-| -------------------- | ------------------------------------- | -------- | ------- |
-| `path`               | Path to scan for workflows            | No       | `.`     |
-| `config-file`        | Path to configuration file            | No       |         |
-| `github-token`       | GitHub API token                      | No       |         |
-| `log-level`          | Logging level                         | No       | `INFO`  |
-| `output-format`      | Output format (text, json)            | No       | `text`  |
-| `fail-on-error`      | Exit with error on failures           | No       | `true`  |
-| `parallel`           | Enable parallel processing            | No       | `true`  |
-| `workers`            | Number of parallel workers            | No       | `4`     |
-| `exclude`            | Comma-separated exclude patterns      | No       |         |
-| `require-pinned-sha` | Require actions pinned to commit SHAs | No       | `true`  |
+| Input                | Description                                  | Required | Default |
+| -------------------- | -------------------------------------------- | -------- | ------- |
+| `path`               | Path to scan for workflows                   | No       | `.`     |
+| `config-file`        | Path to configuration file                   | No       |         |
+| `github-token`       | GitHub API token                             | No       |         |
+| `log-level`          | Logging level                                | No       | `INFO`  |
+| `output-format`      | Output format (text, json)                   | No       | `text`  |
+| `fail-on-error`      | Exit with error on failures                  | No       | `true`  |
+| `parallel`           | Enable parallel processing                   | No       | `true`  |
+| `workers`            | Number of parallel workers                   | No       | Auto    |
+| `exclude`            | Comma-separated exclude patterns             | No       |         |
+| `require-pinned-sha` | Require actions pinned to commit SHAs        | No       | `true`  |
+| `auto-fix`           | Auto-fix broken/invalid references           | No       | `true`  |
+| `auto-latest`        | Use latest versions when auto-fixing         | No       | `false` |
+| `allow-prerelease`   | Allow prerelease versions for latest         | No       | `false` |
+| `two-space-comments` | Use two spaces before inline comments        | No       | `false` |
+| `skip-actions`       | Skip scanning action.yaml/action.yml files   | No       | `false` |
+| `fix-test-calls`     | Fix actions with 'test' in comments          | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -655,12 +684,26 @@ Options:
   --no-fail-on-error         Don't exit with error code
   --parallel                 Enable parallel processing
   --no-parallel              Disable parallel processing
-  -j, --workers INTEGER      Number of parallel workers (1-32)
+  -j, --workers INTEGER      Number of parallel workers (1-32, auto-detected)
   -e, --exclude PATTERN      Patterns to exclude (multiples accepted)
   --require-pinned-sha       Require actions pinned to commit SHAs (default)
   --no-require-pinned-sha    Allow actions with tags/branches
+  --auto-fix                 Auto-fix broken/invalid references
+  --no-auto-fix              Disable auto-fixing
+  --auto-latest              Use latest versions when auto-fixing
+  --no-auto-latest           Don't use latest versions when auto-fixing
+  --allow-prerelease         Allow prerelease versions for latest
+  --no-allow-prerelease      Disallow prerelease versions
+  --two-space-comments       Use two spaces before inline comments
+  --no-two-space-comments    Use single space before inline comments
+  --skip-actions             Skip scanning action.yaml/action.yml files
+  --no-skip-actions          Scan action.yaml/action.yml files (default)
+  --fix-test-calls           Fix actions with 'test' in comments
   --version                  Show version and exit
   --help                     Show this message and exit
+
+Note: Most boolean options use config file defaults when not specified.
+      CLI flags override config file settings.
 ```
 
 ## Integration Examples

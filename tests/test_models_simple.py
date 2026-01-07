@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-"""Simple tests for models module to improve coverage."""
+"""Simple tests for models module."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -406,7 +407,7 @@ class TestConfig:
         config = Config()
 
         assert config.log_level == LogLevel.INFO
-        assert config.parallel_workers == 4
+        assert config.parallel_workers == os.cpu_count()
         assert config.scan_extensions == [".yml", ".yaml"]
         assert config.exclude_patterns == []
         assert isinstance(config.network, NetworkConfig)

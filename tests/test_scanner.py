@@ -485,3 +485,239 @@ jobs:
         # Should never exclude when no patterns configured
         assert not scanner._should_exclude_file(Path("test.yml"))
         assert not scanner._should_exclude_file(Path("anything.yaml"))
+
+    def test_scan_directory_with_specific_files(self) -> None:
+        """Test scanning specific files instead of entire directory."""
+        workflow1 = """
+name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+        workflow2 = """
+name: Deploy
+on: [release]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v3
+"""
+
+        temp_dir = Path(tempfile.mkdtemp())
+        github_dir = temp_dir / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+
+        ci_file = github_dir / "ci.yml"
+        deploy_file = github_dir / "deploy.yml"
+        ci_file.write_text(workflow1)
+        deploy_file.write_text(workflow2)
+
+        try:
+            # Scan only the ci.yml file
+            relative_path = ".github/workflows/ci.yml"
+            results = self.scanner.scan_directory(
+                temp_dir, specific_files=[relative_path]
+            )
+
+            assert len(results) == 1
+            assert list(results.keys())[0].name == "ci.yml"
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+
+    def test_scan_directory_with_wildcard_files(self) -> None:
+        """Test scanning files matching wildcard patterns."""
+        workflow_content = """
+name: Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+
+        temp_dir = Path(tempfile.mkdtemp())
+        github_dir = temp_dir / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+
+        (github_dir / "ci.yml").write_text(workflow_content)
+        (github_dir / "deploy.yml").write_text(workflow_content)
+        (github_dir / "test.yaml").write_text(workflow_content)
+
+        try:
+            # Scan only .yml files (not .yaml)
+            results = self.scanner.scan_directory(
+                temp_dir, specific_files=[".github/workflows/*.yml"]
+            )
+
+            assert len(results) == 2
+            file_names = {path.name for path in results}
+            assert "ci.yml" in file_names
+            assert "deploy.yml" in file_names
+            assert "test.yaml" not in file_names
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+
+    def test_scan_directory_with_multiple_specific_files(self) -> None:
+        """Test scanning multiple specific files."""
+        workflow_content = """
+name: Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+
+        temp_dir = Path(tempfile.mkdtemp())
+        github_dir = temp_dir / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+
+        (github_dir / "ci.yml").write_text(workflow_content)
+        (github_dir / "deploy.yml").write_text(workflow_content)
+        (github_dir / "test.yml").write_text(workflow_content)
+
+        try:
+            # Scan specific files by name
+            results = self.scanner.scan_directory(
+                temp_dir,
+                specific_files=[
+                    ".github/workflows/ci.yml",
+                    ".github/workflows/test.yml",
+                ],
+            )
+
+            assert len(results) == 2
+            file_names = {path.name for path in results}
+            assert "ci.yml" in file_names
+            assert "test.yml" in file_names
+            assert "deploy.yml" not in file_names
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+
+    def test_resolve_specific_files_absolute_path(self) -> None:
+        """Test resolving absolute file paths."""
+        workflow_content = """
+name: Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+
+        temp_dir = Path(tempfile.mkdtemp())
+        github_dir = temp_dir / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+
+        workflow_file = github_dir / "test.yml"
+        workflow_file.write_text(workflow_content)
+
+        try:
+            # Use absolute path
+            resolved = self.scanner._resolve_specific_files(
+                temp_dir, [str(workflow_file.resolve())]
+            )
+
+            assert len(resolved) == 1
+            assert resolved[0] == workflow_file.resolve()
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+
+    def test_resolve_specific_files_relative_path(self) -> None:
+        """Test resolving relative file paths."""
+        workflow_content = """
+name: Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+
+        temp_dir = Path(tempfile.mkdtemp())
+        github_dir = temp_dir / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+
+        workflow_file = github_dir / "test.yml"
+        workflow_file.write_text(workflow_content)
+
+        try:
+            # Use relative path
+            resolved = self.scanner._resolve_specific_files(
+                temp_dir, [".github/workflows/test.yml"]
+            )
+
+            assert len(resolved) == 1
+            assert resolved[0].name == "test.yml"
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+
+    def test_resolve_specific_files_with_wildcards(self) -> None:
+        """Test resolving file paths with wildcard patterns."""
+        workflow_content = """
+name: Test
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+"""
+
+        temp_dir = Path(tempfile.mkdtemp())
+        github_dir = temp_dir / ".github" / "workflows"
+        github_dir.mkdir(parents=True)
+
+        (github_dir / "ci.yml").write_text(workflow_content)
+        (github_dir / "deploy.yml").write_text(workflow_content)
+        (github_dir / "test.yaml").write_text(workflow_content)
+
+        try:
+            # Use wildcard pattern
+            resolved = self.scanner._resolve_specific_files(temp_dir, ["*.yml"])
+
+            assert len(resolved) == 2
+            file_names = {f.name for f in resolved}
+            assert "ci.yml" in file_names
+            assert "deploy.yml" in file_names
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir)
+
+    def test_is_workflow_or_action_file(self) -> None:
+        """Test checking if a file is a workflow or action file."""
+        # Workflow file
+        assert self.scanner._is_workflow_or_action_file(
+            Path(".github/workflows/ci.yml")
+        )
+        assert self.scanner._is_workflow_or_action_file(
+            Path(".github/workflows/deploy.yaml")
+        )
+
+        # Action file
+        assert self.scanner._is_workflow_or_action_file(Path("action.yml"))
+        assert self.scanner._is_workflow_or_action_file(Path("action.yaml"))
+
+        # Not workflow or action file
+        assert not self.scanner._is_workflow_or_action_file(Path("random.yml"))
+        assert not self.scanner._is_workflow_or_action_file(Path("config.yaml"))
+        assert not self.scanner._is_workflow_or_action_file(Path("test.txt"))

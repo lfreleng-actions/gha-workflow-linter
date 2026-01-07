@@ -7,22 +7,73 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 import time
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from rich.console import Console
 
 from ._version import __version__
-from .models import CacheConfig, ValidationMethod, ValidationResult  # noqa: TC001
+from .models import (  # noqa: TC001
+    CacheConfig,
+    ValidationMethod,
+    ValidationResult,
+)
 
 # Re-export CacheConfig for backward compatibility
 __all__ = [
     "CacheConfig",
     "CachedValidationEntry",
+    "LatestVersionEntry",
+    "RepositoryRedirect",
     "CacheStats",
     "ValidationCache",
 ]
+
+
+class RepositoryRedirect(BaseModel):
+    """Represents a repository that has moved to a new location."""
+
+    model_config = ConfigDict(frozen=True)
+
+    old_repository: str = Field(
+        ..., description="Original repository name (org/repo)"
+    )
+    new_repository: str = Field(
+        ..., description="New repository name (org/repo)"
+    )
+    timestamp: float = Field(
+        ..., description="Unix timestamp when redirect was discovered"
+    )
+
+    def is_expired(self, ttl_seconds: int) -> bool:
+        """Check if the redirect entry has expired."""
+        return time.time() - self.timestamp > ttl_seconds
+
+    @property
+    def age_seconds(self) -> float:
+        """Get the age of this redirect entry in seconds."""
+        return time.time() - self.timestamp
+
+
+class LatestVersionEntry(BaseModel):
+    """Represents a cached latest version entry for a repository."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repository: str = Field(..., description="Full repository name (org/repo)")
+    latest_tag: str = Field(..., description="Latest release/tag name")
+    latest_sha: str = Field(..., description="SHA for the latest tag")
+    timestamp: float = Field(..., description="Unix timestamp when cached")
+
+    def is_expired(self, ttl_seconds: int) -> bool:
+        """Check if the cache entry has expired."""
+        return time.time() - self.timestamp > ttl_seconds
+
+    @property
+    def age_seconds(self) -> float:
+        """Get the age of this cache entry in seconds."""
+        return time.time() - self.timestamp
 
 
 class CachedValidationEntry(BaseModel):
@@ -105,6 +156,8 @@ class ValidationCache:
             cleanup_removed=0,
         )
         self._cache: dict[str, CachedValidationEntry] = {}
+        self._redirects: dict[str, RepositoryRedirect] = {}
+        self._latest_versions: dict[str, LatestVersionEntry] = {}
         self._cache_version: str = __version__
         self._loaded = False
 
@@ -137,27 +190,54 @@ class ValidationCache:
             with open(self.config.cache_file_path, encoding="utf-8") as f:
                 cache_data = json.load(f)
 
+            # Load repository redirects
+            redirects_data = cache_data.get("redirects", {})
+            for old_repo, redirect_info in redirects_data.items():
+                try:
+                    self._redirects[old_repo] = RepositoryRedirect(
+                        **redirect_info
+                    )
+                except Exception as e:
+                    self.logger.debug(
+                        f"Failed to load redirect for {old_repo}: {e}"
+                    )
+
+            # Load latest versions
+            latest_versions_data = cache_data.get("latest_versions", {})
+            for repo, version_info in latest_versions_data.items():
+                try:
+                    self._latest_versions[repo] = LatestVersionEntry(
+                        **version_info
+                    )
+                except Exception as e:
+                    self.logger.debug(
+                        f"Failed to load latest version for {repo}: {e}"
+                    )
+
             # Check cache version compatibility
             cache_version = cache_data.get("_metadata", {}).get("version")
             if cache_version != __version__:
                 if cache_version:
-                    self.logger.info(
+                    self.logger.debug(
                         f"Cache version mismatch (cache: {cache_version}, "
                         f"current: {__version__}). Purging cache for consistency."
                     )
                 else:
-                    self.logger.info(
+                    self.logger.debug(
                         "Legacy cache format detected (no version info). "
                         "Purging cache for consistency."
                     )
+                Console().print(
+                    "[cyan]♻️  Cache version mismatch; purging cache to ensure consistency[/cyan]"
+                )
                 self._purge_cache_file()
                 self._loaded = True
                 return
 
-            # Load cache entries (skip metadata)
+            # Load cache entries (skip metadata, redirects, and latest_versions)
             entry_count = 0
             for key, entry_data in cache_data.items():
-                if key == "_metadata":
+                if key in ("_metadata", "redirects", "latest_versions"):
                     continue
                 try:
                     entry = CachedValidationEntry(**entry_data)
@@ -168,7 +248,7 @@ class ValidationCache:
                         f"Invalid cache entry for key {key}: {e}"
                     )
 
-            self.logger.info(
+            self.logger.debug(
                 f"Loaded {entry_count} entries from cache (version {cache_version})"
             )
 
@@ -204,11 +284,27 @@ class ValidationCache:
                     "version": __version__,
                     "created_timestamp": time.time(),
                     "entry_count": len(self._cache),
+                    "redirect_count": len(self._redirects),
+                    "latest_version_count": len(self._latest_versions),
                 }
             }
 
             for key, entry in self._cache.items():
                 cache_data[key] = entry.model_dump()
+
+            # Add repository redirects
+            if self._redirects:
+                cache_data["redirects"] = {
+                    old_repo: redirect.model_dump()
+                    for old_repo, redirect in self._redirects.items()
+                }
+
+            # Add latest versions
+            if self._latest_versions:
+                cache_data["latest_versions"] = {
+                    repo: version.model_dump()
+                    for repo, version in self._latest_versions.items()
+                }
 
             # Use atomic write to prevent corruption
             temp_file = self.config.cache_file_path.with_suffix(".tmp")
@@ -241,6 +337,20 @@ class ValidationCache:
         if removed_count > 0:
             self.stats.cleanup_removed += removed_count
             self.logger.debug(f"Removed {removed_count} expired cache entries")
+
+        # Also clean up expired latest version entries
+        expired_version_repos = []
+        for repo, version_entry in self._latest_versions.items():
+            if version_entry.is_expired(self.config.default_ttl_seconds):
+                expired_version_repos.append(repo)
+
+        for repo in expired_version_repos:
+            del self._latest_versions[repo]
+
+        if expired_version_repos:
+            self.logger.debug(
+                f"Removed {len(expired_version_repos)} expired latest version entries"
+            )
 
     def _enforce_cache_size_limit(self) -> None:
         """Ensure cache doesn't exceed maximum size."""
@@ -485,18 +595,21 @@ class ValidationCache:
 
         # Count expired entries
         expired_count = 0
-        oldest_timestamp = None
-        newest_timestamp = None
+        timestamps: list[float] = []
 
         for entry in self._cache.values():
             if entry.is_expired(self.config.default_ttl_seconds):
                 expired_count += 1
+            timestamps.append(entry.timestamp)
 
-            if oldest_timestamp is None or entry.timestamp < oldest_timestamp:
-                oldest_timestamp = entry.timestamp
+        oldest_timestamp = min(timestamps) if timestamps else None
+        newest_timestamp = max(timestamps) if timestamps else None
 
-            if newest_timestamp is None or entry.timestamp > newest_timestamp:
-                newest_timestamp = entry.timestamp
+        # Count expired latest version entries
+        expired_version_count = 0
+        for version_entry in self._latest_versions.values():
+            if version_entry.is_expired(self.config.default_ttl_seconds):
+                expired_version_count += 1
 
         return {
             "enabled": True,
@@ -504,6 +617,8 @@ class ValidationCache:
             "cache_file_exists": self.config.cache_file_path.exists(),
             "entries": len(self._cache),
             "expired_entries": expired_count,
+            "latest_version_entries": len(self._latest_versions),
+            "expired_latest_version_entries": expired_version_count,
             "oldest_entry_age": time.time() - oldest_timestamp
             if oldest_timestamp
             else None,
@@ -640,6 +755,120 @@ class ValidationCache:
             return True
 
         return False
+
+    def get_redirect(self, old_repository: str) -> str | None:
+        """
+        Get the new repository location if it has been redirected.
+
+        Args:
+            old_repository: Original repository name (org/repo)
+
+        Returns:
+            New repository name if a redirect exists, None otherwise
+        """
+        if not self.config.enabled:
+            return None
+
+        self._load_cache()
+
+        redirect = self._redirects.get(old_repository)
+        if redirect:
+            # Check if redirect has expired
+            if redirect.is_expired(self.config.default_ttl_seconds):
+                self.logger.debug(f"Redirect for {old_repository} has expired")
+                del self._redirects[old_repository]
+                return None
+
+            self.logger.debug(
+                f"Found redirect: {old_repository} -> {redirect.new_repository}"
+            )
+            return redirect.new_repository
+
+        return None
+
+    def put_redirect(self, old_repository: str, new_repository: str) -> None:
+        """
+        Record a repository redirect.
+
+        Args:
+            old_repository: Original repository name (org/repo)
+            new_repository: New repository name (org/repo)
+        """
+        if not self.config.enabled:
+            return
+
+        self._load_cache()
+
+        redirect = RepositoryRedirect(
+            old_repository=old_repository,
+            new_repository=new_repository,
+            timestamp=time.time(),
+        )
+
+        self._redirects[old_repository] = redirect
+        self.logger.debug(
+            f"Recorded repository redirect: {old_repository} -> {new_repository}"
+        )
+
+    def get_latest_version(self, repository: str) -> tuple[str, str] | None:
+        """
+        Get the cached latest version for a repository.
+
+        Args:
+            repository: Repository name (org/repo)
+
+        Returns:
+            Tuple of (tag, sha) if cached and not expired, None otherwise
+        """
+        if not self.config.enabled:
+            return None
+
+        self._load_cache()
+
+        version_entry = self._latest_versions.get(repository)
+        if version_entry:
+            # Check if entry has expired
+            if version_entry.is_expired(self.config.default_ttl_seconds):
+                self.logger.debug(
+                    f"Latest version cache for {repository} has expired"
+                )
+                del self._latest_versions[repository]
+                return None
+
+            self.logger.debug(
+                f"Cache hit for latest version: {repository} -> {version_entry.latest_tag}"
+            )
+            return (version_entry.latest_tag, version_entry.latest_sha)
+
+        return None
+
+    def put_latest_version(
+        self, repository: str, latest_tag: str, latest_sha: str
+    ) -> None:
+        """
+        Cache the latest version information for a repository.
+
+        Args:
+            repository: Repository name (org/repo)
+            latest_tag: Latest release/tag name
+            latest_sha: SHA for the latest tag
+        """
+        if not self.config.enabled:
+            return
+
+        self._load_cache()
+
+        version_entry = LatestVersionEntry(
+            repository=repository,
+            latest_tag=latest_tag,
+            latest_sha=latest_sha,
+            timestamp=time.time(),
+        )
+
+        self._latest_versions[repository] = version_entry
+        self.logger.debug(
+            f"Cached latest version for {repository}: {latest_tag} ({latest_sha[:8]}...)"
+        )
 
     def save(self) -> None:
         """Force save cache to disk."""

@@ -38,7 +38,7 @@ class TestConfigManager:
 
         assert isinstance(config, Config)
         assert config.log_level == LogLevel.INFO
-        assert config.parallel_workers == 4
+        assert config.parallel_workers == os.cpu_count()
         assert config.scan_extensions == [".yml", ".yaml"]
 
     def test_load_config_with_nonexistent_file(self) -> None:

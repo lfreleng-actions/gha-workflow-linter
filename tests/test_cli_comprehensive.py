@@ -461,7 +461,7 @@ class TestOutputFunctions:
             )
         ]
 
-        with patch("gha_workflow_linter.cli.console") as mock_console:
+        with patch("builtins.print") as mock_print:
             output_json_results(
                 scan_summary,
                 validation_summary,
@@ -469,8 +469,8 @@ class TestOutputFunctions:
                 Path("test"),
             )
 
-            mock_console.print.assert_called_once()
-            printed_text = mock_console.print.call_args[0][0]
+            mock_print.assert_called_once()
+            printed_text = mock_print.call_args[0][0]
 
             # Should be valid JSON
             parsed = json.loads(printed_text)

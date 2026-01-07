@@ -99,9 +99,9 @@ class TestSkipActionsCLI:
     """Test skip_actions CLI option."""
 
     def test_cli_options_default_skip_actions(self) -> None:
-        """Test that CLIOptions defaults skip_actions to False."""
+        """Test that CLIOptions defaults skip_actions to None (not set)."""
         cli_options = CLIOptions(path=Path.cwd())
-        assert cli_options.skip_actions is False
+        assert cli_options.skip_actions is None
 
     def test_cli_options_skip_actions_true(self) -> None:
         """Test setting skip_actions to True in CLIOptions."""
@@ -322,11 +322,11 @@ class TestSkipActionsLogging:
         try:
             list(scanner.find_workflow_files(temp_dir))
 
-            # Check that info was called with message about actions
-            info_calls = [
-                str(call) for call in scanner.logger.info.call_args_list
+            # Check that debug was called with message about actions
+            debug_calls = [
+                str(call) for call in scanner.logger.debug.call_args_list
             ]
-            assert any("actions" in call.lower() for call in info_calls)
+            assert any("actions" in call.lower() for call in debug_calls)
         finally:
             import shutil
 
@@ -361,11 +361,11 @@ runs:
             list(scanner.find_workflow_files(temp_dir))
 
             # Check that the summary includes the right terminology
-            info_calls = [
-                str(call) for call in scanner.logger.info.call_args_list
+            debug_calls = [
+                str(call) for call in scanner.logger.debug.call_args_list
             ]
             summary_calls = [
-                call for call in info_calls if "found" in call.lower()
+                call for call in debug_calls if "found" in call.lower()
             ]
 
             assert len(summary_calls) > 0

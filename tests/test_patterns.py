@@ -186,16 +186,16 @@ jobs:
             ref_type = ActionCallPatterns._determine_reference_type(ref)
             assert ref_type == ReferenceType.COMMIT_SHA, f"Should be SHA: {ref}"
 
-        # Semantic version tags
-        semver_tags = [
+        # Clean version tags (sanitized version pattern)
+        version_tags = [
             "v1.0.0",
             "1.2.3",
             "v2.13.1",
-            "0.1.0-alpha.1",
-            "1.0.0+build.1",
+            "v4.31",
+            "0.9",
         ]
 
-        for ref in semver_tags:
+        for ref in version_tags:
             ref_type = ActionCallPatterns._determine_reference_type(ref)
             assert ref_type == ReferenceType.TAG, f"Should be tag: {ref}"
 
