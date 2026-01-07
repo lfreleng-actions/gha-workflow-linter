@@ -39,7 +39,7 @@ class TestConfigManager:
 
             # Should return default config
             assert isinstance(config, Config)
-            assert config.parallel_workers == 4
+            assert config.parallel_workers == os.cpu_count()
             assert config.require_pinned_sha is True
             assert config.scan_extensions == [".yml", ".yaml"]
             assert config.exclude_patterns == []
@@ -134,7 +134,7 @@ class TestConfigManager:
         result = self.config_manager.load_config(None)
 
         assert isinstance(result, Config)
-        assert result.parallel_workers == 4
+        assert result.parallel_workers == os.cpu_count()
         assert result.require_pinned_sha is True
         assert result.scan_extensions == [".yml", ".yaml"]
         assert result.exclude_patterns == []
@@ -267,7 +267,7 @@ parallel_workers: 6
         try:
             config = self.config_manager.load_config(config_file)
             # Should be all defaults
-            assert config.parallel_workers == 4
+            assert config.parallel_workers == os.cpu_count()
             assert config.require_pinned_sha is True
         finally:
             config_file.unlink()
@@ -421,7 +421,7 @@ cache:
             # Verify the saved config can be loaded back
             config = self.config_manager.load_config(output_path)
             assert isinstance(config, Config)
-            assert config.parallel_workers == 4
+            assert config.parallel_workers == os.cpu_count()
 
     def test_validate_config_file(self) -> None:
         """Test config file validation."""

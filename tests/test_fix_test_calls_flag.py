@@ -24,6 +24,7 @@ from gha_workflow_linter.models import (
     ValidationResult,
 )
 from gha_workflow_linter.utils import has_test_comment
+from tests.test_auto_fix import build_all_action_calls_from_errors
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -269,7 +270,14 @@ jobs:
         ]
 
         async with AutoFixer(config) as fixer:
-            fixed_files = await fixer.fix_validation_errors(validation_errors)
+            (
+                fixed_files,
+                redirect_stats,
+                stale_actions_summary,
+            ) = await fixer.fix_validation_errors(
+                validation_errors,
+                build_all_action_calls_from_errors(validation_errors),
+            )
 
         # Should return empty dict or skipped items, not actual fixes
         if temp_file in fixed_files:
