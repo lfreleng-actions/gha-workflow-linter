@@ -48,6 +48,15 @@ inputs:
   validation-method:
     description: "Validation method (github-api, git, or auto-detect)"
     required: false
+  auto-fix:
+    # yamllint disable-line rule:line-length
+    description: "Automatically fix broken/invalid SHA pins, versions, and branches"
+    required: false
+    default: "true"
+  auto-latest:
+    description: "When auto-fixing, use the latest version of actions"
+    required: false
+    default: "false"
 
 outputs:
   errors-found:
@@ -145,6 +154,14 @@ runs:
 
         if [[ -n "${{ inputs.validation-method }}" ]]; then
           args+=(--validation-method "${{ inputs.validation-method }}")
+        fi
+
+        if [[ "${{ inputs.auto-fix }}" == "false" ]]; then
+          args+=(--no-auto-fix)
+        fi
+
+        if [[ "${{ inputs.auto-latest }}" == "true" ]]; then
+          args+=(--auto-latest)
         fi
 
         # Run gha-workflow-linter and capture output

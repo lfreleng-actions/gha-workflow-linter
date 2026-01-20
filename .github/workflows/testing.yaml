@@ -49,5 +49,7 @@ jobs:
         uses: ./
         with:
           path: 'actions-template'
+          auto-fix: false
+          fail-on-error: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
