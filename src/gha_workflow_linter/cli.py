@@ -376,8 +376,8 @@ def lint(
     ),
     two_space_comments: bool | None = typer.Option(
         None,
-        "--two-space-comments/--no-two-space-comments",
-        help="Use two spaces before inline comments when fixing (default: disabled unless overridden in config)",
+        "--no-two-space-comments/--two-space-comments",
+        help="Use two spaces before inline comments when fixing (default: enabled unless overridden in config)",
     ),
     skip_actions: bool | None = typer.Option(
         None,

@@ -386,7 +386,7 @@ class Config(BaseModel):
         False, description="Allow prerelease versions when finding latest versions"
     )
     two_space_comments: bool = Field(
-        False, description="Use two spaces before inline comments"
+        True, description="Use two spaces before inline comments"
     )
     skip_actions: bool = Field(
         False, description="Skip scanning action.yaml/action.yml files"

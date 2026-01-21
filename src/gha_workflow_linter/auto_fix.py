@@ -451,10 +451,20 @@ class AutoFixer:
                 )
                 base_repo_key = self._get_base_repository(repo_key)
 
-                # Try to find a valid reference
-                valid_ref = await self._find_valid_reference(
-                    base_repo_key, action_call.reference
-                )
+                # First priority: if there's a valid version comment, use that
+                valid_ref = None
+                if action_call.comment:
+                    comment_text = action_call.comment.strip().lstrip("#").strip()
+                    # If the comment looks like a version tag, use it
+                    if re.match(r"^v?\d+\.\d+", comment_text):
+                        valid_ref = comment_text
+
+                # Second priority: try to find a valid reference
+                if not valid_ref:
+                    valid_ref = await self._find_valid_reference(
+                        base_repo_key, action_call.reference
+                    )
+
                 if not valid_ref:
                     # Fallback to _get_fallback_reference
                     valid_ref = await self._get_fallback_reference(
@@ -749,6 +759,7 @@ class AutoFixer:
 
                         # Check if current SHA doesn't match the version in its own comment (corrupted reference)
                         has_mismatched_sha = False
+                        existing_version_sha: str | None = None
                         if (
                             existing_comment
                             and action_call.reference_type
@@ -778,7 +789,43 @@ class AutoFixer:
                         )
                         ref_changed = final_ref != action_call.reference
 
-                        if ref_changed or comment_changed or repo_changed:
+                        # When has_mismatched_sha is True, we should fix to the CURRENT version
+                        # (from the comment), not upgrade to latest version
+                        # This takes priority regardless of check_for_updates setting
+                        if has_mismatched_sha:
+                            # Use the existing comment version instead of latest
+                            fix_ref = (
+                                existing_version_sha
+                                if self.config.require_pinned_sha and existing_version_sha
+                                else existing_comment
+                            )
+                            fix_comment = existing_comment
+
+                            # Only fix if we have a valid reference
+                            if fix_ref:
+                                # Build the fixed line with current version
+                                fixed_line = self._build_fixed_line(
+                                    action_call,
+                                    fix_ref,
+                                    fix_comment,
+                                    repo_key if repo_was_redirected else None,
+                                )
+
+                                if (
+                                    fixed_line
+                                    and fixed_line != action_call.raw_line.strip()
+                                ):
+                                    if file_path not in fixes_by_file:
+                                        fixes_by_file[file_path] = {}
+                                    fixes_by_file[file_path][line_num] = (
+                                        action_call.raw_line.strip(),
+                                        fixed_line,
+                                    )
+                                    file_name = file_path.name
+                                    if show_live_updates and live:
+                                        update_msg = f"  Fixed mismatched SHA: {action_call.organization}/{action_call.repository} in {file_name}"
+                                        live.update(Text(update_msg, style="dim"))
+                        elif ref_changed or comment_changed or repo_changed:
                             # Build the fixed line
                             fixed_line = self._build_fixed_line(
                                 action_call,
@@ -801,9 +848,9 @@ class AutoFixer:
                                     and (file_path, line_num)
                                     in validation_error_calls
                                 )
-                                is_invalid = (
-                                    is_validation_error or has_mismatched_sha
-                                )
+                                # Note: has_mismatched_sha is already handled above, so it won't reach here
+                                # when check_for_updates=False
+                                is_invalid = is_validation_error
 
                                 if not check_for_updates and not is_invalid:
                                     # When check_for_updates=False, only report non-invalid outdated actions
@@ -1908,6 +1955,11 @@ class AutoFixer:
                             {ref_alias}: ref(qualifiedName: "refs/tags/{ref}") {{
                                 target {{
                                     oid
+                                    ... on Tag {{
+                                        target {{
+                                            oid
+                                        }}
+                                    }}
                                 }}
                             }}
                         """)
@@ -1935,9 +1987,19 @@ class AutoFixer:
                             repo_alias, {}
                         )
                         ref_data = repo_data.get(ref_alias)
-                        if ref_data and ref_data.get("target"):
-                            sha = ref_data["target"]["oid"]
-                            results[(repo_key, ref)] = sha
+                        if ref_data:
+                            target = ref_data.get("target")
+                            # For annotated tags, the target has a nested target with the commit SHA
+                            # For lightweight tags, the target directly has the commit SHA
+                            if isinstance(target, dict):
+                                nested_target = target.get("target")
+                                if isinstance(nested_target, dict) and "oid" in nested_target:
+                                    sha = nested_target["oid"]
+                                elif "oid" in target:
+                                    sha = target["oid"]
+                                else:
+                                    continue
+                                results[(repo_key, ref)] = sha
                     else:
                         self.logger.warning(
                             f"Failed to parse alias format: {full_alias}"
