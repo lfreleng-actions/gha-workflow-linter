@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
+# pyright: reportAny=false, reportDeprecated=false
 
 """
 Cache functionality demonstration script for gha-workflow-linter.
@@ -32,6 +33,7 @@ def demo_basic_cache_operations() -> None:
             cache_file="demo_cache.json",
             default_ttl_seconds=300,  # 5 minutes
             max_cache_size=1000,
+            cleanup_on_startup=True,
         )
 
         cache = ValidationCache(config)
@@ -59,8 +61,7 @@ def demo_basic_cache_operations() -> None:
             cached_entry = cache.get(repo, ref)
             if cached_entry:
                 print(
-                    f"  Retrieved: {repo}@{ref} -> {cached_entry.result.value} "
-                    f"(age: {cached_entry.age_seconds:.1f}s)"
+                    f"  Retrieved: {repo}@{ref} -> {cached_entry.result.value} (age: {cached_entry.age_seconds:.1f}s)"
                 )
             else:
                 print(f"  Cache miss: {repo}@{ref}")
@@ -82,6 +83,9 @@ def demo_batch_operations() -> None:
             enabled=True,
             cache_dir=Path(temp_dir),
             cache_file="batch_demo_cache.json",
+            default_ttl_seconds=7 * 24 * 60 * 60,
+            max_cache_size=10000,
+            cleanup_on_startup=True,
         )
 
         cache = ValidationCache(config)
@@ -170,6 +174,8 @@ def demo_cache_expiration() -> None:
             cache_dir=Path(temp_dir),
             cache_file="expiration_demo_cache.json",
             default_ttl_seconds=2,  # 2 seconds for demo
+            max_cache_size=10000,
+            cleanup_on_startup=True,
         )
 
         cache = ValidationCache(config)
@@ -209,7 +215,9 @@ def demo_cache_size_limits() -> None:
             enabled=True,
             cache_dir=Path(temp_dir),
             cache_file="size_limit_demo_cache.json",
+            default_ttl_seconds=7 * 24 * 60 * 60,
             max_cache_size=3,  # Only 3 entries allowed
+            cleanup_on_startup=True,
         )
 
         cache = ValidationCache(config)
@@ -252,6 +260,9 @@ def demo_cache_persistence() -> None:
             enabled=True,
             cache_dir=Path(temp_dir),
             cache_file="persistence_demo_cache.json",
+            default_ttl_seconds=7 * 24 * 60 * 60,
+            max_cache_size=10000,
+            cleanup_on_startup=True,
         )
 
         # First cache instance
@@ -293,6 +304,7 @@ def demo_cache_info() -> None:
             cache_file="info_demo_cache.json",
             default_ttl_seconds=3600,
             max_cache_size=1000,
+            cleanup_on_startup=True,
         )
 
         cache = ValidationCache(config)
@@ -322,8 +334,8 @@ def demo_cache_info() -> None:
         )
 
         # Generate some stats
-        cache.get("actions/checkout", "v4")  # hit
-        cache.get("actions/missing", "v1")  # miss
+        _ = cache.get("actions/checkout", "v4")  # hit
+        _ = cache.get("actions/missing", "v1")  # miss
 
         info = cache.get_cache_info()
 

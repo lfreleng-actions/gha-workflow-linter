@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Exclude auto-generated version file from linting
+src/gha_workflow_linter/_version.py linguist-generated=true

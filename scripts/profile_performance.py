@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportDeprecated=false
 
 """
 Performance profiling script for GHA Workflow Linter.
@@ -78,22 +79,22 @@ def print_profile_report(stats: pstats.Stats, limit: int = 50) -> None:
     print("TOP FUNCTIONS BY CUMULATIVE TIME")
     print(f"{'=' * 60}\n")
 
-    stats.sort_stats(SortKey.CUMULATIVE)
-    stats.print_stats(limit)
+    _ = stats.sort_stats(SortKey.CUMULATIVE)
+    _ = stats.print_stats(limit)
 
     print(f"\n{'=' * 60}")
     print("TOP FUNCTIONS BY TOTAL TIME (excluding subcalls)")
     print(f"{'=' * 60}\n")
 
-    stats.sort_stats(SortKey.TIME)
-    stats.print_stats(limit)
+    _ = stats.sort_stats(SortKey.TIME)
+    _ = stats.print_stats(limit)
 
     print(f"\n{'=' * 60}")
     print("FUNCTIONS WITH MOST CALLS")
     print(f"{'=' * 60}\n")
 
-    stats.sort_stats(SortKey.CALLS)
-    stats.print_stats(limit)
+    _ = stats.sort_stats(SortKey.CALLS)
+    _ = stats.print_stats(limit)
 
 
 def analyze_bottlenecks(stats: pstats.Stats) -> None:
@@ -103,7 +104,7 @@ def analyze_bottlenecks(stats: pstats.Stats) -> None:
     print(f"{'=' * 60}\n")
 
     # Get the raw stats
-    stats.sort_stats(SortKey.CUMULATIVE)
+    _ = stats.sort_stats(SortKey.CUMULATIVE)
 
     # Capture stats output to analyze it
     import sys as sys_module
@@ -111,13 +112,13 @@ def analyze_bottlenecks(stats: pstats.Stats) -> None:
     old_stdout = sys_module.stdout
     stream = io.StringIO()
     sys_module.stdout = stream
-    stats.print_stats()
+    _ = stats.print_stats()
     sys_module.stdout = old_stdout
 
     output = stream.getvalue()
 
     # Analyze for common patterns
-    issues = []
+    issues: list[str] = []
 
     if "urllib3" in output or "requests" in output or "http" in output.lower():
         issues.append(
@@ -191,9 +192,9 @@ def print_call_graph_hints(
 
     for func_name in focus_functions:
         print(f"\nCalls TO/FROM functions matching '{func_name}':\n")
-        stats.print_callers(func_name)
+        _ = stats.print_callers(func_name)
         print("\n" + "-" * 40 + "\n")
-        stats.print_callees(func_name)
+        _ = stats.print_callees(func_name)
         print("\n" + "=" * 60 + "\n")
 
 
@@ -216,44 +217,44 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Profile GHA Workflow Linter performance"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "path",
         nargs="?",
         default=".",
         help="Path to scan (default: current directory)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--output",
         "-o",
         help="Save profile data to file (.prof)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--limit",
         type=int,
         default=50,
         help="Number of functions to show in reports (default: 50)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-parallel",
         action="store_true",
         help="Run without parallel workers",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--workers",
         type=int,
         help="Number of parallel workers",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--clear-cache",
         action="store_true",
         help="Clear cache before profiling",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--focus",
         nargs="+",
         help="Functions to focus call graph analysis on",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--compare",
         nargs=2,
         metavar=("PROFILE1", "PROFILE2"),
@@ -263,48 +264,56 @@ def main() -> None:
     args = parser.parse_args()
 
     # Handle comparison mode
-    if args.compare:
-        compare_profiles(args.compare[0], args.compare[1])
+    if args.compare and isinstance(args.compare, list):
+        compare_profiles(str(args.compare[0]), str(args.compare[1]))
         return
 
     # Build CLI arguments
-    cli_args = [args.path]
+    cli_args = [str(args.path)]
 
-    if args.no_parallel:
+    if hasattr(args, "no_parallel") and args.no_parallel:
         cli_args.append("--no-parallel")
-    elif args.workers:
-        cli_args.extend(["--workers", str(args.workers)])
+    elif hasattr(args, "workers") and args.workers is not None:
+        cli_args.extend(["--workers", str(int(args.workers))])
 
-    if args.clear_cache:
+    if hasattr(args, "clear_cache") and args.clear_cache:
         cli_args.append("--clear-cache")
 
     # Run profiling
-    stats = profile_with_cprofile(cli_args, args.output)
+    output_file_arg = (
+        str(args.output) if hasattr(args, "output") and args.output else None
+    )
+    stats = profile_with_cprofile(cli_args, output_file=output_file_arg)
 
     # Print reports
-    print_profile_report(stats, args.limit)
+    limit_arg = int(args.limit) if hasattr(args, "limit") and args.limit else 50
+    print_profile_report(stats, limit_arg)
 
     # Analyze bottlenecks
     analyze_bottlenecks(stats)
 
     # Print call graph for specific functions if requested
-    if args.focus:
-        print_call_graph_hints(stats, args.focus)
+    if hasattr(args, "focus") and args.focus:
+        focus_list = (
+            [str(f) for f in args.focus] if isinstance(args.focus, list) else []
+        )
+        print_call_graph_hints(stats, focus_list)
 
     # Print usage hints
     print(f"\n{'=' * 60}")
     print("VISUALIZATION OPTIONS")
     print(f"{'=' * 60}\n")
 
-    if args.output:
+    if hasattr(args, "output") and args.output:
+        output_str = str(args.output)
         print("To visualize this profile, you can use:\n")
         print("  # Interactive visualization")
         print("  pip install snakeviz")
-        print(f"  snakeviz {args.output}\n")
+        print(f"  snakeviz {output_str}\n")
         print("  # Or generate a call graph")
         print("  pip install gprof2dot")
         print(
-            f"  gprof2dot -f pstats {args.output} | dot -Tpng -o profile.png\n"
+            f"  gprof2dot -f pstats {output_str} | dot -Tpng -o profile.png\n"
         )
     else:
         print("Use --output to save profile data for visualization tools")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false
 
 """
 Async execution tracer for GHA Workflow Linter.
@@ -18,7 +19,6 @@ import functools
 from pathlib import Path
 import sys
 import time
-from typing import Any
 
 # Add parent directory to path to import the linter
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -30,11 +30,11 @@ class AsyncTracer:
     def __init__(self) -> None:
         self.call_stack: list[tuple[str, float]] = []
         self.call_times: dict[str, list[float]] = {}
-        self.parallel_opportunities: list[Any] = []
+        self.parallel_opportunities: list[object] = []
         self.serial_chains: list[list[str]] = []
         self.current_chain: list[str] = []
 
-    def trace_async_call(self, func_name: str, start: bool) -> None:
+    def trace_async_call(self, func_name: str, start: bool) -> None:  # noqa: FBT001
         """Record an async function call."""
         timestamp = time.perf_counter()
 
@@ -44,7 +44,7 @@ class AsyncTracer:
             self.current_chain.append(func_name)
         # Ending an async call
         elif self.call_stack:
-            name, start_time = self.call_stack.pop()
+            _name, start_time = self.call_stack.pop()
             elapsed = timestamp - start_time
 
             if func_name not in self.call_times:
@@ -56,19 +56,19 @@ class AsyncTracer:
                 self.serial_chains.append(list(self.current_chain))
 
             if self.current_chain and self.current_chain[-1] == func_name:
-                self.current_chain.pop()
+                _ = self.current_chain.pop()
 
-    def wrap_async_function(self, func: Any) -> Any:
+    def wrap_async_function(self, func: object) -> object:
         """Wrap an async function to trace its execution."""
         if not asyncio.iscoroutinefunction(func):
             return func
 
         @functools.wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def wrapper(*args: object, **kwargs: object) -> object:
             func_name = f"{func.__module__}.{func.__qualname__}"
             self.trace_async_call(func_name, start=True)
             try:
-                result = await func(*args, **kwargs)
+                result: object = await func(*args, **kwargs)  # noqa: ANN401
                 return result
             finally:
                 self.trace_async_call(func_name, start=False)
@@ -82,17 +82,17 @@ class AsyncTracer:
         print("=" * 70)
 
         # Sort functions by total time
-        func_stats = {}
+        func_stats: dict[str, dict[str, float]] = {}
         for func_name, times in self.call_times.items():
             func_stats[func_name] = {
-                "calls": len(times),
+                "calls": float(len(times)),
                 "total_time": sum(times),
                 "avg_time": sum(times) / len(times),
                 "max_time": max(times),
                 "min_time": min(times),
             }
 
-        sorted_funcs = sorted(
+        sorted_funcs: list[tuple[str, dict[str, float]]] = sorted(
             func_stats.items(), key=lambda x: x[1]["total_time"], reverse=True
         )
 
@@ -100,13 +100,13 @@ class AsyncTracer:
         print("-" * 70)
         for func_name, stats in sorted_funcs[:20]:
             # Shorten module path for readability
-            short_name = func_name.split(".")[-1]
-            module = ".".join(func_name.split(".")[:-1])
+            short_name: str = func_name.split(".")[-1]
+            module: str = ".".join(func_name.split(".")[:-1])
             if "gha_workflow_linter" in module:
                 module = module.replace("gha_workflow_linter.", "")
 
             print(f"\n{short_name} ({module})")
-            print(f"  Calls:      {stats['calls']}")
+            print(f"  Calls:      {int(stats['calls'])}")
             print(f"  Total time: {stats['total_time']:.3f}s")
             print(f"  Avg time:   {stats['avg_time']:.3f}s")
             print(f"  Max time:   {stats['max_time']:.3f}s")
@@ -121,7 +121,9 @@ class AsyncTracer:
             if len(times) > 1:
                 short_name = func_name.split(".")[-1]
                 total_time = sum(times)
-                if total_time > 1.0:  # Only show if significant time
+                if (
+                    total_time > 1.0
+                ):  # Only show if significant time  # noqa: PLR2004
                     print(f"\n⚠️  {short_name}")
                     print(f"   Called {len(times)} times sequentially")
                     print(f"   Total time: {total_time:.3f}s")
@@ -166,7 +168,7 @@ Based on the trace, here are optimization opportunities:
         """)
 
 
-def monkey_patch_async_functions() -> AsyncTracer:
+def monkey_patch_async_functions() -> AsyncTracer:  # noqa: C901
     """Monkey-patch async functions in the linter to trace execution."""
     tracer: AsyncTracer = AsyncTracer()
 
@@ -175,7 +177,7 @@ def monkey_patch_async_functions() -> AsyncTracer:
 
     # Patch GitHubGraphQLClient methods
     for attr_name in dir(github_api.GitHubGraphQLClient):
-        if attr_name.startswith("_") and not attr_name.startswith("__"):
+        if attr_name.startswith("_") and not attr_name.startswith("__"):  # noqa: SIM102
             attr = getattr(github_api.GitHubGraphQLClient, attr_name)
             if asyncio.iscoroutinefunction(attr):
                 setattr(
@@ -225,21 +227,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Trace async execution in GHA Workflow Linter"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "path",
         nargs="?",
         default=".",
         help="Path to scan (default: current directory)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--no-parallel",
         action="store_true",
         help="Run without parallel workers",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--workers", type=int, help="Number of parallel workers"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--clear-cache", action="store_true", help="Clear cache before running"
     )
 
@@ -260,14 +262,14 @@ def main() -> None:
     from gha_workflow_linter.cli import app as cli_app
 
     # Build CLI arguments
-    cli_args = ["gha-workflow-linter", args.path]
+    cli_args = ["gha-workflow-linter", str(args.path)]
 
-    if args.no_parallel:
+    if hasattr(args, "no_parallel") and args.no_parallel:
         cli_args.append("--no-parallel")
-    elif args.workers:
-        cli_args.extend(["--workers", str(args.workers)])
+    elif hasattr(args, "workers") and args.workers is not None:
+        cli_args.extend(["--workers", str(int(args.workers))])
 
-    if args.clear_cache:
+    if hasattr(args, "clear_cache") and args.clear_cache:
         cli_args.append("--clear-cache")
 
     # Backup and replace sys.argv

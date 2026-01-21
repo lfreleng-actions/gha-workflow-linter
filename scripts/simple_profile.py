@@ -61,15 +61,15 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("TOP 30 FUNCTIONS BY CUMULATIVE TIME")
     print("=" * 70)
-    stats.sort_stats(pstats.SortKey.CUMULATIVE)
-    stats.print_stats(30)
+    _ = stats.sort_stats(pstats.SortKey.CUMULATIVE)
+    _ = stats.print_stats(30)
 
     # Print top functions by self time
     print("\n" + "=" * 70)
     print("TOP 30 FUNCTIONS BY SELF TIME")
     print("=" * 70)
-    stats.sort_stats(pstats.SortKey.TIME)
-    stats.print_stats(30)
+    _ = stats.sort_stats(pstats.SortKey.TIME)
+    _ = stats.print_stats(30)
 
     print("\n" + "=" * 70)
     print("ANALYSIS")
