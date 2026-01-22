@@ -69,6 +69,71 @@ def _parse_version(tag: str) -> tuple[int, int, int]:
     return (major, minor, patch)
 
 
+def _get_version_specificity(tag: str) -> int:
+    """
+    Get the specificity level of a version tag.
+
+    Returns:
+        3 for full semver (v1.2.3), 2 for major.minor (v1.2), 1 for major only (v1)
+
+    This helps prefer v8.0.0 over v8 when both point to the same SHA.
+    """
+    version = tag.lstrip("v").split("-")[0].split("+")[0]
+    parts = version.split(".")
+    return len([p for p in parts if p])
+
+
+def _find_most_specific_version_tag(
+    tag: str, sha: str, all_tags: list[tuple[str, str]]
+) -> str:
+    """
+    Find the most specific semantic version tag for a given SHA.
+
+    For example, if we get 'v8' but 'v8.0.0' also points to the same SHA,
+    return 'v8.0.0' as it's more specific.
+
+    Args:
+        tag: The tag we found (e.g., 'v8')
+        sha: The commit SHA
+        all_tags: List of (tag_name, sha) tuples from the repository
+
+    Returns:
+        The most specific version tag pointing to the same SHA
+    """
+    # Find all tags pointing to the same SHA
+    matching_tags = [t for t, s in all_tags if s == sha]
+
+    if not matching_tags:
+        return tag
+
+    # Parse the base version from the original tag
+    try:
+        base_version = _parse_version(tag)
+    except ValueError:
+        return tag
+
+    # Find all tags with the same base version
+    same_version_tags = []
+    for t in matching_tags:
+        try:
+            if _parse_version(t) == base_version:
+                same_version_tags.append(t)
+        except ValueError:
+            continue
+
+    if not same_version_tags:
+        return tag
+
+    # Sort by specificity (most specific first)
+    sorted_by_specificity = sorted(
+        same_version_tags,
+        key=_get_version_specificity,
+        reverse=True
+    )
+
+    return sorted_by_specificity[0]
+
+
 class AutoFixer:
     """Auto-fixes GitHub Actions workflow issues."""
 
@@ -456,7 +521,7 @@ class AutoFixer:
                 if action_call.comment:
                     comment_text = action_call.comment.strip().lstrip("#").strip()
                     # If the comment looks like a version tag, use it
-                    if re.match(r"^v?\d+\.\d+", comment_text):
+                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(comment_text):
                         valid_ref = comment_text
 
                 # Second priority: try to find a valid reference
@@ -587,7 +652,7 @@ class AutoFixer:
             ):
                 comment_text = action_call.comment.strip().lstrip("#").strip()
                 # If the comment looks like a version tag, we'll need to verify it
-                if re.match(r"^v?\d+\.\d+", comment_text):
+                if ActionCallPatterns.VERSION_TAG_PATTERN.match(comment_text):
                     repo_key = (
                         f"{action_call.organization}/{action_call.repository}"
                     )
@@ -685,7 +750,7 @@ class AutoFixer:
                         )
                         invalid_ref_comment: str | None = (
                             valid_ref
-                            if re.match(r"^v?\d+\.\d+", valid_ref)
+                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(valid_ref)
                             else None
                         )
 
@@ -746,7 +811,7 @@ class AutoFixer:
                         )
                         version_comment: str | None = (
                             target_ref
-                            if re.match(r"^v?\d+\.\d+", target_ref)
+                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
                             else None
                         )
 
@@ -764,7 +829,7 @@ class AutoFixer:
                             existing_comment
                             and action_call.reference_type
                             == ReferenceType.COMMIT_SHA
-                            and re.match(r"^v?\d+\.\d+", existing_comment)
+                            and ActionCallPatterns.VERSION_TAG_PATTERN.match(existing_comment)
                         ):
                             # Use pre-fetched SHA from batch resolution (Step 3d)
                             existing_version_sha = sha_map.get(
@@ -1010,7 +1075,7 @@ class AutoFixer:
                 target_sha = sha_info["sha"]
                 # If target_ref looks like a version tag, use it in comment
                 if (
-                    re.match(r"^v?\d+\.\d+", target_ref)
+                    ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
                     or target_ref != default_branch
                 ):
                     version_comment = target_ref
@@ -1036,7 +1101,7 @@ class AutoFixer:
             if (
                 not target_sha
                 and target_ref
-                and re.match(r"^v?\d+\.\d+", target_ref)
+                and ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
             ):
                 version_comment = target_ref
 
@@ -1217,7 +1282,7 @@ class AutoFixer:
 
                     # Try to find semantic version tags first
                     version_tags = [
-                        tag for tag in tag_list if re.match(r"^v?\d+\.\d+", tag)
+                        tag for tag in tag_list if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag)
                     ]
                     if version_tags:
                         return version_tags[0]
@@ -1716,6 +1781,17 @@ class AutoFixer:
                 if not repo_data:
                     continue
 
+                # Collect all tags first for specificity resolution
+                refs = repo_data.get("refs", {}).get("nodes", [])
+                all_tags = []
+                for ref in refs:
+                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(ref["name"]):
+                        target = ref.get("target", {})
+                        if "oid" in target:
+                            all_tags.append((ref["name"], target["oid"]))
+                        elif "target" in target and "oid" in target["target"]:
+                            all_tags.append((ref["name"], target["target"]["oid"]))
+
                 # Try latestRelease first, but only if prereleases are NOT allowed
                 # (latestRelease excludes prereleases by GitHub's API design)
                 # If allow_prerelease is True, skip latestRelease and check all tags
@@ -1725,69 +1801,52 @@ class AutoFixer:
                     tag = repo_data["latestRelease"]["tagName"]
                     sha = repo_data["latestRelease"]["tagCommit"]["oid"]
                     # Only use latestRelease if it matches our version patterns
-                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(
-                        tag
-                    ) or re.match(r"^v?\d+\.\d+", tag):
-                        results[repo_key] = (tag, sha)
+                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag):
+                        # Find most specific version tag for this SHA (e.g., v8 -> v8.0.0)
+                        specific_tag = _find_most_specific_version_tag(
+                            tag, sha, all_tags
+                        )
+                        results[repo_key] = (specific_tag, sha)
                         continue
 
                 # Fall back to tags with version pattern filtering
-                refs = repo_data.get("refs", {}).get("nodes", [])
-                if refs:
-                    # Try clean version tags first
-                    version_tags = []
+                if all_tags:
+                    # Sort by specificity first, then version
+                    sorted_tags = sorted(
+                        all_tags,
+                        key=lambda x: (
+                            _get_version_specificity(x[0]),
+                            _parse_version(x[0]),
+                        ),
+                        reverse=True,
+                    )
+                    tag, sha = sorted_tags[0]
+                    results[repo_key] = (tag, sha)
+                else:
+                    # No clean version tags found, try fallback version-like tags (v1.2, v0.9, etc.)
+                    fallback_pattern = re.compile(r"^v?\d+\.\d+")
+                    fallback_tags = []
                     for ref in refs:
-                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(
-                            ref["name"]
-                        ):
+                        if fallback_pattern.match(ref["name"]):
                             # Handle both direct commits and annotated tags
                             target = ref.get("target", {})
                             if "oid" in target:
                                 # Direct commit
-                                version_tags.append(
+                                fallback_tags.append(
                                     (ref["name"], target["oid"])
                                 )
                             elif (
-                                "target" in target and "oid" in target["target"]
+                                "target" in target
+                                and "oid" in target["target"]
                             ):
                                 # Annotated tag pointing to commit
-                                version_tags.append(
+                                fallback_tags.append(
                                     (ref["name"], target["target"]["oid"])
                                 )
-                    if version_tags:
-                        # Sort by version
-                        sorted_tags = sorted(
-                            version_tags,
-                            key=lambda x: _parse_version(x[0]),
-                            reverse=True,
-                        )
-                        tag, sha = sorted_tags[0]
+                    if fallback_tags:
+                        # Just use the first one (already sorted by TAG_COMMIT_DATE DESC)
+                        tag, sha = fallback_tags[0]
                         results[repo_key] = (tag, sha)
-                    else:
-                        # No clean version tags found, try fallback version-like tags (v1.2, v0.9, etc.)
-                        fallback_pattern = re.compile(r"^v?\d+\.\d+")
-                        fallback_tags = []
-                        for ref in refs:
-                            if fallback_pattern.match(ref["name"]):
-                                # Handle both direct commits and annotated tags
-                                target = ref.get("target", {})
-                                if "oid" in target:
-                                    # Direct commit
-                                    fallback_tags.append(
-                                        (ref["name"], target["oid"])
-                                    )
-                                elif (
-                                    "target" in target
-                                    and "oid" in target["target"]
-                                ):
-                                    # Annotated tag pointing to commit
-                                    fallback_tags.append(
-                                        (ref["name"], target["target"]["oid"])
-                                    )
-                        if fallback_tags:
-                            # Just use the first one (already sorted by TAG_COMMIT_DATE DESC)
-                            tag, sha = fallback_tags[0]
-                            results[repo_key] = (tag, sha)
 
             return results
         except Exception as e:
