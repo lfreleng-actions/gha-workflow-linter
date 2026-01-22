@@ -491,62 +491,15 @@ class AutoFixer:
                     (error.file_path, error.action_call.line_number)
                 ] = error.result
 
-        # For INVALID_REFERENCE errors, find valid references
-        invalid_ref_fixes: dict[tuple[Path, int], str] = {}
+        # Track which action calls have invalid references
+        # We'll handle these after fetching latest versions
+        invalid_ref_actions: set[tuple[Path, int]] = set()
         if validation_errors:
-            invalid_ref_errors = [
-                (file_path, line_num, action_call)
-                for file_path, line_num, action_call in action_call_list
-                if validation_result_map.get((file_path, line_num))
-                == ValidationResult.INVALID_REFERENCE
-            ]
-
-            if invalid_ref_errors and show_live_updates and live:
-                live.update(
-                    Text(
-                        f"  Finding valid references for {len(invalid_ref_errors)} invalid references...",
-                        style="dim",
+            for error in validation_errors:
+                if error.result == ValidationResult.INVALID_REFERENCE:
+                    invalid_ref_actions.add(
+                        (error.file_path, error.action_call.line_number)
                     )
-                )
-
-            # Find valid references for invalid ones
-            for file_path, line_num, action_call in invalid_ref_errors:
-                repo_key = (
-                    f"{action_call.organization}/{action_call.repository}"
-                )
-                base_repo_key = self._get_base_repository(repo_key)
-
-                # First priority: if there's a valid version comment, use that
-                valid_ref = None
-                if action_call.comment:
-                    comment_text = action_call.comment.strip().lstrip("#").strip()
-                    # If the comment looks like a version tag, use it
-                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(comment_text):
-                        valid_ref = comment_text
-
-                # Second priority: try to find a valid reference
-                if not valid_ref:
-                    valid_ref = await self._find_valid_reference(
-                        base_repo_key, action_call.reference
-                    )
-
-                if not valid_ref:
-                    # Fallback to _get_fallback_reference
-                    valid_ref = await self._get_fallback_reference(
-                        base_repo_key, action_call.reference
-                    )
-
-                if not valid_ref:
-                    # Last resort: use default branch
-                    repo_info = await self._get_repository_info(base_repo_key)
-                    valid_ref = (
-                        repo_info.get("default_branch", "main")
-                        if repo_info
-                        else "main"
-                    )
-
-                if valid_ref:
-                    invalid_ref_fixes[(file_path, line_num)] = valid_ref
 
         if show_live_updates and live:
             live.update(
@@ -622,17 +575,6 @@ class AutoFixer:
 
         # Step 3c: Collect refs that need SHA resolution (use set for O(1) lookup)
         refs_to_resolve_set: set[tuple[str, str]] = set()
-
-        # Add valid references from INVALID_REFERENCE fixes
-        for (file_path, line_num), valid_ref in invalid_ref_fixes.items():
-            # Find the action_call to get the repo
-            for fp, ln, ac in action_call_list:
-                if fp == file_path and ln == line_num:
-                    repo_key = f"{ac.organization}/{ac.repository}"
-                    base_repo_key = self._get_base_repository(repo_key)
-                    effective_repo = redirect_map.get(base_repo_key, base_repo_key)
-                    refs_to_resolve_set.add((effective_repo, valid_ref))
-                    break
 
         for repo_key in unique_repos:
             effective_repo = redirect_map.get(repo_key, repo_key)
@@ -724,41 +666,105 @@ class AutoFixer:
                     base_repo_key = new_base_repo
                     # Don't increment counter here - wait until we know a change is needed
 
-                # Check if this has an INVALID_REFERENCE error with a valid ref fix
-                has_invalid_ref = (file_path, line_num) in invalid_ref_fixes
+                # Check if this action has an invalid reference
+                has_invalid_ref = (file_path, line_num) in invalid_ref_actions
+
+                # Handle invalid references first, before checking for updates
                 if has_invalid_ref:
-                    # Use the valid reference we found earlier
-                    valid_ref = invalid_ref_fixes[(file_path, line_num)]
+                    # For invalid references, try to find a valid replacement
+                    # Priority: 1) version from comment (if valid), 2) latest version, 3) fallback reference
+                    valid_ref: str | None = None
+                    valid_sha: str | None = None
 
-                    # Get SHA for this valid reference
-                    invalid_ref_sha: str | None = None
-                    if (base_repo_key, valid_ref) in sha_map:
-                        invalid_ref_sha = sha_map[(base_repo_key, valid_ref)]
-                    else:
-                        # Fallback to individual fetch
-                        sha_info = await self._get_commit_sha_for_reference(
-                            base_repo_key, valid_ref
-                        )
-                        invalid_ref_sha = sha_info["sha"] if sha_info else None
+                    # First, check if there's a version comment we can use
+                    if action_call.comment:
+                        comment_text = action_call.comment.strip().lstrip("#").strip()
+                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(comment_text):
+                            # Try to get SHA for the comment version
+                            if (base_repo_key, comment_text) in sha_map:
+                                valid_sha = sha_map[(base_repo_key, comment_text)]
+                                valid_ref = comment_text
+                            else:
+                                # Fallback to individual fetch
+                                sha_info = await self._get_commit_sha_for_reference(
+                                    base_repo_key, comment_text
+                                )
+                                if sha_info:
+                                    valid_sha = sha_info["sha"]
+                                    valid_ref = comment_text
 
-                    if invalid_ref_sha:
-                        # Determine final ref based on config
-                        invalid_ref_final = (
-                            invalid_ref_sha
-                            if self.config.require_pinned_sha
-                            else valid_ref
+                    # If comment version didn't work, try latest version
+                    if not valid_ref:
+                        effective_lookup_repo = base_repo_key
+                        if effective_lookup_repo in latest_versions:
+                            target_ref, cached_sha = latest_versions[effective_lookup_repo]
+                            valid_ref = target_ref
+                            valid_sha = cached_sha
+
+                            # Get SHA if not cached
+                            if not valid_sha:
+                                if (effective_lookup_repo, target_ref) in sha_map:
+                                    valid_sha = sha_map[(effective_lookup_repo, target_ref)]
+                                else:
+                                    sha_info = await self._get_commit_sha_for_reference(
+                                        effective_lookup_repo, target_ref
+                                    )
+                                    valid_sha = sha_info["sha"] if sha_info else None
+
+                    # If still no valid ref, use fallback logic
+                    if not valid_ref:
+                        valid_ref = await self._find_valid_reference(
+                            base_repo_key, action_call.reference
                         )
-                        invalid_ref_comment: str | None = (
+
+                        if not valid_ref:
+                            valid_ref = await self._get_fallback_reference(
+                                base_repo_key, action_call.reference
+                            )
+
+                        if not valid_ref:
+                            # Last resort: use default branch
+                            repo_info = await self._get_repository_info(base_repo_key)
+                            valid_ref = (
+                                repo_info.get("default_branch", "main")
+                                if repo_info
+                                else "main"
+                            )
+
+                        # Get SHA for the fallback reference
+                        if valid_ref and not valid_sha:
+                            if (base_repo_key, valid_ref) in sha_map:
+                                valid_sha = sha_map[(base_repo_key, valid_ref)]
+                            else:
+                                sha_info = await self._get_commit_sha_for_reference(
+                                    base_repo_key, valid_ref
+                                )
+                                valid_sha = sha_info["sha"] if sha_info else None
+
+                    # Now build the fix if we have a valid reference
+                    # When require_pinned_sha is False, we can fix with just the ref
+                    if valid_ref and (valid_sha or not self.config.require_pinned_sha):
+                        # Determine final_ref based on require_pinned_sha setting
+                        if self.config.require_pinned_sha:
+                            # valid_sha is guaranteed to be truthy here due to the outer condition
+                            assert valid_sha is not None  # Type narrowing for mypy
+                            final_ref = valid_sha
+                        else:
+                            # Can use valid_ref directly when pinning not required
+                            assert valid_ref is not None  # Type narrowing for mypy
+                            final_ref = valid_ref
+
+                        # Set version comment to add to the fixed line (if valid_ref is a version tag)
+                        replacement_comment: str | None = (
                             valid_ref
                             if ActionCallPatterns.VERSION_TAG_PATTERN.match(valid_ref)
                             else None
                         )
 
-                        # Build the fixed line
                         fixed_line = self._build_fixed_line(
                             action_call,
-                            invalid_ref_final,
-                            invalid_ref_comment,
+                            final_ref,
+                            replacement_comment,
                             repo_key if repo_was_redirected else None,
                         )
 
@@ -776,6 +782,9 @@ class AutoFixer:
                             if show_live_updates and live:
                                 update_msg = f"  Fixed invalid ref: {action_call.organization}/{action_call.repository} in {file_name}"
                                 live.update(Text(update_msg, style="dim"))
+                            continue
+                    # Invalid reference handled - skip latest version check to avoid redundant processing
+                    # (latest version was already tried as part of invalid ref resolution)
                     continue
 
                 # Get latest version info (using the effective repo after redirect)

@@ -33,10 +33,33 @@ if TYPE_CHECKING:
 class TestFixTestCallsFlag:
     """Test --fix-test-calls flag behavior."""
 
+    @pytest.fixture(autouse=True)
+    def cleanup_cache(self) -> Generator[None, None, None]:
+        """Clean up cache before each test for isolation."""
+        import shutil
+
+        cache_dir = Path.home() / ".cache" / "gha-workflow-linter"
+
+        # Clean up before test to ensure isolation
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+
+        yield
+
     @pytest.fixture
     def runner(self) -> CliRunner:
-        """Create a CLI runner."""
-        return CliRunner()
+        """Create a CLI runner with isolated environment."""
+        import os
+
+        # Create runner with isolated environment
+        runner = CliRunner(
+            env={
+                k: v
+                for k, v in os.environ.items()
+                if not k.startswith("GITHUB")
+            }
+        )
+        return runner
 
     @pytest.fixture
     def temp_workflow_dir(self) -> Generator[Path, None, None]:
@@ -60,12 +83,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: modeseven-lfreleng-actions/pypi-publish-action@update-action  # Testing
+      - uses: lfreleng-actions/pypi-publish-action@update-action  # Testing
       - uses: actions/checkout@v4
 """)
 
+        # Use isolated runner to avoid state pollution
         result = runner.invoke(
-            app, ["lint", str(temp_workflow_dir), "--no-cache"]
+            app,
+            ["lint", str(temp_workflow_dir), "--no-cache"],
+            catch_exceptions=False,
         )
 
         # Should succeed or show test references as warnings, not errors
@@ -73,9 +99,28 @@ jobs:
 
         # The output should indicate test references differently
         clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
-        if "modeseven-lfreleng-actions/pypi-publish-action" in clean_output:
-            # Should be marked as test reference, not a hard error
-            assert "test" in clean_output.lower() or "Testing" in clean_output
+
+        # The action should either be:
+        # 1. Explicitly shown as skipped (with "Skipped" message and "testing" keyword)
+        # 2. Appear in output with a test marker
+        has_action = (
+            "lfreleng-actions/pypi-publish-action" in clean_output
+            or "pypi-publish-action" in clean_output
+        )
+        has_skipped_message = "Skipped" in clean_output and (
+            "testing" in clean_output.lower() or "Testing" in clean_output
+        )
+        has_test_marker = (
+            "Testing" in clean_output or "test" in clean_output.lower()
+        )
+
+        # Either the action should be explicitly marked as skipped, or it should appear with test marker
+        # It should NOT be silently ignored without any output
+        assert has_skipped_message or (has_action and has_test_marker), (
+            f"Test action not properly reported in output. "
+            f"Expected either 'Skipped' message or action with test marker.\n"
+            f"Output:\n{clean_output}"
+        )
 
     def test_fix_test_calls_flag_enables_fixing(
         self, temp_workflow_dir: Path, runner: CliRunner
@@ -467,7 +512,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: modeseven-lfreleng-actions/test-action@branch  # Testing new feature
+      - uses: lfreleng-actions/test-action@branch  # Testing new feature
 """)
 
             result = runner.invoke(
@@ -479,6 +524,6 @@ jobs:
 
             # Output should reference the test action
             assert (
-                "modeseven-lfreleng-actions/test-action" in clean_output
+                "lfreleng-actions/test-action" in clean_output
                 or "test" in clean_output.lower()
             )
