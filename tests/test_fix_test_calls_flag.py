@@ -34,17 +34,16 @@ class TestFixTestCallsFlag:
     """Test --fix-test-calls flag behavior."""
 
     @pytest.fixture(autouse=True)
-    def cleanup_cache(self) -> Generator[None, None, None]:
-        """Clean up cache before each test for isolation."""
-        import shutil
-
-        cache_dir = Path.home() / ".cache" / "gha-workflow-linter"
-
-        # Clean up before test to ensure isolation
-        if cache_dir.exists():
-            shutil.rmtree(cache_dir)
-
-        yield
+    def isolated_home(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> Generator[Path, None, None]:
+        """Isolate HOME directory to prevent tests from touching real user cache."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_home = Path(temp_dir)
+            monkeypatch.setenv("HOME", str(temp_home))
+            # Also set for Windows compatibility
+            monkeypatch.setenv("USERPROFILE", str(temp_home))
+            yield temp_home
 
     @pytest.fixture
     def runner(self) -> CliRunner:
