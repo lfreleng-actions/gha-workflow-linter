@@ -1249,6 +1249,35 @@ def _display_stale_actions_from_summary(
     console.print("[cyan]Run with [bold]--auto-fix --auto-latest[/bold] to update these actions 💡[/cyan]\n")
 
 
+def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
+    """
+    Print a list of action references, collapsing duplicates per file.
+
+    Items are dicts with at least ``action_ref`` and ``line`` keys. When the
+    same ``action_ref`` appears more than once for a file, a single entry is
+    printed with a ``(xN)`` count and the set of source line numbers, instead
+    of repeating the same line N times.
+    """
+    # Preserve first-seen order while grouping by action_ref
+    grouped: dict[str, list[int]] = {}
+    for item in items:
+        ref = item["action_ref"]
+        line = item["line"]
+        grouped.setdefault(ref, []).append(line)
+
+    for ref, lines in grouped.items():
+        count = len(lines)
+        sorted_lines = sorted(lines)
+        if count == 1:
+            console.print(f"   {ref} [dim][line {sorted_lines[0]}][/dim]")
+        else:
+            line_list = ", ".join(str(n) for n in sorted_lines)
+            console.print(
+                f"   {ref} [dim](x{count})[/dim] "
+                f"[dim][lines {line_list}][/dim]"
+            )
+
+
 def output_text_results(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
@@ -1338,22 +1367,21 @@ def output_text_results(
             else:
                 actual_errors[relative_path].append(error_info)
 
-        # Display actual validation errors
+        # Display actual validation errors (deduplicated per file: same
+        # action_ref appearing multiple times is collapsed with a count)
         if actual_errors:
             console.print("\n[red]Validation Errors:[/red]")
             for file_path in sorted(actual_errors.keys()):
                 console.print(f"Invalid action call in workflow: [bold]{file_path}[/bold] ❌")
-                for error_info in actual_errors[file_path]:
-                    console.print(f"   {error_info['action_ref']} [dim][line {error_info['line']}][/dim]")
+                _print_deduplicated_action_refs(actual_errors[file_path])
 
-        # Display test action warnings
+        # Display test action warnings (deduplicated per file)
         if test_warnings:
             console.print("\n[yellow]Test Action Calls:[/yellow]")
             for file_path in sorted(test_warnings.keys()):
                 # Two spaces is deliberate; fixes rendering in terminal output
                 console.print(f"Test action calls in workflow: [bold]{file_path}[/bold] ⚠️")
-                for warning_info in test_warnings[file_path]:
-                    console.print(f"   {warning_info['action_ref']} [dim][line {warning_info['line']}][/dim]")
+                _print_deduplicated_action_refs(test_warnings[file_path])
 
 
 def output_json_results(
