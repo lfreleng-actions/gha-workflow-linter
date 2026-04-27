@@ -12,7 +12,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
@@ -26,8 +25,9 @@ import typer
 
 from ._version import __version__
 from .auto_fix import AutoFixer
-from .cache import ValidationCache
+from .cache import CachePrimeReport, ValidationCache
 from .config import ConfigManager
+from .console import console
 from .exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -98,9 +98,6 @@ def cache_help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
     console.print()
     console.print(ctx.get_help())
     raise typer.Exit()
-
-
-console = Console()
 
 
 def _print_version() -> None:
@@ -812,9 +809,44 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
     """
     logger = logging.getLogger(__name__)
 
-    # Initialize scanner and validator
+    # ------------------------------------------------------------------
+    # Phase 1 — prepare. Free to print: no Progress / Live UI is active.
+    # ------------------------------------------------------------------
     scanner = WorkflowScanner(config)
 
+    # Build a single ValidationCache and share it across the validator
+    # and (later) the auto-fixer to avoid duplicate disk I/O and
+    # competing save() calls.
+    shared_cache = ValidationCache(config.cache)
+
+    # Eagerly load the cache and run all startup-time checks so any
+    # banners render *before* opening the Rich Progress UI (printing
+    # inside the progress block would interleave with the active
+    # spinner and corrupt output).
+    prime_report = shared_cache.prime()
+    # Only render banners when prime_report is a genuine
+    # CachePrimeReport. Test suites occasionally mock ValidationCache
+    # entirely, in which case prime() returns a Mock whose attributes
+    # are also Mocks (and not safely .join-able); ignore those.
+    if isinstance(prime_report, CachePrimeReport) and not options.quiet:
+        if prime_report.version_mismatch_purged:
+            console.print(
+                "[cyan]Cache version mismatch; "
+                "purging cache to ensure consistency ♻️[/cyan]"
+            )
+        if prime_report.suspicious_patterns_purged:
+            reasons = ", ".join(prime_report.suspicious_reasons) or "unknown"
+            console.print(
+                "[yellow]Suspicious cache patterns detected "
+                f"({reasons}); purging cache ♻️[/yellow]"
+            )
+
+    # ------------------------------------------------------------------
+    # Phase 2 — scan + validate. Progress / Live UI is active. No
+    # out-of-band console.print calls below until the Progress block
+    # closes (banners, errors, and tables print after the ``with``
+    # exits in phase 3).
+    # ------------------------------------------------------------------
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -848,7 +880,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
         )
 
         try:
-            validator = ActionCallValidator(config)
+            validator = ActionCallValidator(config, cache=shared_cache)
             validation_errors = validator.validate_action_calls(
                 workflow_calls, progress, validate_task
             )
@@ -914,7 +946,10 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
             logger.error(f"Unexpected error validating action calls: {e}")
             return 1
 
-    # Auto-fix validation errors if enabled, or collect skipped testing items
+    # ------------------------------------------------------------------
+    # Phase 3 — report + auto-fix. Progress / Live UI has closed; we
+    # are free to console.print again.
+    # ------------------------------------------------------------------
     fixed_files: dict[Path, list[dict[str, str]]] = {}
     redirect_stats: dict[str, int] = {"actions_moved": 0, "calls_updated": 0}
     stale_actions_summary: dict[str, list[dict[str, Any]]] = {}
@@ -934,7 +969,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
                 dict[str, list[dict[str, Any]]],
             ]:
                 async with AutoFixer(
-                    config, base_path=options.path
+                    config,
+                    base_path=options.path,
+                    cache=shared_cache,
                 ) as auto_fixer:
                     # When auto_fix is enabled, always pass all action calls to check
                     # check_for_updates=True only when auto_latest is enabled (update to latest versions)
@@ -1250,8 +1287,7 @@ def _display_stale_actions_from_summary(
         stale_actions: Dictionary mapping relative file paths to lists of stale action info
         options: CLI options
     """
-    console = Console()
-
+    # Already imported at module level via .console singleton.
     if not stale_actions:
         console.print("[green]All action calls are up to date! ✅[/green]\n")
         return

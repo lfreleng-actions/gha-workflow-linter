@@ -45,19 +45,30 @@ from .utils import has_test_comment
 class ActionCallValidator:
     """Validator for GitHub Actions and workflow calls using GraphQL API or Git operations."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        cache: ValidationCache | None = None,
+    ) -> None:
         """
         Initialize the validator.
 
         Args:
-            config: Configuration object
+            config: Configuration object.
+            cache: Optional pre-built ``ValidationCache``. The CLI layer
+                builds and primes a single shared cache and threads it
+                through both the validator and the auto-fixer to avoid
+                duplicate disk reads / writes. When ``None`` the validator
+                builds its own cache (useful for ad-hoc / library use).
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
         self._github_client: GitHubGraphQLClient | None = None
         self._git_client: GitValidationClient | None = None
         self.api_stats = APICallStats()  # pyright: ignore[reportCallIssue]
-        self._cache = ValidationCache(config.cache)
+        self._cache = (
+            cache if cache is not None else ValidationCache(config.cache)
+        )
         self._validation_method: ValidationMethod | None = None
 
     async def __aenter__(self) -> ActionCallValidator:
@@ -117,8 +128,6 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
-        # Check for suspicious cache patterns and auto-purge if needed
-        self._cache.auto_purge_if_suspicious()
         if self._validation_method == ValidationMethod.GITHUB_API:
             if not self._github_client:
                 raise RuntimeError("GitHub client not initialized")

@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import os
+import pathlib
 from pathlib import Path
 import shutil
 import tempfile
 import time
+from typing import TYPE_CHECKING
 
 from gha_workflow_linter.cache import (
     CacheConfig,
@@ -17,6 +19,9 @@ from gha_workflow_linter.cache import (
     ValidationCache,
 )
 from gha_workflow_linter.models import ValidationResult
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class TestCachedValidationEntry:
@@ -210,3 +215,104 @@ class TestValidationCache:
         assert hasattr(stats, "misses")
         assert stats.hits >= 0
         assert stats.misses >= 0
+
+
+class TestCachePrime:
+    """Regression tests for ``ValidationCache.prime()``.
+
+    The cache module must be UI-free; ``prime()`` reports its findings
+    via a ``CachePrimeReport`` instead of printing. The CLI layer renders
+    banners *before* opening any Rich Progress UI so output never
+    interleaves with a Live spinner.
+    """
+
+    def setup_method(self) -> None:
+        self._temp_cache_dir = pathlib.Path(  # pyright: ignore[reportUninitializedInstanceVariable]
+            tempfile.mkdtemp(prefix="gha-workflow-linter-prime-")
+        )
+        self.cache_config = CacheConfig(  # pyright: ignore[reportUninitializedInstanceVariable, reportCallIssue]
+            enabled=True,
+            cache_dir=self._temp_cache_dir,
+            cache_file="cache.json",
+        )
+
+    def teardown_method(self) -> None:
+        shutil.rmtree(self._temp_cache_dir, ignore_errors=True)
+
+    def test_prime_no_cache_file_returns_empty_report(self) -> None:
+        from gha_workflow_linter.cache import CachePrimeReport
+
+        cache = ValidationCache(self.cache_config)
+        report = cache.prime()
+        assert isinstance(report, CachePrimeReport)
+        assert report.version_mismatch_purged is False
+        assert report.suspicious_patterns_purged is False
+        assert report.suspicious_reasons == ()
+
+    def test_prime_idempotent(self) -> None:
+        cache = ValidationCache(self.cache_config)
+        first = cache.prime()
+        second = cache.prime()
+        assert first.version_mismatch_purged == second.version_mismatch_purged
+
+    def test_prime_disabled_cache_no_op(self) -> None:
+        from gha_workflow_linter.cache import CachePrimeReport
+
+        config = CacheConfig(  # pyright: ignore[reportCallIssue]
+            enabled=False,
+            cache_dir=self._temp_cache_dir,
+            cache_file="cache.json",
+        )
+        cache = ValidationCache(config)
+        report = cache.prime()
+        assert isinstance(report, CachePrimeReport)
+        assert report.version_mismatch_purged is False
+        assert report.suspicious_patterns_purged is False
+
+    def test_prime_detects_version_mismatch(self) -> None:
+        """A pre-existing cache from a different tool version triggers a
+        version-mismatch purge, surfaced via the report (not stdout)."""
+        import json
+
+        # Write a cache file with a deliberately-stale version.
+        stale = {
+            "_metadata": {
+                "version": "0.0.0-fake",
+                "created_timestamp": time.time(),
+                "entry_count": 0,
+                "redirect_count": 0,
+                "latest_version_count": 0,
+            }
+        }
+        cache_path = self._temp_cache_dir / "cache.json"
+        cache_path.write_text(json.dumps(stale))
+
+        cache = ValidationCache(self.cache_config)
+        report = cache.prime()
+        assert report.version_mismatch_purged is True
+        assert report.suspicious_patterns_purged is False
+
+    def test_prime_does_not_print(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Sanity: prime() must not write to stdout/stderr regardless of
+        what it does internally; the CLI layer owns user-facing output."""
+        import json
+
+        stale = {
+            "_metadata": {
+                "version": "0.0.0-fake",
+                "created_timestamp": time.time(),
+                "entry_count": 0,
+                "redirect_count": 0,
+                "latest_version_count": 0,
+            }
+        }
+        cache_path = self._temp_cache_dir / "cache.json"
+        cache_path.write_text(json.dumps(stale))
+
+        cache = ValidationCache(self.cache_config)
+        cache.prime()
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""

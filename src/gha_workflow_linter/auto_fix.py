@@ -15,11 +15,11 @@ import time
 from typing import Any
 
 import httpx
-from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
 from .cache import ValidationCache
+from .console import console as _shared_console
 from .exceptions import GitError
 from .git_validator import (
     GitValidationClient,
@@ -135,20 +135,30 @@ def _find_most_specific_version_tag(
 class AutoFixer:
     """Auto-fixes GitHub Actions workflow issues."""
 
-    def __init__(self, config: Config, base_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        base_path: Path | None = None,
+        cache: ValidationCache | None = None,
+    ) -> None:
         """
         Initialize the auto-fixer.
 
         Args:
-            config: Configuration object
-            base_path: Base path for making file paths relative in output
+            config: Configuration object.
+            base_path: Base path for making file paths relative in output.
+            cache: Optional pre-built ``ValidationCache`` shared with the
+                validator. When ``None`` the auto-fixer builds its own
+                cache.
         """
         self.config = config
         self.base_path = base_path or Path.cwd()
         self.logger = logging.getLogger(__name__)
         self._http_client: httpx.AsyncClient | None = None
         self._graphql_client: GitHubGraphQLClient | None = None
-        self._cache = ValidationCache(config.cache)
+        self._cache = (
+            cache if cache is not None else ValidationCache(config.cache)
+        )
         self._git_client: GitValidationClient | None = None
 
         # Caching for batch operations (session-level cache)
@@ -306,7 +316,7 @@ class AutoFixer:
         # Use batch processing for efficient fixes
         # validation_error_calls will be fixed regardless of check_for_updates setting
         # Non-error updates only applied when check_for_updates=True (--auto-latest)
-        console = Console()
+        console = _shared_console
         if check_for_updates:
             self.logger.debug(
                 "Checking all action calls for updates (--auto-latest enabled)"
