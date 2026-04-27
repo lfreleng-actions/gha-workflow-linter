@@ -29,9 +29,12 @@ from gha_workflow_linter.models import (
 class TestGitHubGraphQLClient:
     """Test GitHub GraphQL API client."""
 
+    config: GitHubAPIConfig  # pyright: ignore[reportUninitializedInstanceVariable]
+    client: GitHubGraphQLClient  # pyright: ignore[reportUninitializedInstanceVariable]
+
     def setup_method(self) -> None:
         """Set up test fixtures."""
-        self.config = GitHubAPIConfig(
+        self.config = GitHubAPIConfig(  # pyright: ignore[reportCallIssue]
             token="ghp_test123",
             base_url="https://api.github.com/graphql",
             timeout=30.0,
@@ -50,14 +53,14 @@ class TestGitHubGraphQLClient:
 
     def test_init_without_token(self) -> None:
         """Test client initialization without token."""
-        config = GitHubAPIConfig(token=None)
+        config = GitHubAPIConfig(token=None)  # pyright: ignore[reportCallIssue]
         with patch.dict("os.environ", {}, clear=True):
             client = GitHubGraphQLClient(config)
             assert client._token is None
 
     def test_init_with_env_token(self) -> None:
         """Test client initialization with environment token."""
-        config = GitHubAPIConfig(token=None)
+        config = GitHubAPIConfig(token=None)  # pyright: ignore[reportCallIssue]
         with patch.dict("os.environ", {"GITHUB_TOKEN": "env_token123"}):
             client = GitHubGraphQLClient(config)
             assert client._token == "env_token123"
@@ -78,7 +81,7 @@ class TestGitHubGraphQLClient:
     @pytest.mark.asyncio
     async def test_aenter_without_token(self) -> None:
         """Test async context manager entry without token."""
-        config = GitHubAPIConfig(token=None)
+        config = GitHubAPIConfig(token=None)  # pyright: ignore[reportCallIssue]
         client = GitHubGraphQLClient(config)
 
         with patch("httpx.AsyncClient") as mock_client_class:
@@ -678,9 +681,11 @@ class TestGitHubGraphQLClient:
 class TestGitHubGraphQLClientIntegration:
     """Integration tests for GitHub GraphQL client."""
 
+    config: GitHubAPIConfig  # pyright: ignore[reportUninitializedInstanceVariable]
+
     def setup_method(self) -> None:
         """Set up test fixtures."""
-        self.config = GitHubAPIConfig(
+        self.config = GitHubAPIConfig(  # pyright: ignore[reportCallIssue]
             token="ghp_test123",
             batch_size=2,  # Small batch size for testing
         )

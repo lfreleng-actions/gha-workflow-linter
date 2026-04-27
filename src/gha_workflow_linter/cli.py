@@ -105,7 +105,7 @@ console = Console()
 
 def _print_version() -> None:
     """Print version string with consistent formatting."""
-    # Two spaces fixes rendering issues in terminal applications
+    # Keep version output formatting consistent across CLI help and callbacks.
     console.print(f"gha-workflow-linter version {__version__} 🏷️")
 
 
@@ -116,7 +116,9 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _preprocess_args_for_default_command(args: list[str] | None = None) -> list[str]:
+def _preprocess_args_for_default_command(
+    args: list[str] | None = None,
+) -> list[str]:
     """
     Preprocess CLI arguments to inject 'lint' command if no subcommand is provided.
 
@@ -133,11 +135,8 @@ def _preprocess_args_for_default_command(args: list[str] | None = None) -> list[
     """
     import sys
 
-    if args is None:
-        args = sys.argv[1:]
-    else:
-        # Make a copy to avoid modifying the original
-        args = list(args)
+    # Use sys.argv when no args provided; otherwise copy to avoid mutation.
+    args = sys.argv[1:] if args is None else list(args)
 
     # Known subcommands
     known_commands = {"lint", "cache"}
@@ -157,9 +156,21 @@ def _preprocess_args_for_default_command(args: list[str] | None = None) -> list[
         # Skip options and their values
         if arg.startswith("-"):
             # Check if this is a flag that takes a value
-            if arg in ("--config", "-c", "--github-token", "--workers", "-j",
-                      "--exclude", "-e", "--cache-ttl", "--validation-method",
-                      "--log-level", "--format", "-f", "--files"):
+            if arg in (
+                "--config",
+                "-c",
+                "--github-token",
+                "--workers",
+                "-j",
+                "--exclude",
+                "-e",
+                "--cache-ttl",
+                "--validation-method",
+                "--log-level",
+                "--format",
+                "-f",
+                "--files",
+            ):
                 # Skip the next argument (the value) if it exists
                 continue
             continue
@@ -347,7 +358,6 @@ def lint(
         "--no-cache",
         help="Bypass local cache and always validate against remote repositories",
     ),
-
     cache_ttl: int | None = typer.Option(
         None,
         "--cache-ttl",
@@ -394,7 +404,6 @@ def lint(
         "--files",
         help="Specific files to scan (supports wildcards, can be specified multiple times)",
     ),
-
     _help: bool = typer.Option(
         False,
         "--help",
@@ -605,13 +614,19 @@ def lint(
         # Display validation method being used (suppress for JSON output)
         if not quiet and output_format != "json":
             if config.validation_method == ValidationMethod.GITHUB_API:
-                console.print("[blue]Using validation method: [GraphQL] 🔍[/blue]")
+                console.print(
+                    "[blue]Using validation method: [GraphQL] 🔍[/blue]"
+                )
             else:
-                console.print("[blue]Using validation method: [Git/SSH] 🔍[/blue]")
+                console.print(
+                    "[blue]Using validation method: [Git/SSH] 🔍[/blue]"
+                )
 
             # Display number of parallel workers
             worker_source = "auto-detected" if workers is None else "configured"
-            console.print(f"[blue]Using {config.parallel_workers} parallel worker(s) ({worker_source}) ⚙️[/blue]")
+            console.print(
+                f"[blue]Using {config.parallel_workers} parallel worker(s) ({worker_source}) ⚙️[/blue]"
+            )
 
         # Only check rate limits if using GitHub API
         if config.validation_method == ValidationMethod.GITHUB_API:
@@ -769,7 +784,7 @@ def cache(
     console.print(f"Cache file: {cache_info['cache_file']}")
 
 
-def run_linter(config: Config, options: CLIOptions) -> int:
+def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
     """
     Run the main linting process.
 
@@ -892,19 +907,34 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # Determine if we should run auto-fix:
     # - If auto_fix is enabled, fix validation errors and check for outdated versions
     # - If auto_latest is also enabled, update to latest versions
-    should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (validation_errors or config.auto_fix)
+    should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (
+        validation_errors or config.auto_fix
+    )
     if should_run_auto_fix:
         try:
-            async def run_auto_fix() -> tuple[dict[Path, list[dict[str, str]]], dict[str, int], dict[str, list[dict[str, Any]]]]:
-                async with AutoFixer(config, base_path=options.path) as auto_fixer:
+
+            async def run_auto_fix() -> tuple[
+                dict[Path, list[dict[str, str]]],
+                dict[str, int],
+                dict[str, list[dict[str, Any]]],
+            ]:
+                async with AutoFixer(
+                    config, base_path=options.path
+                ) as auto_fixer:
                     # When auto_fix is enabled, always pass all action calls to check
                     # check_for_updates=True only when auto_latest is enabled (update to latest versions)
                     # check_for_updates=False means: fix validation errors, report outdated versions
                     all_calls = workflow_calls if config.auto_fix else {}
                     check_for_updates = config.auto_latest
-                    return await auto_fixer.fix_validation_errors(validation_errors, all_calls, check_for_updates=check_for_updates)
+                    return await auto_fixer.fix_validation_errors(
+                        validation_errors,
+                        all_calls,
+                        check_for_updates=check_for_updates,
+                    )
 
-            fixed_files, redirect_stats, stale_actions_summary = asyncio.run(run_auto_fix())
+            fixed_files, redirect_stats, stale_actions_summary = asyncio.run(
+                run_auto_fix()
+            )
 
             if fixed_files and not options.quiet:
                 # Separate skipped items from actual fixes
@@ -922,15 +952,23 @@ def run_linter(config: Config, options: CLIOptions) -> int:
                             has_fixes = True
 
                     if has_fixes:
-                        files_with_fixes[file_path] = [c for c in changes if c.get("skipped") != "true"]
+                        files_with_fixes[file_path] = [
+                            c for c in changes if c.get("skipped") != "true"
+                        ]
                     if has_skipped:
-                        files_with_skipped[file_path] = [c for c in changes if c.get("skipped") == "true"]
+                        files_with_skipped[file_path] = [
+                            c for c in changes if c.get("skipped") == "true"
+                        ]
 
                 # Display skipped testing items first
                 if files_with_skipped:
-                    console.print(f"\n[cyan]⏩ Skipped {sum(len(v) for v in files_with_skipped.values())} testing action(s) in {len(files_with_skipped)} file(s):[/cyan]")
+                    console.print(
+                        f"\n[cyan]Skipped {sum(len(v) for v in files_with_skipped.values())} testing action(s) in {len(files_with_skipped)} file(s): ⏩[/cyan]"
+                    )
                     for file_path, changes in files_with_skipped.items():
-                        console.print(f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]")
+                        console.print(
+                            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
+                        )
                         for change in changes:
                             # Extract just the uses: part from the raw line
                             line = change["old_line"].strip()
@@ -941,16 +979,24 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
                 # Display actual fixes
                 if files_with_fixes:
-                    total_workflow_calls_updated = sum(len(changes) for changes in files_with_fixes.values())
-                    console.print(f"\n[yellow]Updated {total_workflow_calls_updated} workflow call(s) in {len(files_with_fixes)} file(s): 🔧[/yellow]")
+                    total_workflow_calls_updated = sum(
+                        len(changes) for changes in files_with_fixes.values()
+                    )
+                    console.print(
+                        f"\n[yellow]Updated {total_workflow_calls_updated} workflow call(s) in {len(files_with_fixes)} file(s): 🔧[/yellow]"
+                    )
                     for file_path, changes in files_with_fixes.items():
-                        console.print(f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]")
+                        console.print(
+                            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
+                        )
                         for change in changes:
-                            console.print(f"[red]  - {change['old_line'].strip()}[/red]")
-                            console.print(f"[green]  + {change['new_line'].strip()}[/green]")
+                            console.print(
+                                f"[red]  - {change['old_line'].strip()}[/red]"
+                            )
+                            console.print(
+                                f"[green]  + {change['new_line'].strip()}[/green]"
+                            )
                     console.print()  # Add blank line after changes
-
-
 
         except Exception as e:
             logger.warning(f"Auto-fix failed: {e}")
@@ -1012,7 +1058,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # Otherwise, exit with error only if there are validation errors (excluding test references) and fail_on_error is enabled
     if options.fail_on_error:
         # Count actual errors (excluding test references)
-        actual_errors = [e for e in validation_errors if not has_test_comment(e.action_call)]
+        actual_errors = [
+            e for e in validation_errors if not has_test_comment(e.action_call)
+        ]
         if actual_errors:
             return 1
 
@@ -1023,7 +1071,7 @@ def _create_scan_summary_table(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
     total_fixes: int = 0,
-    redirect_stats: dict[str, int] | None = None
+    redirect_stats: dict[str, int] | None = None,
 ) -> Table:
     """Create the scan summary table.
 
@@ -1065,8 +1113,12 @@ def _create_scan_summary_table(
 
     # Redirect statistics - always displayed when redirects are found
     if redirect_stats and redirect_stats.get("actions_moved", 0) > 0:
-        table.add_row("Actions moved/relocated", str(redirect_stats["actions_moved"]))
-        table.add_row("Calls updated (relocated)", str(redirect_stats["calls_updated"]))
+        table.add_row(
+            "Actions moved/relocated", str(redirect_stats["actions_moved"])
+        )
+        table.add_row(
+            "Calls updated (relocated)", str(redirect_stats["calls_updated"])
+        )
 
     return table
 
@@ -1106,10 +1158,14 @@ def _create_api_stats_table(validation_summary: dict[str, Any]) -> Table | None:
     return api_table
 
 
-def _display_validation_summary(validation_summary: dict[str, Any], skip_success: bool = False) -> None:
+def _display_validation_summary(
+    validation_summary: dict[str, Any], skip_success: bool = False
+) -> None:
     """Display validation results summary."""
     # Calculate actual errors (excluding test references)
-    actual_errors = validation_summary["total_errors"] - validation_summary.get("test_references", 0)
+    actual_errors = validation_summary["total_errors"] - validation_summary.get(
+        "test_references", 0
+    )
     test_refs = validation_summary.get("test_references", 0)
 
     if actual_errors == 0 and test_refs == 0:
@@ -1119,9 +1175,7 @@ def _display_validation_summary(validation_summary: dict[str, Any], skip_success
 
     # Show actual errors
     if actual_errors > 0:
-        console.print(
-            f"[red]Found {actual_errors} validation errors ❌[/red]"
-        )
+        console.print(f"[red]Found {actual_errors} validation errors ❌[/red]")
 
         if validation_summary["invalid_repositories"] > 0:
             console.print(
@@ -1170,8 +1224,6 @@ def _display_validation_summary(validation_summary: dict[str, Any], skip_success
         )
 
 
-
-
 def _display_stale_actions_from_summary(
     stale_actions: dict[str, list[dict[str, Any]]],
     _options: CLIOptions,
@@ -1206,17 +1258,29 @@ def _display_stale_actions_from_summary(
 
     # Display separate counts for incorrect and outdated actions
     if incorrect_count > 0:
-        console.print(f"\n[red]Found {incorrect_count} incorrect action call(s) in {len(incorrect_files)} file(s)[/red]")
+        console.print(
+            f"\n[red]Found {incorrect_count} incorrect action call(s) in {len(incorrect_files)} file(s)[/red]"
+        )
     if outdated_count > 0:
-        console.print(f"[yellow]Found {outdated_count} outdated action call(s) in {len(outdated_files)} file(s)[/yellow]")
+        console.print(
+            f"[yellow]Found {outdated_count} outdated action call(s) in {len(outdated_files)} file(s)[/yellow]"
+        )
 
     console.print()
 
     for file_path in sorted(stale_actions.keys()):
         console.print(f"[bold]{file_path} 📄[/bold]")
         for action_info in stale_actions[file_path]:
-            current_display = action_info["current_ref"][:12] + "..." if len(action_info["current_ref"]) > 40 else action_info["current_ref"]
-            latest_display = action_info["latest_ref"][:12] + "..." if len(action_info["latest_ref"]) > 40 else action_info["latest_ref"]
+            current_display = (
+                action_info["current_ref"][:12] + "..."
+                if len(action_info["current_ref"]) > 40
+                else action_info["current_ref"]
+            )
+            latest_display = (
+                action_info["latest_ref"][:12] + "..."
+                if len(action_info["latest_ref"]) > 40
+                else action_info["latest_ref"]
+            )
 
             # Check if this is an invalid reference (validation error) or just outdated
             is_invalid = action_info.get("is_invalid", False)
@@ -1229,24 +1293,42 @@ def _display_stale_actions_from_summary(
             # Use different colors and labels based on whether it's invalid or just outdated
             if is_invalid:
                 # Invalid reference - entire line in red, correction line in green
-                console.print(f"  [red]Line {action_info['line']}:[/red] [red]{action_display}[/red]")
+                console.print(
+                    f"  [red]Line {action_info['line']}:[/red] [red]{action_display}[/red]"
+                )
                 if action_info["current_comment"]:
-                    console.print(f"    [red]Invalid:  @{current_display} # {action_info['current_comment'].lstrip('#').strip()}[/red]")
+                    console.print(
+                        f"    [red]Invalid:  @{current_display} # {action_info['current_comment'].lstrip('#').strip()}[/red]"
+                    )
                 else:
-                    console.print(f"    [red]Invalid:  @{current_display}[/red]")
-                console.print(f"    [green]Correct:  @{latest_display} # {action_info['latest_version']}[/green]")
+                    console.print(
+                        f"    [red]Invalid:  @{current_display}[/red]"
+                    )
+                console.print(
+                    f"    [green]Correct:  @{latest_display} # {action_info['latest_version']}[/green]"
+                )
             else:
                 # Just outdated - use yellow for line and current ref
-                console.print(f"  [yellow]Line {action_info['line']}:[/yellow] {action_display}")
-                console.print(f"    [yellow]Current:[/yellow]  @{current_display}", end="")
+                console.print(
+                    f"  [yellow]Line {action_info['line']}:[/yellow] {action_display}"
+                )
+                console.print(
+                    f"    [yellow]Current:[/yellow]  @{current_display}", end=""
+                )
                 if action_info["current_comment"]:
-                    console.print(f" [dim]# {action_info['current_comment'].lstrip('#').strip()}[/dim]")
+                    console.print(
+                        f" [dim]# {action_info['current_comment'].lstrip('#').strip()}[/dim]"
+                    )
                 else:
                     console.print()
-                console.print(f"    [green]Latest:[/green]   @{latest_display} [dim]# {action_info['latest_version']}[/dim]")
+                console.print(
+                    f"    [green]Latest:[/green]   @{latest_display} [dim]# {action_info['latest_version']}[/dim]"
+                )
         console.print()
 
-    console.print("[cyan]Run with [bold]--auto-fix --auto-latest[/bold] to update these actions 💡[/cyan]\n")
+    console.print(
+        "[cyan]Run with [bold]--auto-fix --auto-latest[/bold] to update these actions 💡[/cyan]\n"
+    )
 
 
 def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
@@ -1255,26 +1337,31 @@ def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
 
     Items are dicts with at least ``action_ref`` and ``line`` keys. When the
     same ``action_ref`` appears more than once for a file, a single entry is
-    printed with a ``(xN)`` count and the set of source line numbers, instead
-    of repeating the same line N times.
+    printed annotated with the number of occurrences and the sorted set of
+    distinct source line numbers, instead of repeating the same line N times.
     """
-    # Preserve first-seen order while grouping by action_ref
-    grouped: dict[str, list[int]] = {}
+    # Preserve first-seen order while grouping by action_ref. Use a set so
+    # that repeated (ref, line) pairs collapse to a single line number, then
+    # render in sorted order for stable output.
+    grouped: dict[str, set[int]] = {}
+    occurrences: dict[str, int] = {}
     for item in items:
         ref = item["action_ref"]
         line = item["line"]
-        grouped.setdefault(ref, []).append(line)
+        grouped.setdefault(ref, set()).add(line)
+        occurrences[ref] = occurrences.get(ref, 0) + 1
 
-    for ref, lines in grouped.items():
-        count = len(lines)
-        sorted_lines = sorted(lines)
+    for ref, line_set in grouped.items():
+        count = occurrences[ref]
+        sorted_lines = sorted(line_set)
         if count == 1:
             console.print(f"   {ref} [dim][line {sorted_lines[0]}][/dim]")
         else:
             line_list = ", ".join(str(n) for n in sorted_lines)
+            label = "line" if len(sorted_lines) == 1 else "lines"
             console.print(
                 f"   {ref} [dim](x{count})[/dim] "
-                f"[dim][lines {line_list}][/dim]"
+                f"[dim][{label} {line_list}][/dim]"
             )
 
 
@@ -1311,7 +1398,9 @@ def output_text_results(
                         total_fixes += 1
 
         # Display scan summary (with redirect stats if available)
-        table = _create_scan_summary_table(scan_summary, validation_summary, total_fixes, redirect_stats)
+        table = _create_scan_summary_table(
+            scan_summary, validation_summary, total_fixes, redirect_stats
+        )
 
         # Display API statistics if available
         api_table = _create_api_stats_table(validation_summary)
@@ -1334,12 +1423,19 @@ def output_text_results(
                     break
 
         # Display validation summary (but skip "all valid" message if files were modified or there are stale actions)
-        has_stale_actions = bool(stale_actions_summary and any(stale_actions_summary.values()))
-        _display_validation_summary(validation_summary, skip_success=(has_actual_fixes or has_stale_actions))
+        has_stale_actions = bool(
+            stale_actions_summary and any(stale_actions_summary.values())
+        )
+        _display_validation_summary(
+            validation_summary,
+            skip_success=(has_actual_fixes or has_stale_actions),
+        )
 
         # Display modification message after scan summary if files were modified
         if has_actual_fixes:
-            console.print("\n[yellow]Files have been modified; please review the changes and commit them ⚠️[/yellow]")
+            console.print(
+                "\n[yellow]Files have been modified; please review the changes and commit them ⚠️[/yellow]"
+            )
 
     # Separate errors by type
     if errors:
@@ -1358,7 +1454,7 @@ def output_text_results(
             error_info = {
                 "action_ref": action_ref,
                 "line": error.action_call.line_number,
-                "result": error.result
+                "result": error.result,
             }
 
             # Check if this is a test reference based on comment
@@ -1372,15 +1468,18 @@ def output_text_results(
         if actual_errors:
             console.print("\n[red]Validation Errors:[/red]")
             for file_path in sorted(actual_errors.keys()):
-                console.print(f"Invalid action call in workflow: [bold]{file_path}[/bold] ❌")
+                console.print(
+                    f"Invalid action call in workflow: [bold]{file_path}[/bold] ❌"
+                )
                 _print_deduplicated_action_refs(actual_errors[file_path])
 
         # Display test action warnings (deduplicated per file)
         if test_warnings:
             console.print("\n[yellow]Test Action Calls:[/yellow]")
             for file_path in sorted(test_warnings.keys()):
-                # Two spaces is deliberate; fixes rendering in terminal output
-                console.print(f"Test action calls in workflow: [bold]{file_path}[/bold] ⚠️")
+                console.print(
+                    f"Test action calls in workflow: [bold]{file_path}[/bold] ⚠️"
+                )
                 _print_deduplicated_action_refs(test_warnings[file_path])
 
 

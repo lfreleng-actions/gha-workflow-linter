@@ -361,7 +361,7 @@ class Config(BaseModel):
     log_level: LogLevel = Field(LogLevel.INFO, description="Logging level")
     parallel_workers: int = Field(
         default_factory=get_default_workers,
-        description="Number of parallel workers (auto-detects based on CPU count)"
+        description="Number of parallel workers (auto-detects based on CPU count)",
     )
     scan_extensions: list[str] = Field(
         default_factory=lambda: [".yml", ".yaml"],
@@ -383,7 +383,8 @@ class Config(BaseModel):
         False, description="Use latest versions when auto-fixing"
     )
     allow_prerelease: bool = Field(
-        False, description="Allow prerelease versions when finding latest versions"
+        False,
+        description="Allow prerelease versions when finding latest versions",
     )
     two_space_comments: bool = Field(
         True, description="Use two spaces before inline comments"
@@ -392,23 +393,28 @@ class Config(BaseModel):
         False, description="Skip scanning action.yaml/action.yml files"
     )
     fix_test_calls: bool = Field(
-        False, description="Enable action call fixes with test-related keywords in comments (e.g., test, testing)"
+        False,
+        description="Enable action call fixes with test-related keywords in comments (e.g., test, testing)",
     )
 
+    # pydantic BaseModel subclasses with all-defaulted fields accept no
+    # arguments at runtime, but basedpyright reports reportCallIssue for
+    # them. Suppress that one diagnostic on the factory references.
     network: NetworkConfig = Field(
-        default_factory=NetworkConfig,
+        default_factory=NetworkConfig,  # pyright: ignore[reportArgumentType]
         description="Network configuration",
     )
     git: GitConfig = Field(
-        default_factory=GitConfig,
+        default_factory=GitConfig,  # pyright: ignore[reportArgumentType]
         description="Git operations configuration",
     )
     github_api: GitHubAPIConfig = Field(
-        default_factory=GitHubAPIConfig,
+        default_factory=GitHubAPIConfig,  # pyright: ignore[reportArgumentType]
         description="GitHub API configuration",
     )
     cache: CacheConfig = Field(
-        default_factory=CacheConfig, description="Cache configuration"
+        default_factory=CacheConfig,  # pyright: ignore[reportArgumentType]
+        description="Cache configuration",
     )
 
     @property
@@ -457,7 +463,8 @@ class CLIOptions(BaseModel):
         None, description="Use latest versions when auto-fixing"
     )
     allow_prerelease: bool | None = Field(
-        None, description="Allow prerelease versions when finding latest versions"
+        None,
+        description="Allow prerelease versions when finding latest versions",
     )
     two_space_comments: bool | None = Field(
         None, description="Use two spaces before inline comments"
