@@ -65,7 +65,7 @@ def get_github_token_with_fallback(
                 console.print(
                     "✅ Successfully obtained GitHub token from GitHub CLI"
                 )
-            logger.info("Successfully obtained GitHub token from GitHub CLI")
+            logger.debug("Successfully obtained GitHub token from GitHub CLI")
             return cli_token
     except Exception as e:
         logger.debug(f"Failed to obtain token from GitHub CLI: {e}")

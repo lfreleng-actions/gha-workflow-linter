@@ -453,7 +453,13 @@ class GitHubGraphQLClient:
         self, owner: str, name: str, refs: list[str]
     ) -> dict[str, bool]:
         """
-        Validate branch and tag names using GraphQL.
+        Validate branch and tag names using GraphQL aliases.
+
+        Resolves each requested reference directly by qualified name in a
+        single GraphQL request, regardless of how many branches or tags the
+        repository has. This avoids paginating through every ref in the
+        repository (some repos have hundreds or thousands of refs) and
+        eliminates the previous "first 100 + fallback" pattern.
 
         Args:
             owner: Repository owner
@@ -463,104 +469,16 @@ class GitHubGraphQLClient:
         Returns:
             Dictionary mapping references to validation results
         """
-        # Query both branches and tags with pagination info
-        query = f"""
-        query {{
-            repository(owner: "{owner}", name: "{name}") {{
-                refs(refPrefix: "refs/heads/", first: 100) {{
-                    nodes {{
-                        name
-                    }}
-                    pageInfo {{
-                        hasNextPage
-                        endCursor
-                    }}
-                    totalCount
-                }}
-                tags: refs(refPrefix: "refs/tags/", first: 100) {{
-                    nodes {{
-                        name
-                    }}
-                    pageInfo {{
-                        hasNextPage
-                        endCursor
-                    }}
-                    totalCount
-                }}
-            }}
-        }}
-        """
+        if not refs:
+            return {}
 
-        response_data = await self._execute_graphql_query(query)
+        results = await self._validate_refs_batch_graphql(owner, name, refs)
 
-        # Extract available branches and tags
-        repo_data = response_data.get("data", {}).get("repository", {})
-
-        branches = set()
-        branches_has_more = False
-        branches_total = 0
-        if repo_data.get("refs"):
-            refs_data = repo_data["refs"]
-            if refs_data.get("nodes"):
-                branches = {node["name"] for node in refs_data["nodes"]}
-            page_info = refs_data.get("pageInfo", {})
-            branches_has_more = page_info.get("hasNextPage", False)
-            branches_total = refs_data.get("totalCount", 0)
-
-        tags = set()
-        tags_has_more = False
-        tags_total = 0
-        if repo_data.get("tags"):
-            tags_data = repo_data["tags"]
-            if tags_data.get("nodes"):
-                tags = {node["name"] for node in tags_data["nodes"]}
-            page_info = tags_data.get("pageInfo", {})
-            tags_has_more = page_info.get("hasNextPage", False)
-            tags_total = tags_data.get("totalCount", 0)
-
-        # Check if we need to warn about pagination limits
-        if branches_has_more or tags_has_more:
-            self.logger.warning(
-                f"Repository {owner}/{name} has more than 100 branches or tags "
-                f"(branches: {branches_total}, tags: {tags_total}). "
-                f"Validation may be incomplete for references not in the first 100. "
-                f"Using fallback validation for references not found in initial fetch."
-            )
-
-        # Validate each reference - collect missing refs for batch fallback
-        results = {}
-        fallback_refs = []
-
-        for ref in refs:
-            is_valid = ref in branches or ref in tags
-
-            if is_valid:
-                results[ref] = True
-                ref_type = "branch" if ref in branches else "tag"
-                self.logger.debug(
-                    f"{ref_type.title()} exists: {owner}/{name}@{ref}"
-                )
-            elif branches_has_more or tags_has_more:
-                # If not found and we have more pages, collect for batch fallback
-                fallback_refs.append(ref)
+        for ref, valid in results.items():
+            if valid:
+                self.logger.debug(f"Reference exists: {owner}/{name}@{ref}")
             else:
-                # Not found and no more pages - definitively doesn't exist
-                results[ref] = False
                 self.logger.debug(f"Reference not found: {owner}/{name}@{ref}")
-
-        # Batch validate fallback refs instead of individual queries
-        if fallback_refs:
-            self.logger.debug(
-                f"Batch validating {len(fallback_refs)} references not in first 100 for {owner}/{name}"
-            )
-            fallback_results = await self._validate_refs_batch_graphql(owner, name, fallback_refs)
-            results.update(fallback_results)
-
-            for ref, valid in fallback_results.items():
-                if valid:
-                    self.logger.debug(f"Reference found via fallback: {owner}/{name}@{ref}")
-                else:
-                    self.logger.debug(f"Reference not found: {owner}/{name}@{ref}")
 
         return results
 
@@ -568,10 +486,11 @@ class GitHubGraphQLClient:
         self, owner: str, name: str, refs: list[str]
     ) -> dict[str, bool]:
         """
-        Batch validate references using GraphQL (fallback for pagination limits).
+        Batch validate references using GraphQL aliases.
 
-        This uses GraphQL aliases to check multiple refs in a single query,
-        avoiding N individual API calls.
+        Resolves each ref directly by qualified name in a single GraphQL
+        request, checking both refs/heads/<ref> and refs/tags/<ref>. This is
+        O(1) per ref regardless of how many refs the repository contains.
 
         Args:
             owner: Repository owner
@@ -616,7 +535,7 @@ class GitHubGraphQLClient:
                 results[ref] = is_valid
 
         except Exception as e:
-            self.logger.debug(f"Batch fallback validation failed for {owner}/{name}: {e}")
+            self.logger.debug(f"Batch ref validation failed for {owner}/{name}: {e}")
             # On error, mark all as invalid
             results.update({ref: False for ref in refs})
 

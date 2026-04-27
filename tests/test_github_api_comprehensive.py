@@ -241,8 +241,8 @@ class TestGitHubGraphQLClient:
             return_value={
                 "data": {
                     "repository": {
-                        "refs": {"nodes": []},
-                        "tags": {"nodes": [{"name": "v4"}]},
+                        "ref_0": None,
+                        "ref_0_tag": {"name": "v4"},
                     }
                 }
             },
@@ -254,8 +254,9 @@ class TestGitHubGraphQLClient:
             mock_execute.assert_called_once()
             query_arg = mock_execute.call_args[0][0]
             assert "repository(" in query_arg
-            assert "refs(" in query_arg
+            assert "ref(qualifiedName:" in query_arg
             assert "refs/heads/" in query_arg
+            assert "refs/tags/" in query_arg
             assert result == mock_response
 
     @pytest.mark.asyncio
@@ -285,7 +286,7 @@ class TestGitHubGraphQLClient:
 
     @pytest.mark.asyncio
     async def test_validate_branch_tag_names_graphql(self) -> None:
-        """Test branch/tag name validation GraphQL query."""
+        """Test branch/tag name validation GraphQL query (alias-based)."""
         owner = "actions"
         name = "checkout"
         refs = ["v4"]
@@ -298,8 +299,8 @@ class TestGitHubGraphQLClient:
             return_value={
                 "data": {
                     "repository": {
-                        "refs": {"nodes": []},
-                        "tags": {"nodes": [{"name": "v4"}]},
+                        "ref_0": None,
+                        "ref_0_tag": {"name": "v4"},
                     }
                 }
             },
@@ -312,6 +313,7 @@ class TestGitHubGraphQLClient:
             query_arg = mock_execute.call_args[0][0]
             assert "repository(" in query_arg
             assert "refs/heads/" in query_arg
+            assert "refs/tags/" in query_arg
             assert result == mock_response
 
     @pytest.mark.asyncio
