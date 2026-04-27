@@ -292,6 +292,67 @@ class TestCachePrime:
         assert report.version_mismatch_purged is True
         assert report.suspicious_patterns_purged is False
 
+    def test_cache_version_reflects_on_disk_metadata(self) -> None:
+        """``_cache_version`` must mirror the on-disk metadata version
+        after a successful load, so ``get_cache_info()`` and
+        ``detect_suspicious_cache_patterns()`` report the actual file
+        version rather than the current tool version (regression: the
+        version-mismatch branch in those introspection APIs was dead
+        code because ``_cache_version`` was never updated)."""
+        import json
+
+        from gha_workflow_linter._version import __version__
+
+        # A successful load: cache file's version equals current tool
+        # version, so no purge happens. ``_cache_version`` should equal
+        # ``__version__``.
+        good = {
+            "_metadata": {
+                "version": __version__,
+                "created_timestamp": time.time(),
+                "entry_count": 0,
+                "redirect_count": 0,
+                "latest_version_count": 0,
+            }
+        }
+        cache_path = self._temp_cache_dir / "cache.json"
+        cache_path.write_text(json.dumps(good))
+
+        cache = ValidationCache(self.cache_config)
+        cache.prime()
+        assert cache._cache_version == __version__
+        # ``get_cache_info`` exposes the same value to callers.
+        info = cache.get_cache_info()
+        assert info["cache_version"] == __version__
+
+    def test_cache_version_resets_to_current_after_mismatch_purge(
+        self,
+    ) -> None:
+        """After a version-mismatch purge the in-memory state is
+        logically a fresh cache at the current tool version, so
+        ``_cache_version`` should reflect that (not the stale on-disk
+        value)."""
+        import json
+
+        from gha_workflow_linter._version import __version__
+
+        stale = {
+            "_metadata": {
+                "version": "0.0.0-stale",
+                "created_timestamp": time.time(),
+                "entry_count": 0,
+                "redirect_count": 0,
+                "latest_version_count": 0,
+            }
+        }
+        cache_path = self._temp_cache_dir / "cache.json"
+        cache_path.write_text(json.dumps(stale))
+
+        cache = ValidationCache(self.cache_config)
+        report = cache.prime()
+        assert report.version_mismatch_purged is True
+        assert cache._cache_version == __version__
+
     def test_prime_clears_inmemory_state_on_version_mismatch(self) -> None:
         """A version-mismatch purge must clear in-memory _cache,
         _redirects and _latest_versions populated from the stale

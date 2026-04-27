@@ -143,62 +143,30 @@ def _preprocess_args_for_default_command(
         args.append("lint")
         return args
 
-    # If --help or --version is the *only* meaningful argument (no positional
-    # path or known subcommand precedes it), let it route to the top-level
-    # app so the user sees the application banner / help text. When a
-    # positional path is also present we instead inject `lint` (below) and
-    # let Typer route --help/--version to the lint subcommand, where it
-    # remains useful.
+    # If --help or --version is the *only* meaningful argument, let it
+    # route to the top-level app so the user sees the application banner /
+    # help text. When other tokens are present we prepend ``lint`` (below)
+    # and let Typer route --help/--version to the lint subcommand, where
+    # it remains useful.
     has_eager = any(a in ("--help", "--version") for a in args)
-    has_positional_or_subcommand = any(not a.startswith("-") for a in args)
-    if has_eager and not has_positional_or_subcommand:
+    has_other_tokens = any(a not in ("--help", "--version") for a in args)
+    if has_eager and not has_other_tokens:
         return args
 
-    # Options that consume the following token as their value. Long-form
-    # variants like ``--config=foo.yml`` carry their value in the same
-    # token and don't need special handling.
-    value_taking_options = {
-        "--config",
-        "-c",
-        "--github-token",
-        "--workers",
-        "-j",
-        "--exclude",
-        "-e",
-        "--cache-ttl",
-        "--validation-method",
-        "--log-level",
-        "--format",
-        "-f",
-        "--files",
-    }
-
-    # Walk the argv with an explicit index so we can advance past the
-    # value token of value-taking options instead of treating it as the
-    # first positional argument.
-    i = 0
-    while i < len(args):
-        arg = args[i]
-
-        if arg.startswith("-"):
-            # Bare value-taking option: also consume the next token (its
-            # value) so it doesn't get misclassified as positional.
-            if arg in value_taking_options and i + 1 < len(args):
-                i += 2
-                continue
-            i += 1
-            continue
-
-        # First non-option token: either an existing subcommand, or a
-        # positional that we need to prepend ``lint`` in front of.
-        if arg in known_commands:
-            return args
-        args.insert(i, "lint")
+    # If a known subcommand is already present anywhere in argv, don't
+    # touch it; the user invoked it explicitly and Typer will route the
+    # surrounding options/arguments to that subcommand correctly.
+    if any(a in known_commands for a in args):
         return args
 
-    # No positional arguments found, add 'lint' at the end
-    args.append("lint")
-    return args
+    # Otherwise the user is in "default lint" mode. Prepend ``lint`` so
+    # every subsequent option/argument is parsed as a lint-subcommand
+    # token. We must not insert ``lint`` *between* an option and its
+    # positional path (e.g. ``--config foo.yml src/``) because Click /
+    # Typer parse options that appear before the subcommand name as
+    # *top-level* options and would error out — ``--verbose`` and
+    # ``--config`` are lint-subcommand options, not app-level options.
+    return ["lint", *args]
 
 
 app = typer.Typer(

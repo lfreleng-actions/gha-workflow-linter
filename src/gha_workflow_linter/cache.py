@@ -254,7 +254,15 @@ class ValidationCache:
             # the instance so callers can render a banner *before* any
             # progress UI starts (printing here would interleave with an
             # active Rich Progress spinner and corrupt the line).
+            #
+            # Also stash the on-disk version on ``_cache_version`` so
+            # ``get_cache_info()`` and ``detect_suspicious_cache_patterns``
+            # reflect the actual file contents (rather than always
+            # returning the current tool version, which made the
+            # version-mismatch branch in those introspection APIs dead
+            # code).
             cache_version = cache_data.get("_metadata", {}).get("version")
+            self._cache_version = cache_version or __version__
             if cache_version != __version__:
                 if cache_version:
                     self.logger.debug(
@@ -275,6 +283,10 @@ class ValidationCache:
                 self._redirects.clear()
                 self._latest_versions.clear()
                 self._purge_cache_file()
+                # Post-purge the in-memory cache is logically a fresh
+                # cache at the current tool version; reflect that in
+                # introspection.
+                self._cache_version = __version__
                 self._loaded = True
                 return
 
