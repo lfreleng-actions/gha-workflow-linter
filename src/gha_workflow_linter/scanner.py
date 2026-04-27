@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ class WorkflowScanner:
                 for action_file in root_path.rglob(action_name):
                     # Yield only real action files outside .github/workflows
                     # (paths under .github/workflows are workflow files).
-                    if action_file.is_file() and ".github/workflows" not in str(
+                    if action_file.is_file() and not self._is_in_workflows_dir(
                         action_file
                     ):
                         self.logger.debug(f"Found action file: {action_file}")
@@ -166,6 +166,22 @@ class WorkflowScanner:
             self.logger.warning(
                 f"Error scanning for action files in {root_path}: {e}"
             )
+
+    @staticmethod
+    def _is_in_workflows_dir(path: PurePath) -> bool:
+        """
+        Return True if ``path`` lives under a ``.github/workflows`` directory.
+
+        Uses ``PurePath.parts`` so the check works on Windows (where the
+        path separator is ``\\``) as well as POSIX-like systems. Accepts any
+        ``PurePath`` subclass (``Path``, ``PurePosixPath``,
+        ``PureWindowsPath``).
+        """
+        parts = path.parts
+        return any(
+            parts[i] == ".github" and parts[i + 1] == "workflows"
+            for i in range(len(parts) - 1)
+        )
 
     def _should_exclude_file(self, file_path: Path) -> bool:
         """
@@ -404,8 +420,8 @@ class WorkflowScanner:
         if file_path.name in ["action.yml", "action.yaml"]:
             return True
 
-        # Check if it's in a workflows directory
-        return ".github/workflows" in str(file_path)
+        # Check if it's in a workflows directory (cross-platform).
+        return self._is_in_workflows_dir(file_path)
 
     def get_scan_summary(
         self, results: dict[Path, dict[int, ActionCall]]

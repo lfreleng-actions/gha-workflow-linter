@@ -623,3 +623,28 @@ class TestPreprocessArgsForDefaultCommand:
         """--verbose is a bare flag; the following token is positional."""
         result = _preprocess_args_for_default_command(["--verbose", "src/"])
         assert result == ["--verbose", "lint", "src/"]
+
+    def test_help_alone_passes_through(self) -> None:
+        assert _preprocess_args_for_default_command(["--help"]) == ["--help"]
+
+    def test_version_alone_passes_through(self) -> None:
+        assert _preprocess_args_for_default_command(["--version"]) == [
+            "--version"
+        ]
+
+    def test_path_with_help_injects_lint(self) -> None:
+        """Regression: `gha-workflow-linter src/ --help` should still
+        inject `lint` so Typer's help renders for the lint subcommand
+        rather than treating `src/` as an unknown subcommand."""
+        result = _preprocess_args_for_default_command(["src/", "--help"])
+        assert result == ["lint", "src/", "--help"]
+
+    def test_path_with_version_injects_lint(self) -> None:
+        result = _preprocess_args_for_default_command(["src/", "--version"])
+        assert result == ["lint", "src/", "--version"]
+
+    def test_lint_subcommand_with_help_passes_through(self) -> None:
+        """If a known subcommand is present we never inject; --help is
+        routed by Typer to the subcommand normally."""
+        result = _preprocess_args_for_default_command(["lint", "--help"])
+        assert result == ["lint", "--help"]

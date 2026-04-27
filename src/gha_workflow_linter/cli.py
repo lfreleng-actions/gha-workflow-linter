@@ -141,15 +141,21 @@ def _preprocess_args_for_default_command(
     # Known subcommands
     known_commands = {"lint", "cache"}
 
-    # Skip if we have no arguments, or if help/version is requested
+    # No args at all: behave like the explicit `lint` subcommand.
     if not args:
         args.append("lint")
         return args
 
-    # Check for eager options that should be handled at the app level
-    for arg in args:
-        if arg in ("--help", "--version"):
-            return args
+    # If --help or --version is the *only* meaningful argument (no positional
+    # path or known subcommand precedes it), let it route to the top-level
+    # app so the user sees the application banner / help text. When a
+    # positional path is also present we instead inject `lint` (below) and
+    # let Typer route --help/--version to the lint subcommand, where it
+    # remains useful.
+    has_eager = any(a in ("--help", "--version") for a in args)
+    has_positional_or_subcommand = any(not a.startswith("-") for a in args)
+    if has_eager and not has_positional_or_subcommand:
+        return args
 
     # Options that consume the following token as their value. Long-form
     # variants like ``--config=foo.yml`` carry their value in the same
