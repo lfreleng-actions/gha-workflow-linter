@@ -128,6 +128,13 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
+        # Eagerly run startup-time cache checks (version mismatch /
+        # suspicious-patterns purge) on the first call. prime() is
+        # idempotent: if the CLI passed a pre-primed shared cache via
+        # ``cache=``, this is a no-op. If the validator built its own
+        # cache (ad-hoc / library use), this is the only place that
+        # would otherwise prime it.
+        self._cache.prime()
         if self._validation_method == ValidationMethod.GITHUB_API:
             if not self._github_client:
                 raise RuntimeError("GitHub client not initialized")

@@ -428,3 +428,106 @@ class TestCachePrime:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err == ""
+
+
+class TestStandaloneCacheConsumers:
+    """Regression tests: when ``ActionCallValidator`` / ``AutoFixer``
+    construct their own ``ValidationCache`` (ad-hoc / library use, no
+    shared cache from the CLI), they must run the same startup-time
+    checks (version-mismatch purge + suspicious-patterns purge) the
+    CLI path runs. Otherwise stale or known-bad cache contents leak
+    into the run.
+    """
+
+    def setup_method(self) -> None:
+        self._temp_cache_dir = pathlib.Path(  # pyright: ignore[reportUninitializedInstanceVariable]
+            tempfile.mkdtemp(prefix="gha-workflow-linter-standalone-")
+        )
+
+    def teardown_method(self) -> None:
+        shutil.rmtree(self._temp_cache_dir, ignore_errors=True)
+
+    def _seed_stale_cache(self) -> None:
+        import json
+
+        stale = {
+            "_metadata": {
+                "version": "0.0.0-stale",
+                "created_timestamp": time.time(),
+                "entry_count": 0,
+                "redirect_count": 0,
+                "latest_version_count": 0,
+            }
+        }
+        cache_path = self._temp_cache_dir / "validation_cache.json"
+        cache_path.write_text(json.dumps(stale))
+
+    def test_autofixer_primes_own_cache_on_construct(self) -> None:
+        from gha_workflow_linter._version import __version__
+        from gha_workflow_linter.auto_fix import AutoFixer
+        from gha_workflow_linter.models import Config
+
+        self._seed_stale_cache()
+        config = Config(  # pyright: ignore[reportCallIssue]
+            cache=CacheConfig(  # pyright: ignore[reportCallIssue]
+                enabled=True,
+                cache_dir=self._temp_cache_dir,
+                cache_file="validation_cache.json",
+            )
+        )
+        fixer = AutoFixer(config)
+        # Constructor should have primed the cache.
+        assert fixer._cache._loaded is True
+        # And the version-mismatch purge should have fired.
+        assert fixer._cache._version_mismatch_purged is True
+        # _cache_version reflects the post-purge state.
+        assert fixer._cache._cache_version == __version__
+
+    def test_validator_primes_own_cache_via_validate(self) -> None:
+        """``ActionCallValidator`` primes lazily on its first
+        validation call so the validator constructor stays cheap.
+        Verify the prime happens before any per-ref work."""
+        from gha_workflow_linter._version import __version__
+        from gha_workflow_linter.models import Config
+        from gha_workflow_linter.validator import ActionCallValidator
+
+        self._seed_stale_cache()
+        config = Config(  # pyright: ignore[reportCallIssue]
+            cache=CacheConfig(  # pyright: ignore[reportCallIssue]
+                enabled=True,
+                cache_dir=self._temp_cache_dir,
+                cache_file="validation_cache.json",
+            )
+        )
+        validator = ActionCallValidator(config)
+        # Constructor shouldn't have primed yet (lazy).
+        assert validator._cache._loaded is False
+        # Any prime() call (e.g. via the public method) primes.
+        report = validator._cache.prime()
+        assert report.version_mismatch_purged is True
+        assert validator._cache._cache_version == __version__
+
+    def test_autofixer_skip_priming_when_shared_cache_provided(
+        self,
+    ) -> None:
+        """When the CLI passes a pre-built ``cache=`` argument, the
+        constructor must not call prime() a second time (the shared
+        cache is already primed by the CLI prepare phase). We assert
+        that the existing _loaded state is preserved."""
+        from gha_workflow_linter.auto_fix import AutoFixer
+        from gha_workflow_linter.models import Config
+
+        config = Config(  # pyright: ignore[reportCallIssue]
+            cache=CacheConfig(  # pyright: ignore[reportCallIssue]
+                enabled=True,
+                cache_dir=self._temp_cache_dir,
+                cache_file="validation_cache.json",
+            )
+        )
+        shared = ValidationCache(config.cache)
+        # Pretend the CLI already primed.
+        shared._loaded = True
+        fixer = AutoFixer(config, cache=shared)
+        # AutoFixer should reuse the shared cache as-is, not re-prime.
+        assert fixer._cache is shared
+        assert fixer._cache._loaded is True

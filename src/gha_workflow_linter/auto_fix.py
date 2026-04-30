@@ -156,9 +156,16 @@ class AutoFixer:
         self.logger = logging.getLogger(__name__)
         self._http_client: httpx.AsyncClient | None = None
         self._graphql_client: GitHubGraphQLClient | None = None
-        self._cache = (
-            cache if cache is not None else ValidationCache(config.cache)
-        )
+        if cache is not None:
+            self._cache = cache
+        else:
+            # Standalone / library use: build our own cache and prime
+            # it so version-mismatch / suspicious-patterns purges happen
+            # before any read or write. The CLI path passes a pre-primed
+            # shared cache via the ``cache=`` argument; in that case we
+            # skip priming here to avoid a second pass.
+            self._cache = ValidationCache(config.cache)
+            self._cache.prime()
         self._git_client: GitValidationClient | None = None
 
         # Caching for batch operations (session-level cache)

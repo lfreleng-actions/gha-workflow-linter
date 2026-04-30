@@ -106,6 +106,39 @@ def _print_version() -> None:
     console.print(f"gha-workflow-linter version {__version__} 🏷️")
 
 
+def _render_cache_prime_banners(
+    prime_report: CachePrimeReport, *, quiet: bool = False
+) -> None:
+    """Render any user-facing banners surfaced by ``ValidationCache.prime()``.
+
+    Centralizes the banner-printing logic so that any code path that
+    primes a cache (the lint flow, the standalone cache subcommand,
+    future entry points) renders identical output. Emoji follow the
+    project convention (trailing) for consistent terminal spacing.
+
+    Args:
+        prime_report: The report returned by
+            ``ValidationCache.prime()``. The function silently no-ops
+            when this is not a real ``CachePrimeReport`` (test suites
+            occasionally mock ``ValidationCache`` entirely, in which
+            case the return is a ``Mock``).
+        quiet: When True, suppress all output.
+    """
+    if quiet or not isinstance(prime_report, CachePrimeReport):
+        return
+    if prime_report.version_mismatch_purged:
+        console.print(
+            "[cyan]Cache version mismatch; "
+            "purging cache to ensure consistency ♻️[/cyan]"
+        )
+    if prime_report.suspicious_patterns_purged:
+        reasons = ", ".join(prime_report.suspicious_reasons) or "unknown"
+        console.print(
+            "[yellow]Suspicious cache patterns detected "
+            f"({reasons}); purging cache ♻️[/yellow]"
+        )
+
+
 def version_callback(value: bool) -> None:
     """Show version and exit."""
     if value:
@@ -688,6 +721,10 @@ def cache(
     config = config_manager.load_config(config_file)
 
     cache_instance = ValidationCache(config.cache)
+    # Prime the cache so version-mismatch / suspicious-patterns purges
+    # are surfaced to the user. Without this, ``cache --info`` could
+    # silently empty an incompatible cache file with no explanation.
+    _render_cache_prime_banners(cache_instance.prime())
 
     if purge:
         removed_count = cache_instance.purge()
@@ -791,23 +828,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
     # banners render *before* opening the Rich Progress UI (printing
     # inside the progress block would interleave with the active
     # spinner and corrupt output).
-    prime_report = shared_cache.prime()
-    # Only render banners when prime_report is a genuine
-    # CachePrimeReport. Test suites occasionally mock ValidationCache
-    # entirely, in which case prime() returns a Mock whose attributes
-    # are also Mocks (and not safely .join-able); ignore those.
-    if isinstance(prime_report, CachePrimeReport) and not options.quiet:
-        if prime_report.version_mismatch_purged:
-            console.print(
-                "[cyan]Cache version mismatch; "
-                "purging cache to ensure consistency ♻️[/cyan]"
-            )
-        if prime_report.suspicious_patterns_purged:
-            reasons = ", ".join(prime_report.suspicious_reasons) or "unknown"
-            console.print(
-                "[yellow]Suspicious cache patterns detected "
-                f"({reasons}); purging cache ♻️[/yellow]"
-            )
+    _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
 
     # ------------------------------------------------------------------
     # Phase 2 — scan + validate. Progress / Live UI is active. No
