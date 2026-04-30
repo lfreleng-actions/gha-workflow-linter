@@ -71,12 +71,12 @@ class ActionCall(BaseModel):
     organization: str = Field(..., description="GitHub organization name")
     repository: str = Field(..., description="Repository name")
     reference: str = Field(..., description="Git reference (tag/branch/sha)")
-    comment: str | None = Field(None, description="Trailing comment")
+    comment: str | None = Field(default=None, description="Trailing comment")
     call_type: ActionCallType = Field(
-        ActionCallType.UNKNOWN, description="Type of action call"
+        default=ActionCallType.UNKNOWN, description="Type of action call"
     )
     reference_type: ReferenceType = Field(
-        ReferenceType.UNKNOWN, description="Type of reference"
+        default=ReferenceType.UNKNOWN, description="Type of reference"
     )
 
     @field_validator("organization")
@@ -126,12 +126,14 @@ class ValidationError(BaseModel):
     file_path: Path = Field(..., description="Path to the workflow file")
     action_call: ActionCall = Field(..., description="The invalid action call")
     result: ValidationResult = Field(..., description="Validation result")
-    error_message: str | None = Field(None, description="Detailed error")
+    error_message: str | None = Field(
+        default=None, description="Detailed error"
+    )
 
     def __str__(self) -> str:
         """String representation of the validation error."""
         return (
-            f"❌ Invalid action call in workflow: {self.file_path}\n"
+            f"Invalid action call in workflow: {self.file_path} ❌\n"
             f"line {self.action_call.line_number}: {self.action_call.raw_line.strip()} [{self.result.value}]"
         )
 
@@ -141,9 +143,13 @@ class ScanResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    total_workflows: int = Field(0, description="Total workflows scanned")
-    total_action_calls: int = Field(0, description="Total action calls found")
-    valid_calls: int = Field(0, description="Number of valid calls")
+    total_workflows: int = Field(
+        default=0, description="Total workflows scanned"
+    )
+    total_action_calls: int = Field(
+        default=0, description="Total action calls found"
+    )
+    valid_calls: int = Field(default=0, description="Number of valid calls")
     errors: list[ValidationError] = Field(
         default_factory=list, description="Validation errors"
     )
@@ -164,24 +170,31 @@ class ScanResult(BaseModel):
 class NetworkConfig(BaseModel):
     """Network-related configuration."""
 
-    timeout_seconds: int = Field(30, description="Network request timeout")
-    max_retries: int = Field(3, description="Maximum retry attempts")
-    retry_delay_seconds: float = Field(1.0, description="Delay between retries")
-    rate_limit_delay_seconds: float = Field(0.1, description="Rate limit delay")
+    timeout_seconds: int = Field(
+        default=30, description="Network request timeout"
+    )
+    max_retries: int = Field(default=3, description="Maximum retry attempts")
+    retry_delay_seconds: float = Field(
+        default=1.0, description="Delay between retries"
+    )
+    rate_limit_delay_seconds: float = Field(
+        default=0.1, description="Rate limit delay"
+    )
 
 
 class GitConfig(BaseModel):
     """Git operations configuration."""
 
-    timeout_seconds: int = Field(30, description="Git command timeout")
+    timeout_seconds: int = Field(default=30, description="Git command timeout")
     use_ssh_agent: bool = Field(
-        True, description="Use SSH agent for authentication"
+        default=True, description="Use SSH agent for authentication"
     )
     max_parallel_operations: int | None = Field(
-        None, description="Max parallel Git operations (default: CPU count)"
+        default=None,
+        description="Max parallel Git operations (default: CPU count)",
     )
     clone_depth: int = Field(
-        1, description="Git clone depth for shallow clones"
+        default=1, description="Git clone depth for shallow clones"
     )
 
     @field_validator("max_parallel_operations")
@@ -199,34 +212,39 @@ class GitHubAPIConfig(BaseModel):
     """GitHub API configuration."""
 
     base_url: str = Field(
-        "https://api.github.com", description="GitHub API base URL"
+        default="https://api.github.com", description="GitHub API base URL"
     )
     graphql_url: str = Field(
-        "https://api.github.com/graphql", description="GitHub GraphQL API URL"
+        default="https://api.github.com/graphql",
+        description="GitHub GraphQL API URL",
     )
     token: str | None = Field(
         default=None,
         description="GitHub API token (overrides GITHUB_TOKEN env var)",
     )
-    timeout: float = Field(30.0, description="Request timeout in seconds")
+    timeout: float = Field(
+        default=30.0, description="Request timeout in seconds"
+    )
     max_retries: int = Field(
-        3, description="Maximum number of retries for failed requests"
+        default=3, description="Maximum number of retries for failed requests"
     )
     retry_delay: float = Field(
-        1.0, description="Delay between retries in seconds"
+        default=1.0, description="Delay between retries in seconds"
     )
-    batch_size: int = Field(50, description="Batch size for API requests")
+    batch_size: int = Field(
+        default=50, description="Batch size for API requests"
+    )
     max_repositories_per_query: int = Field(
-        100, description="Max repos per GraphQL query"
+        default=100, description="Max repos per GraphQL query"
     )
     max_references_per_query: int = Field(
-        100, description="Max refs per GraphQL query"
+        default=100, description="Max refs per GraphQL query"
     )
     rate_limit_threshold: int = Field(
-        1000, description="Remaining requests threshold"
+        default=1000, description="Remaining requests threshold"
     )
     rate_limit_reset_buffer: int = Field(
-        60, description="Buffer seconds before rate limit reset"
+        default=60, description="Buffer seconds before rate limit reset"
     )
 
     @property
@@ -242,19 +260,23 @@ class GitHubAPIConfig(BaseModel):
 class APICallStats(BaseModel):
     """API call statistics tracking."""
 
-    total_calls: int = Field(0, description="Total API calls made")
-    graphql_calls: int = Field(0, description="GraphQL API calls")
-    rest_calls: int = Field(0, description="REST API calls")
-    git_calls: int = Field(0, description="Git operations")
-    cache_hits: int = Field(0, description="Cache hits")
-    rate_limit_delays: int = Field(0, description="Rate limit induced delays")
-    failed_calls: int = Field(0, description="Failed API calls")
-    repositories_validated: int = Field(
-        0, description="Number of repositories validated"
+    total_calls: int = Field(default=0, description="Total API calls made")
+    graphql_calls: int = Field(default=0, description="GraphQL API calls")
+    rest_calls: int = Field(default=0, description="REST API calls")
+    git_calls: int = Field(default=0, description="Git operations")
+    cache_hits: int = Field(default=0, description="Cache hits")
+    rate_limit_delays: int = Field(
+        default=0, description="Rate limit induced delays"
     )
-    git_clone_operations: int = Field(0, description="Git clone operations")
+    failed_calls: int = Field(default=0, description="Failed API calls")
+    repositories_validated: int = Field(
+        default=0, description="Number of repositories validated"
+    )
+    git_clone_operations: int = Field(
+        default=0, description="Git clone operations"
+    )
     git_ls_remote_operations: int = Field(
-        0, description="Git ls-remote operations"
+        default=0, description="Git ls-remote operations"
     )
 
     @property
@@ -307,10 +329,10 @@ class APICallStats(BaseModel):
 class GitHubRateLimitInfo(BaseModel):
     """GitHub API rate limit information."""
 
-    limit: int = Field(5000, description="Rate limit maximum")
-    remaining: int = Field(5000, description="Remaining requests")
-    reset_at: int = Field(0, description="Rate limit reset timestamp")
-    used: int = Field(0, description="Used requests")
+    limit: int = Field(default=5000, description="Rate limit maximum")
+    remaining: int = Field(default=5000, description="Remaining requests")
+    reset_at: int = Field(default=0, description="Rate limit reset timestamp")
+    used: int = Field(default=0, description="Used requests")
 
     @property
     def reset_timestamp(self) -> int:
@@ -328,23 +350,23 @@ class GitHubRateLimitInfo(BaseModel):
 class CacheConfig(BaseModel):
     """Local cache configuration."""
 
-    enabled: bool = Field(True, description="Enable local caching")
+    enabled: bool = Field(default=True, description="Enable local caching")
     cache_dir: Path = Field(
-        Path.home() / ".cache" / "gha-workflow-linter",
+        default=Path.home() / ".cache" / "gha-workflow-linter",
         description="Directory to store cache files",
     )
     cache_file: str = Field(
-        "validation_cache.json", description="Cache file name"
+        default="validation_cache.json", description="Cache file name"
     )
     default_ttl_seconds: int = Field(
-        7 * 24 * 60 * 60,  # 7 days
+        default=7 * 24 * 60 * 60,  # 7 days
         description="Default TTL for cache entries in seconds",
     )
     max_cache_size: int = Field(
-        10000, description="Maximum number of cache entries"
+        default=10000, description="Maximum number of cache entries"
     )
     cleanup_on_startup: bool = Field(
-        True, description="Clean expired entries on startup"
+        default=True, description="Clean expired entries on startup"
     )
 
     @property
@@ -358,10 +380,12 @@ class Config(BaseModel):
 
     model_config = ConfigDict()
 
-    log_level: LogLevel = Field(LogLevel.INFO, description="Logging level")
+    log_level: LogLevel = Field(
+        default=LogLevel.INFO, description="Logging level"
+    )
     parallel_workers: int = Field(
         default_factory=get_default_workers,
-        description="Number of parallel workers (auto-detects based on CPU count)"
+        description="Number of parallel workers (auto-detects based on CPU count)",
     )
     scan_extensions: list[str] = Field(
         default_factory=lambda: [".yml", ".yaml"],
@@ -371,30 +395,37 @@ class Config(BaseModel):
         default_factory=list, description="Patterns to exclude from scanning"
     )
     require_pinned_sha: bool = Field(
-        True, description="Require all actions to be pinned to commit SHAs"
+        default=True,
+        description="Require all actions to be pinned to commit SHAs",
     )
     validation_method: ValidationMethod | None = Field(
-        None, description="Validation method (auto-detected if None)"
+        default=None, description="Validation method (auto-detected if None)"
     )
     auto_fix: bool = Field(
-        True, description="Automatically fix broken/invalid references"
+        default=True, description="Automatically fix broken/invalid references"
     )
     auto_latest: bool = Field(
-        False, description="Use latest versions when auto-fixing"
+        default=False, description="Use latest versions when auto-fixing"
     )
     allow_prerelease: bool = Field(
-        False, description="Allow prerelease versions when finding latest versions"
+        default=False,
+        description="Allow prerelease versions when finding latest versions",
     )
     two_space_comments: bool = Field(
-        True, description="Use two spaces before inline comments"
+        default=True, description="Use two spaces before inline comments"
     )
     skip_actions: bool = Field(
-        False, description="Skip scanning action.yaml/action.yml files"
+        default=False, description="Skip scanning action.yaml/action.yml files"
     )
     fix_test_calls: bool = Field(
-        False, description="Enable action call fixes with test-related keywords in comments (e.g., test, testing)"
+        default=False,
+        description="Enable action call fixes with test-related keywords in comments (e.g., test, testing)",
     )
 
+    # pydantic BaseModel subclasses with all-defaulted fields require no
+    # arguments (keyword args are still accepted), but basedpyright reports
+    # reportArgumentType when such classes are used as Field default_factory
+    # values. Suppress that one diagnostic on the factory references.
     network: NetworkConfig = Field(
         default_factory=NetworkConfig,
         description="Network configuration",
@@ -408,7 +439,8 @@ class Config(BaseModel):
         description="GitHub API configuration",
     )
     cache: CacheConfig = Field(
-        default_factory=CacheConfig, description="Cache configuration"
+        default_factory=CacheConfig,
+        description="Cache configuration",
     )
 
     @property
@@ -432,44 +464,53 @@ class Config(BaseModel):
 class CLIOptions(BaseModel):
     """CLI command options."""
 
-    path: Path = Field(Path.cwd(), description="Path to scan")
-    config_file: Path | None = Field(None, description="Config file path")
-    verbose: bool = Field(False, description="Verbose output")
-    quiet: bool = Field(False, description="Quiet mode")
-    output_format: str = Field("text", description="Output format")
-    fail_on_error: bool = Field(True, description="Exit with error on failures")
-    parallel: bool = Field(True, description="Enable parallel processing")
-    require_pinned_sha: bool = Field(True, description="Require SHA pinning")
-    no_cache: bool = Field(False, description="Bypass local cache")
+    path: Path = Field(default=Path.cwd(), description="Path to scan")
+    config_file: Path | None = Field(
+        default=None, description="Config file path"
+    )
+    verbose: bool = Field(default=False, description="Verbose output")
+    quiet: bool = Field(default=False, description="Quiet mode")
+    output_format: str = Field(default="text", description="Output format")
+    fail_on_error: bool = Field(
+        default=True, description="Exit with error on failures"
+    )
+    parallel: bool = Field(
+        default=True, description="Enable parallel processing"
+    )
+    require_pinned_sha: bool = Field(
+        default=True, description="Require SHA pinning"
+    )
+    no_cache: bool = Field(default=False, description="Bypass local cache")
     cache_ttl: int | None = Field(
-        None, description="Override cache TTL in seconds"
+        default=None, description="Override cache TTL in seconds"
     )
     validation_method: ValidationMethod | None = Field(
-        None, description="Validation method (auto-detected if None)"
+        default=None, description="Validation method (auto-detected if None)"
     )
     exclude: list[str] | None = Field(
-        None, description="Patterns to exclude from scanning"
+        default=None, description="Patterns to exclude from scanning"
     )
     auto_fix: bool | None = Field(
-        None, description="Automatically fix broken/invalid references"
+        default=None, description="Automatically fix broken/invalid references"
     )
     auto_latest: bool | None = Field(
-        None, description="Use latest versions when auto-fixing"
+        default=None, description="Use latest versions when auto-fixing"
     )
     allow_prerelease: bool | None = Field(
-        None, description="Allow prerelease versions when finding latest versions"
+        default=None,
+        description="Allow prerelease versions when finding latest versions",
     )
     two_space_comments: bool | None = Field(
-        None, description="Use two spaces before inline comments"
+        default=None, description="Use two spaces before inline comments"
     )
     skip_actions: bool | None = Field(
-        None, description="Skip scanning action.yaml/action.yml files"
+        default=None, description="Skip scanning action.yaml/action.yml files"
     )
     fix_test_calls: bool | None = Field(
-        None, description="Fix action calls with test comments"
+        default=None, description="Fix action calls with test comments"
     )
     files: list[str] | None = Field(
-        None, description="Specific files to scan (supports wildcards)"
+        default=None, description="Specific files to scan (supports wildcards)"
     )
 
     @field_validator("output_format")

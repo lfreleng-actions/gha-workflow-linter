@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Comprehensive tests for CLI module with proper mocking."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 
@@ -273,7 +274,9 @@ class TestOutputFunctions:
         }
 
         table = _create_api_stats_table(validation_summary)
-
+        # _create_api_stats_table returns None when api_calls_total==0;
+        # this test seeds a non-zero count so a Table is guaranteed.
+        assert table is not None
         assert table.title == "API Call Statistics"
         assert len(table.columns) == 2
 

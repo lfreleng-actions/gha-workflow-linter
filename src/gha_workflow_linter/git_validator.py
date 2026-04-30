@@ -6,25 +6,19 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ProcessPoolExecutor
 import logging
 import multiprocessing
-import os
 import re
-import shutil
-import tempfile
-from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING
 
 from .exceptions import (
     GitError,
-    NetworkError,
-    RepositoryNotFoundError,
-    ReferenceNotFoundError,
 )
 from .models import APICallStats, GitConfig, ReferenceType, ValidationResult
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -362,9 +356,9 @@ def _run_git_ls_remote(url: str, config: GitConfig) -> bool:
         return result.returncode == 0
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}")
+        raise GitError(f"Git ls-remote timed out for {url}") from None
     except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}")
+        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
 
 
 def _validate_commit_shas_git(
@@ -544,7 +538,7 @@ def _run_git_clone(
     ]
 
     try:
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -553,11 +547,11 @@ def _run_git_clone(
         )
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git clone timed out for {url}")
+        raise GitError(f"Git clone timed out for {url}") from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git clone failed for {url}: {e.stderr}")
+        raise GitError(f"Git clone failed for {url}: {e.stderr}") from e
     except Exception as e:
-        raise GitError(f"Git clone failed for {url}: {e}")
+        raise GitError(f"Git clone failed for {url}: {e}") from e
 
 
 def _commit_exists_in_repo(
@@ -632,11 +626,11 @@ def _get_all_remote_refs(url: str, config: GitConfig) -> set[str]:
         return shas
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}")
+        raise GitError(f"Git ls-remote timed out for {url}") from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}")
+        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}") from e
     except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}")
+        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
 
 
 def _get_remote_branches(url: str, config: GitConfig) -> set[str]:
@@ -678,11 +672,11 @@ def _get_remote_branches(url: str, config: GitConfig) -> set[str]:
         return branches
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote timed out for {url}")
+        raise GitError(f"Git ls-remote timed out for {url}") from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}")
+        raise GitError(f"Git ls-remote failed for {url}: {e.stderr}") from e
     except Exception as e:
-        raise GitError(f"Git ls-remote failed for {url}: {e}")
+        raise GitError(f"Git ls-remote failed for {url}: {e}") from e
 
 
 def _get_remote_tags(url: str, config: GitConfig) -> set[str]:
@@ -727,11 +721,13 @@ def _get_remote_tags(url: str, config: GitConfig) -> set[str]:
         return tags
 
     except subprocess.TimeoutExpired:
-        raise GitError(f"Git ls-remote (tags) timed out for {url}")
+        raise GitError(f"Git ls-remote (tags) timed out for {url}") from None
     except subprocess.CalledProcessError as e:
-        raise GitError(f"Git ls-remote (tags) failed for {url}: {e.stderr}")
+        raise GitError(
+            f"Git ls-remote (tags) failed for {url}: {e.stderr}"
+        ) from e
     except Exception as e:
-        raise GitError(f"Git ls-remote (tags) failed for {url}: {e}")
+        raise GitError(f"Git ls-remote (tags) failed for {url}: {e}") from e
 
 
 def _determine_reference_type(reference: str) -> ReferenceType:

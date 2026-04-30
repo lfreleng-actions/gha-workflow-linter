@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -142,7 +142,9 @@ class WorkflowScanner:
         Yields:
             Path objects for action definition files
         """
-        self.logger.debug(f"Scanning for action definition files in: {root_path}")
+        self.logger.debug(
+            f"Scanning for action definition files in: {root_path}"
+        )
 
         # Search for action.yaml and action.yml files recursively
         try:
@@ -152,14 +154,34 @@ class WorkflowScanner:
 
                 # Find recursively (rglob includes root directory)
                 for action_file in root_path.rglob(action_name):
-                    if action_file.is_file():
-                        # Skip if it's in .github/workflows (those are workflow files, not actions)
-                        if ".github/workflows" not in str(action_file):
-                            self.logger.debug(f"Found action file: {action_file}")
-                            yield action_file
+                    # Yield only real action files outside .github/workflows
+                    # (paths under .github/workflows are workflow files).
+                    if action_file.is_file() and not self._is_in_workflows_dir(
+                        action_file
+                    ):
+                        self.logger.debug(f"Found action file: {action_file}")
+                        yield action_file
 
         except (PermissionError, OSError) as e:
-            self.logger.warning(f"Error scanning for action files in {root_path}: {e}")
+            self.logger.warning(
+                f"Error scanning for action files in {root_path}: {e}"
+            )
+
+    @staticmethod
+    def _is_in_workflows_dir(path: PurePath) -> bool:
+        """
+        Return True if ``path`` lives under a ``.github/workflows`` directory.
+
+        Uses ``PurePath.parts`` so the check works on Windows (where the
+        path separator is ``\\``) as well as POSIX-like systems. Accepts any
+        ``PurePath`` subclass (``Path``, ``PurePosixPath``,
+        ``PureWindowsPath``).
+        """
+        parts = path.parts
+        return any(
+            parts[i] == ".github" and parts[i + 1] == "workflows"
+            for i in range(len(parts) - 1)
+        )
 
     def _should_exclude_file(self, file_path: Path) -> bool:
         """
@@ -254,7 +276,9 @@ class WorkflowScanner:
 
         # If specific files are provided, scan only those files
         if specific_files:
-            workflow_files = self._resolve_specific_files(root_path, specific_files)
+            workflow_files = self._resolve_specific_files(
+                root_path, specific_files
+            )
             for workflow_file in workflow_files:
                 if progress and task_id:
                     progress.update(
@@ -323,7 +347,10 @@ class WorkflowScanner:
                     if parent.exists():
                         matches = list(parent.glob(pattern_path.name))
                         for match in matches:
-                            if match.is_file() and self._is_workflow_or_action_file(match):
+                            if (
+                                match.is_file()
+                                and self._is_workflow_or_action_file(match)
+                            ):
                                 resolved_files.append(match)
                 elif pattern_path.is_file():
                     if self._is_workflow_or_action_file(pattern_path):
@@ -334,35 +361,39 @@ class WorkflowScanner:
                         )
                 else:
                     self.logger.warning(f"File not found: {pattern_path}")
-            else:
-                # Handle relative paths
-                if "*" in pattern or "?" in pattern:
-                    # Glob pattern - search from root_path
-                    matches = list(root_path.glob(pattern))
-                    for match in matches:
-                        if match.is_file() and self._is_workflow_or_action_file(match):
-                            resolved_files.append(match)
+            # Handle relative paths
+            elif "*" in pattern or "?" in pattern:
+                # Glob pattern - search from root_path
+                matches = list(root_path.glob(pattern))
+                for match in matches:
+                    if match.is_file() and self._is_workflow_or_action_file(
+                        match
+                    ):
+                        resolved_files.append(match)
 
-                    # Also try recursive glob if pattern doesn't start with **
-                    if not pattern.startswith("**"):
-                        recursive_pattern = f"**/{pattern}"
-                        matches = list(root_path.glob(recursive_pattern))
-                        for match in matches:
-                            if match.is_file() and self._is_workflow_or_action_file(match):
-                                if match not in resolved_files:
-                                    resolved_files.append(match)
-                else:
-                    # Direct file path relative to root_path
-                    full_path = root_path / pattern
-                    if full_path.is_file():
-                        if self._is_workflow_or_action_file(full_path):
-                            resolved_files.append(full_path)
-                        else:
-                            self.logger.warning(
-                                f"File {full_path} is not a workflow or action file"
-                            )
+                # Also try recursive glob if pattern doesn't start with **
+                if not pattern.startswith("**"):
+                    recursive_pattern = f"**/{pattern}"
+                    matches = list(root_path.glob(recursive_pattern))
+                    for match in matches:
+                        if (
+                            match.is_file()
+                            and self._is_workflow_or_action_file(match)
+                            and match not in resolved_files
+                        ):
+                            resolved_files.append(match)
+            else:
+                # Direct file path relative to root_path
+                full_path = root_path / pattern
+                if full_path.is_file():
+                    if self._is_workflow_or_action_file(full_path):
+                        resolved_files.append(full_path)
                     else:
-                        self.logger.warning(f"File not found: {full_path}")
+                        self.logger.warning(
+                            f"File {full_path} is not a workflow or action file"
+                        )
+                else:
+                    self.logger.warning(f"File not found: {full_path}")
 
         if not resolved_files:
             self.logger.warning(
@@ -389,11 +420,8 @@ class WorkflowScanner:
         if file_path.name in ["action.yml", "action.yaml"]:
             return True
 
-        # Check if it's in a workflows directory
-        if ".github/workflows" in str(file_path):
-            return True
-
-        return False
+        # Check if it's in a workflows directory (cross-platform).
+        return self._is_in_workflows_dir(file_path)
 
     def get_scan_summary(
         self, results: dict[Path, dict[int, ActionCall]]

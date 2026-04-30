@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Tests for workflow scanner."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tempfile
 from unittest.mock import Mock
 
@@ -721,3 +722,29 @@ jobs:
         assert not self.scanner._is_workflow_or_action_file(Path("random.yml"))
         assert not self.scanner._is_workflow_or_action_file(Path("config.yaml"))
         assert not self.scanner._is_workflow_or_action_file(Path("test.txt"))
+
+    def test_is_in_workflows_dir_cross_platform(self) -> None:
+        """The helper must recognise .github/workflows on both POSIX and
+        Windows-style paths (a substring check on str(Path) was unreliable
+        on Windows because separators render as backslashes)."""
+        # POSIX style.
+        assert self.scanner._is_in_workflows_dir(
+            Path(".github/workflows/ci.yml")
+        )
+        assert self.scanner._is_in_workflows_dir(
+            Path("repo/.github/workflows/deploy.yaml")
+        )
+        assert not self.scanner._is_in_workflows_dir(Path(".github/CODEOWNERS"))
+        assert not self.scanner._is_in_workflows_dir(Path("workflows/ci.yml"))
+
+        # Windows style (PureWindowsPath splits on backslashes regardless
+        # of host OS, so the check exercises the cross-platform path).
+        assert self.scanner._is_in_workflows_dir(
+            PureWindowsPath(r".github\workflows\ci.yml")
+        )
+        assert self.scanner._is_in_workflows_dir(
+            PureWindowsPath(r"repo\.github\workflows\deploy.yaml")
+        )
+        assert not self.scanner._is_in_workflows_dir(
+            PureWindowsPath(r"repo\workflows\ci.yml")
+        )

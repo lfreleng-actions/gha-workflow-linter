@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -55,7 +54,7 @@ def get_github_token_with_fallback(
     # Step 3: Try GitHub CLI fallback
     if not quiet and console:
         console.print(
-            "⚠️  No GitHub token found; attempting to obtain using GitHub CLI"
+            "No GitHub token found; attempting to obtain using GitHub CLI ⚠️"
         )
 
     try:
@@ -63,16 +62,16 @@ def get_github_token_with_fallback(
         if cli_token:
             if not quiet and console:
                 console.print(
-                    "✅ Successfully obtained GitHub token from GitHub CLI"
+                    "Successfully obtained GitHub token from GitHub CLI ✅"
                 )
-            logger.info("Successfully obtained GitHub token from GitHub CLI")
+            logger.debug("Successfully obtained GitHub token from GitHub CLI")
             return cli_token
     except Exception as e:
         logger.debug(f"Failed to obtain token from GitHub CLI: {e}")
 
     # All methods failed
     if not quiet and console:
-        console.print("❌ Unable to obtain GitHub token from any source")
+        console.print("Unable to obtain GitHub token from any source ❌")
 
     return None
 
@@ -130,13 +129,15 @@ def _get_token_from_gh_cli() -> str | None:
         )
         return token
 
-    except FileNotFoundError:
+    except FileNotFoundError as err:
         logger.debug("GitHub CLI (gh) not found in PATH")
-        raise subprocess.SubprocessError("GitHub CLI not installed")
+        raise subprocess.SubprocessError("GitHub CLI not installed") from err
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as err:
         logger.debug("GitHub CLI command timed out")
-        raise subprocess.SubprocessError("GitHub CLI command timed out")
+        raise subprocess.SubprocessError(
+            "GitHub CLI command timed out"
+        ) from err
 
     except subprocess.CalledProcessError as e:
         if (
@@ -146,10 +147,9 @@ def _get_token_from_gh_cli() -> str | None:
             logger.debug("User not authenticated with GitHub CLI")
             raise subprocess.SubprocessError(
                 "Not authenticated with GitHub CLI"
-            )
-        else:
-            logger.debug(f"GitHub CLI command failed: {e}")
-            raise subprocess.SubprocessError(f"GitHub CLI error: {e}")
+            ) from e
+        logger.debug(f"GitHub CLI command failed: {e}")
+        raise subprocess.SubprocessError(f"GitHub CLI error: {e}") from e
 
 
 def check_github_cli_available() -> bool:

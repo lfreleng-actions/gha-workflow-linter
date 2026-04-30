@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Comprehensive tests for config module."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 

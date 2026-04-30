@@ -15,11 +15,11 @@ import time
 from typing import Any
 
 import httpx
-from rich.console import Console
 from rich.live import Live
 from rich.text import Text
 
 from .cache import ValidationCache
+from .console import console as _shared_console
 from .exceptions import GitError
 from .git_validator import (
     GitValidationClient,
@@ -126,9 +126,7 @@ def _find_most_specific_version_tag(
 
     # Sort by specificity (most specific first)
     sorted_by_specificity = sorted(
-        same_version_tags,
-        key=_get_version_specificity,
-        reverse=True
+        same_version_tags, key=_get_version_specificity, reverse=True
     )
 
     return sorted_by_specificity[0]
@@ -137,20 +135,37 @@ def _find_most_specific_version_tag(
 class AutoFixer:
     """Auto-fixes GitHub Actions workflow issues."""
 
-    def __init__(self, config: Config, base_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        base_path: Path | None = None,
+        cache: ValidationCache | None = None,
+    ) -> None:
         """
         Initialize the auto-fixer.
 
         Args:
-            config: Configuration object
-            base_path: Base path for making file paths relative in output
+            config: Configuration object.
+            base_path: Base path for making file paths relative in output.
+            cache: Optional pre-built ``ValidationCache`` shared with the
+                validator. When ``None`` the auto-fixer builds its own
+                cache.
         """
         self.config = config
         self.base_path = base_path or Path.cwd()
         self.logger = logging.getLogger(__name__)
         self._http_client: httpx.AsyncClient | None = None
         self._graphql_client: GitHubGraphQLClient | None = None
-        self._cache = ValidationCache(config.cache)
+        if cache is not None:
+            self._cache = cache
+        else:
+            # Standalone / library use: build our own cache and prime
+            # it so version-mismatch / suspicious-patterns purges happen
+            # before any read or write. The CLI path passes a pre-primed
+            # shared cache via the ``cache=`` argument; in that case we
+            # skip priming here to avoid a second pass.
+            self._cache = ValidationCache(config.cache)
+            self._cache.prime()
         self._git_client: GitValidationClient | None = None
 
         # Caching for batch operations (session-level cache)
@@ -308,7 +323,7 @@ class AutoFixer:
         # Use batch processing for efficient fixes
         # validation_error_calls will be fixed regardless of check_for_updates setting
         # Non-error updates only applied when check_for_updates=True (--auto-latest)
-        console = Console()
+        console = _shared_console
         if check_for_updates:
             self.logger.debug(
                 "Checking all action calls for updates (--auto-latest enabled)"
@@ -323,7 +338,11 @@ class AutoFixer:
         show_live_updates = self.logger.getEffectiveLevel() < logging.ERROR
 
         # Use Live context only when not in quiet mode, otherwise use nullcontext
-        live_context = Live("", console=console, refresh_per_second=4) if show_live_updates else nullcontext()
+        live_context = (
+            Live("", console=console, refresh_per_second=4)
+            if show_live_updates
+            else nullcontext()
+        )
 
         with live_context as live:
             (
@@ -678,16 +697,24 @@ class AutoFixer:
 
                     # First, check if there's a version comment we can use
                     if action_call.comment:
-                        comment_text = action_call.comment.strip().lstrip("#").strip()
-                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(comment_text):
+                        comment_text = (
+                            action_call.comment.strip().lstrip("#").strip()
+                        )
+                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(
+                            comment_text
+                        ):
                             # Try to get SHA for the comment version
                             if (base_repo_key, comment_text) in sha_map:
-                                valid_sha = sha_map[(base_repo_key, comment_text)]
+                                valid_sha = sha_map[
+                                    (base_repo_key, comment_text)
+                                ]
                                 valid_ref = comment_text
                             else:
                                 # Fallback to individual fetch
-                                sha_info = await self._get_commit_sha_for_reference(
-                                    base_repo_key, comment_text
+                                sha_info = (
+                                    await self._get_commit_sha_for_reference(
+                                        base_repo_key, comment_text
+                                    )
                                 )
                                 if sha_info:
                                     valid_sha = sha_info["sha"]
@@ -697,19 +724,28 @@ class AutoFixer:
                     if not valid_ref:
                         effective_lookup_repo = base_repo_key
                         if effective_lookup_repo in latest_versions:
-                            target_ref, cached_sha = latest_versions[effective_lookup_repo]
+                            target_ref, cached_sha = latest_versions[
+                                effective_lookup_repo
+                            ]
                             valid_ref = target_ref
                             valid_sha = cached_sha
 
                             # Get SHA if not cached
                             if not valid_sha:
-                                if (effective_lookup_repo, target_ref) in sha_map:
-                                    valid_sha = sha_map[(effective_lookup_repo, target_ref)]
+                                if (
+                                    effective_lookup_repo,
+                                    target_ref,
+                                ) in sha_map:
+                                    valid_sha = sha_map[
+                                        (effective_lookup_repo, target_ref)
+                                    ]
                                 else:
                                     sha_info = await self._get_commit_sha_for_reference(
                                         effective_lookup_repo, target_ref
                                     )
-                                    valid_sha = sha_info["sha"] if sha_info else None
+                                    valid_sha = (
+                                        sha_info["sha"] if sha_info else None
+                                    )
 
                     # If still no valid ref, use fallback logic
                     if not valid_ref:
@@ -724,7 +760,9 @@ class AutoFixer:
 
                         if not valid_ref:
                             # Last resort: use default branch
-                            repo_info = await self._get_repository_info(base_repo_key)
+                            repo_info = await self._get_repository_info(
+                                base_repo_key
+                            )
                             valid_ref = (
                                 repo_info.get("default_branch", "main")
                                 if repo_info
@@ -736,28 +774,40 @@ class AutoFixer:
                             if (base_repo_key, valid_ref) in sha_map:
                                 valid_sha = sha_map[(base_repo_key, valid_ref)]
                             else:
-                                sha_info = await self._get_commit_sha_for_reference(
-                                    base_repo_key, valid_ref
+                                sha_info = (
+                                    await self._get_commit_sha_for_reference(
+                                        base_repo_key, valid_ref
+                                    )
                                 )
-                                valid_sha = sha_info["sha"] if sha_info else None
+                                valid_sha = (
+                                    sha_info["sha"] if sha_info else None
+                                )
 
                     # Now build the fix if we have a valid reference
                     # When require_pinned_sha is False, we can fix with just the ref
-                    if valid_ref and (valid_sha or not self.config.require_pinned_sha):
+                    if valid_ref and (
+                        valid_sha or not self.config.require_pinned_sha
+                    ):
                         # Determine final_ref based on require_pinned_sha setting
                         if self.config.require_pinned_sha:
                             # valid_sha is guaranteed to be truthy here due to the outer condition
-                            assert valid_sha is not None  # Type narrowing for mypy
+                            assert (
+                                valid_sha is not None
+                            )  # Type narrowing for mypy
                             final_ref = valid_sha
                         else:
                             # Can use valid_ref directly when pinning not required
-                            assert valid_ref is not None  # Type narrowing for mypy
+                            assert (
+                                valid_ref is not None
+                            )  # Type narrowing for mypy
                             final_ref = valid_ref
 
                         # Set version comment to add to the fixed line (if valid_ref is a version tag)
                         replacement_comment: str | None = (
                             valid_ref
-                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(valid_ref)
+                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(
+                                valid_ref
+                            )
                             else None
                         )
 
@@ -820,7 +870,9 @@ class AutoFixer:
                         )
                         version_comment: str | None = (
                             target_ref
-                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
+                            if ActionCallPatterns.VERSION_TAG_PATTERN.match(
+                                target_ref
+                            )
                             else None
                         )
 
@@ -838,7 +890,9 @@ class AutoFixer:
                             existing_comment
                             and action_call.reference_type
                             == ReferenceType.COMMIT_SHA
-                            and ActionCallPatterns.VERSION_TAG_PATTERN.match(existing_comment)
+                            and ActionCallPatterns.VERSION_TAG_PATTERN.match(
+                                existing_comment
+                            )
                         ):
                             # Use pre-fetched SHA from batch resolution (Step 3d)
                             existing_version_sha = sha_map.get(
@@ -870,7 +924,8 @@ class AutoFixer:
                             # Use the existing comment version instead of latest
                             fix_ref = (
                                 existing_version_sha
-                                if self.config.require_pinned_sha and existing_version_sha
+                                if self.config.require_pinned_sha
+                                and existing_version_sha
                                 else existing_comment
                             )
                             fix_comment = existing_comment
@@ -887,7 +942,8 @@ class AutoFixer:
 
                                 if (
                                     fixed_line
-                                    and fixed_line != action_call.raw_line.strip()
+                                    and fixed_line
+                                    != action_call.raw_line.strip()
                                 ):
                                     if file_path not in fixes_by_file:
                                         fixes_by_file[file_path] = {}
@@ -898,7 +954,9 @@ class AutoFixer:
                                     file_name = file_path.name
                                     if show_live_updates and live:
                                         update_msg = f"  Fixed mismatched SHA: {action_call.organization}/{action_call.repository} in {file_name}"
-                                        live.update(Text(update_msg, style="dim"))
+                                        live.update(
+                                            Text(update_msg, style="dim")
+                                        )
                         elif ref_changed or comment_changed or repo_changed:
                             # Build the fixed line
                             fixed_line = self._build_fixed_line(
@@ -948,7 +1006,9 @@ class AutoFixer:
                                     file_name = file_path.name
                                     if show_live_updates and live:
                                         check_msg = f"  Checking: {action_call.organization}/{action_call.repository} in {file_name}"
-                                        live.update(Text(check_msg, style="dim"))
+                                        live.update(
+                                            Text(check_msg, style="dim")
+                                        )
                                 else:
                                     # When check_for_updates=True or for invalid items, apply the fix
                                     if file_path not in fixes_by_file:
@@ -960,7 +1020,9 @@ class AutoFixer:
                                     file_name = file_path.name
                                     if show_live_updates and live:
                                         update_msg = f"  Updated: {action_call.organization}/{action_call.repository} in {file_name}"
-                                        live.update(Text(update_msg, style="dim"))
+                                        live.update(
+                                            Text(update_msg, style="dim")
+                                        )
             except Exception as e:
                 self.logger.warning(
                     f"Failed to update {action_call.organization}/{action_call.repository}@{action_call.reference}: {e}"
@@ -1197,7 +1259,7 @@ class AutoFixer:
 
         return None
 
-    async def _get_fallback_reference(
+    async def _get_fallback_reference(  # noqa: PLR0911
         self, repo_key: str, invalid_ref: str
     ) -> str | None:
         """Get fallback reference using Git operations or cached data."""
@@ -1291,7 +1353,9 @@ class AutoFixer:
 
                     # Try to find semantic version tags first
                     version_tags = [
-                        tag for tag in tag_list if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag)
+                        tag
+                        for tag in tag_list
+                        if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag)
                     ]
                     if version_tags:
                         return version_tags[0]
@@ -1306,7 +1370,7 @@ class AutoFixer:
 
         return None
 
-    async def _find_valid_reference(
+    async def _find_valid_reference(  # noqa: PLR0911
         self, repo_key: str, invalid_ref: str
     ) -> str | None:
         """Try to find a valid reference similar to the invalid one."""
@@ -1495,7 +1559,7 @@ class AutoFixer:
 
         return []
 
-    async def _get_commit_sha_for_reference(
+    async def _get_commit_sha_for_reference(  # noqa: PLR0911
         self, repo_key: str, ref: str
     ) -> dict[str, Any] | None:
         """Get commit SHA for a specific reference."""
@@ -1794,12 +1858,16 @@ class AutoFixer:
                 refs = repo_data.get("refs", {}).get("nodes", [])
                 all_tags = []
                 for ref in refs:
-                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(ref["name"]):
+                    if ActionCallPatterns.VERSION_TAG_PATTERN.match(
+                        ref["name"]
+                    ):
                         target = ref.get("target", {})
                         if "oid" in target:
                             all_tags.append((ref["name"], target["oid"]))
                         elif "target" in target and "oid" in target["target"]:
-                            all_tags.append((ref["name"], target["target"]["oid"]))
+                            all_tags.append(
+                                (ref["name"], target["target"]["oid"])
+                            )
 
                 # Try latestRelease first, but only if prereleases are NOT allowed
                 # (latestRelease excludes prereleases by GitHub's API design)
@@ -1845,8 +1913,7 @@ class AutoFixer:
                                     (ref["name"], target["oid"])
                                 )
                             elif (
-                                "target" in target
-                                and "oid" in target["target"]
+                                "target" in target and "oid" in target["target"]
                             ):
                                 # Annotated tag pointing to commit
                                 fallback_tags.append(
@@ -2035,7 +2102,7 @@ class AutoFixer:
                     repo_alias = f"repo_{repo_idx}"
                     query_parts.append(f"""
                         {repo_alias}: repository(owner: "{owner}", name: "{base_name}") {{
-                            {' '.join(ref_queries)}
+                            {" ".join(ref_queries)}
                         }}
                     """)
 
@@ -2061,7 +2128,10 @@ class AutoFixer:
                             # For lightweight tags, the target directly has the commit SHA
                             if isinstance(target, dict):
                                 nested_target = target.get("target")
-                                if isinstance(nested_target, dict) and "oid" in nested_target:
+                                if (
+                                    isinstance(nested_target, dict)
+                                    and "oid" in nested_target
+                                ):
                                     sha = nested_target["oid"]
                                 elif "oid" in target:
                                     sha = target["oid"]

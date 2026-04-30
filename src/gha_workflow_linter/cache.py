@@ -11,7 +11,6 @@ import time
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from rich.console import Console
 
 from ._version import __version__
 from .models import (  # noqa: TC001
@@ -89,10 +88,11 @@ class CachedValidationEntry(BaseModel):
         ..., description="Type of API call that generated this result"
     )
     validation_method: ValidationMethod = Field(
-        ValidationMethod.GITHUB_API, description="Validation method used"
+        default=ValidationMethod.GITHUB_API,
+        description="Validation method used",
     )
     error_message: str | None = Field(
-        None, description="Error message if validation failed"
+        default=None, description="Error message if validation failed"
     )
 
     def is_expired(self, ttl_seconds: int) -> bool:
@@ -108,13 +108,15 @@ class CachedValidationEntry(BaseModel):
 class CacheStats(BaseModel):
     """Statistics for cache operations."""
 
-    hits: int = Field(0, description="Number of cache hits")
-    misses: int = Field(0, description="Number of cache misses")
-    expired: int = Field(0, description="Number of expired entries encountered")
-    writes: int = Field(0, description="Number of cache writes")
-    purges: int = Field(0, description="Number of cache purges")
+    hits: int = Field(default=0, description="Number of cache hits")
+    misses: int = Field(default=0, description="Number of cache misses")
+    expired: int = Field(
+        default=0, description="Number of expired entries encountered"
+    )
+    writes: int = Field(default=0, description="Number of cache writes")
+    purges: int = Field(default=0, description="Number of cache purges")
     cleanup_removed: int = Field(
-        0, description="Number of entries removed during cleanup"
+        default=0, description="Number of entries removed during cleanup"
     )
 
     @property
@@ -128,6 +130,39 @@ class CacheStats(BaseModel):
         if self.total_requests == 0:
             return 0.0
         return (self.hits / self.total_requests) * 100
+
+
+class CachePrimeReport(BaseModel):
+    """Result of a one-shot ``ValidationCache.prime()`` invocation.
+
+    The cache module never prints; the CLI layer (or any other caller)
+    inspects this report after ``prime()`` returns and renders banners
+    *outside* any Rich ``Progress`` / ``Live`` context.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    version_mismatch_purged: bool = Field(
+        default=False,
+        description=(
+            "True iff the on-disk cache was created by a different tool "
+            "version and was purged during prime()."
+        ),
+    )
+    suspicious_patterns_purged: bool = Field(
+        default=False,
+        description=(
+            "True iff prime() detected suspicious patterns (high error "
+            "rate, etc.) in the loaded cache and purged it."
+        ),
+    )
+    suspicious_reasons: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Human-readable reasons that triggered a suspicious-patterns "
+            "purge. Empty when ``suspicious_patterns_purged`` is False."
+        ),
+    )
 
 
 class ValidationCache:
@@ -160,6 +195,10 @@ class ValidationCache:
         self._latest_versions: dict[str, LatestVersionEntry] = {}
         self._cache_version: str = __version__
         self._loaded = False
+        # Set to True the first time _load_cache() detects a version
+        # mismatch and purges the cache. Surfaced via prime() so callers
+        # can render a user-facing banner before any progress UI starts.
+        self._version_mismatch_purged: bool = False
 
     def _generate_cache_key(self, repository: str, reference: str) -> str:
         """Generate a cache key for a repository and reference."""
@@ -214,8 +253,19 @@ class ValidationCache:
                         f"Failed to load latest version for {repo}: {e}"
                     )
 
-            # Check cache version compatibility
+            # Check cache version compatibility. Record the mismatch on
+            # the instance so callers can render a banner *before* any
+            # progress UI starts (printing here would interleave with an
+            # active Rich Progress spinner and corrupt the line).
+            #
+            # Also stash the on-disk version on ``_cache_version`` so
+            # ``get_cache_info()`` and ``detect_suspicious_cache_patterns``
+            # reflect the actual file contents (rather than always
+            # returning the current tool version, which made the
+            # version-mismatch branch in those introspection APIs dead
+            # code).
             cache_version = cache_data.get("_metadata", {}).get("version")
+            self._cache_version = cache_version or __version__
             if cache_version != __version__:
                 if cache_version:
                     self.logger.debug(
@@ -227,10 +277,19 @@ class ValidationCache:
                         "Legacy cache format detected (no version info). "
                         "Purging cache for consistency."
                     )
-                Console().print(
-                    "[cyan]♻️  Cache version mismatch; purging cache to ensure consistency[/cyan]"
-                )
+                # The redirects and latest_versions dicts may have been
+                # partly populated above from the incompatible cache file
+                # before the version check ran; clear them along with
+                # _cache so no stale data leaks into the run.
+                self._version_mismatch_purged = True
+                self._cache.clear()
+                self._redirects.clear()
+                self._latest_versions.clear()
                 self._purge_cache_file()
+                # Post-purge the in-memory cache is logically a fresh
+                # cache at the current tool version; reflect that in
+                # introspection.
+                self._cache_version = __version__
                 self._loaded = True
                 return
 
@@ -262,6 +321,59 @@ class ValidationCache:
 
         self._loaded = True
 
+    def prime(self) -> CachePrimeReport:
+        """
+        Eagerly load the cache from disk and run all startup-time checks.
+
+        Performs (in order):
+
+        1. ``_load_cache()`` — deserializes the cache file and records a
+           version-mismatch purge if applicable.
+        2. ``detect_suspicious_cache_patterns()`` over the loaded
+           entries followed by ``purge()`` if anomalies (high error
+           rate, etc.) are detected. We inline these calls (rather than
+           delegating to ``auto_purge_if_suspicious()``) so the report
+           can surface the specific ``reasons`` that triggered the
+           purge.
+
+        The method is UI-free; it returns a ``CachePrimeReport`` describing
+        what happened so the caller can render banners *before* any Rich
+        ``Progress`` / ``Live`` block opens. Subsequent calls return an
+        all-False report (no further startup-time work to do).
+
+        Idempotent: safe to call multiple times.
+
+        Returns:
+            A ``CachePrimeReport`` describing the outcomes.
+        """
+        if not self.config.enabled or self._loaded:
+            return CachePrimeReport()
+
+        self._load_cache()
+        version_mismatch_purged = self._version_mismatch_purged
+
+        # Suspicious-patterns check is also a startup concern. Capture
+        # reasons before the purge so the caller can surface them.
+        suspicious_purged = False
+        suspicious_reasons: tuple[str, ...] = ()
+        if not version_mismatch_purged:
+            analysis = self.detect_suspicious_cache_patterns()
+            if analysis.get("suspicious"):
+                suspicious_reasons = tuple(analysis.get("reasons", ()))
+                self.logger.warning(
+                    "Suspicious cache patterns detected: "
+                    f"{', '.join(suspicious_reasons)}. "
+                    f"Auto-purging cache with {analysis['total_entries']} entries."
+                )
+                self.purge()
+                suspicious_purged = True
+
+        return CachePrimeReport(
+            version_mismatch_purged=version_mismatch_purged,
+            suspicious_patterns_purged=suspicious_purged,
+            suspicious_reasons=suspicious_reasons,
+        )
+
     def _save_cache(self) -> None:
         """
         Save cache to disk with version metadata.
@@ -278,8 +390,11 @@ class ValidationCache:
                 parents=True, exist_ok=True
             )
 
-            # Convert cache entries to JSON-serializable format
-            cache_data = {
+            # Convert cache entries to JSON-serializable format. The
+            # mapping is intentionally heterogeneous (mix of metadata
+            # primitives, per-entry model dumps, and nested redirect /
+            # latest-version dicts), so type as Any-valued.
+            cache_data: dict[str, Any] = {
                 "_metadata": {
                     "version": __version__,
                     "created_timestamp": time.time(),

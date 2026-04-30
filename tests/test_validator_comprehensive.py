@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Comprehensive tests for ActionCallValidator."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 
@@ -183,6 +184,7 @@ class TestActionCallValidator:
                 error = result[0]
                 assert error.file_path == Path("test.yml")
                 assert error.result == ValidationResult.INVALID_REPOSITORY
+                assert error.error_message is not None
                 assert "not found" in error.error_message.lower()
 
     @pytest.mark.asyncio
@@ -234,6 +236,7 @@ class TestActionCallValidator:
                 error = result[0]
                 assert error.file_path == Path("test.yml")
                 assert error.result == ValidationResult.INVALID_REFERENCE
+                assert error.error_message is not None
                 assert "invalid" in error.error_message.lower()
 
     @pytest.mark.asyncio
@@ -471,7 +474,9 @@ class TestActionCallValidator:
         workflow_calls = {Path("test.yml"): {1: action_call}}
 
         mock_progress = Mock(spec=Progress)
-        mock_task_id = 1  # Use an int instead of Mock for TaskID
+        # TaskID is a NewType over int; cast a plain literal so the
+        # type-checker accepts it as a TaskID for the parameter.
+        mock_task_id: TaskID = TaskID(1)
 
         with (
             patch(
@@ -500,7 +505,9 @@ class TestActionCallValidator:
 
             async with self.validator:
                 result = await self.validator.validate_action_calls_async(
-                    workflow_calls, mock_progress, mock_task_id
+                    workflow_calls,
+                    mock_progress,
+                    mock_task_id,
                 )
 
                 assert result == []
@@ -671,18 +678,25 @@ class TestActionCallValidator:
         )
 
     def test_get_api_stats(self) -> None:
-        """Test getting API statistics."""
-        # Set up some stats in the validator
-        if hasattr(self.validator, "_api_stats"):
-            self.validator._api_stats = APICallStats()
-            self.validator._api_stats.graphql_calls = 5
+        """Test getting API statistics.
 
-            stats = self.validator.get_api_stats()
-            assert stats.graphql_calls == 5
-        else:
-            # If no stats exist, should return default
-            stats = self.validator.get_api_stats()
-            assert isinstance(stats, APICallStats)
+        ``ActionCallValidator`` exposes ``api_stats`` as a public
+        attribute (no underscore prefix). The original test checked
+        for a private ``_api_stats`` name that never existed, making
+        the ``if`` branch dead code; rewrite to exercise the actual
+        public API.
+        """
+        # Modify the public attribute and confirm get_api_stats()
+        # returns a copy (not the live reference) reflecting the
+        # change.
+        self.validator.api_stats.graphql_calls = 5
+        stats = self.validator.get_api_stats()
+        assert isinstance(stats, APICallStats)
+        assert stats.graphql_calls == 5
+        # get_api_stats returns a model_copy; mutating the returned
+        # value must not affect the validator's own state.
+        stats.graphql_calls = 99
+        assert self.validator.api_stats.graphql_calls == 5
 
 
 class TestActionCallValidatorDeduplication:

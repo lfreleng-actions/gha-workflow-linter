@@ -53,10 +53,10 @@ class TestGetGitHubTokenWithFallback:
         assert token == "cli_token"
         mock_gh_cli.assert_called_once()
         console.print.assert_any_call(
-            "⚠️  No GitHub token found; attempting to obtain using GitHub CLI"
+            "No GitHub token found; attempting to obtain using GitHub CLI ⚠️"
         )
         console.print.assert_any_call(
-            "✅ Successfully obtained GitHub token from GitHub CLI"
+            "Successfully obtained GitHub token from GitHub CLI ✅"
         )
 
     @patch("gha_workflow_linter.github_auth._get_token_from_gh_cli")
@@ -71,10 +71,10 @@ class TestGetGitHubTokenWithFallback:
         assert token is None
         mock_gh_cli.assert_called_once()
         console.print.assert_any_call(
-            "⚠️  No GitHub token found; attempting to obtain using GitHub CLI"
+            "No GitHub token found; attempting to obtain using GitHub CLI ⚠️"
         )
         console.print.assert_any_call(
-            "❌ Unable to obtain GitHub token from any source"
+            "Unable to obtain GitHub token from any source ❌"
         )
 
     @patch("gha_workflow_linter.github_auth._get_token_from_gh_cli")

@@ -3,12 +3,17 @@
 
 """Tests for the cache module."""
 
-from collections.abc import Generator
+from __future__ import annotations
+
 from pathlib import Path
 import tempfile
 import time
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 from gha_workflow_linter.cache import (
     CacheConfig,
@@ -236,8 +241,21 @@ class TestValidationCache:
         """Test batch cache operations."""
         cache = ValidationCache(temp_cache_config)
 
-        # Store batch of results
-        batch_data = [
+        # Store batch of results. The explicit annotation tells the
+        # type-checker that each tuple's last element is ``str | None``;
+        # without it, the inferred element type is the *union* of the
+        # individual tuple shapes (``... None`` and ``... str``), which
+        # doesn't unify with the put_batch() signature.
+        batch_data: list[
+            tuple[
+                str,
+                str,
+                ValidationResult,
+                str,
+                ValidationMethod,
+                str | None,
+            ]
+        ] = [
             (
                 "owner/repo1",
                 "v1.0.0",

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Tests for action.yaml and action.yml file scanning."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 

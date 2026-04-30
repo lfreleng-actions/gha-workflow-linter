@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Simple tests for CLI module that will pass."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 

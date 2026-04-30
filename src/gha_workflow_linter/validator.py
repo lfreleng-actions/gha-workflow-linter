@@ -45,19 +45,30 @@ from .utils import has_test_comment
 class ActionCallValidator:
     """Validator for GitHub Actions and workflow calls using GraphQL API or Git operations."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(
+        self,
+        config: Config,
+        cache: ValidationCache | None = None,
+    ) -> None:
         """
         Initialize the validator.
 
         Args:
-            config: Configuration object
+            config: Configuration object.
+            cache: Optional pre-built ``ValidationCache``. The CLI layer
+                builds and primes a single shared cache and threads it
+                through both the validator and the auto-fixer to avoid
+                duplicate disk reads / writes. When ``None`` the validator
+                builds its own cache (useful for ad-hoc / library use).
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
         self._github_client: GitHubGraphQLClient | None = None
         self._git_client: GitValidationClient | None = None
         self.api_stats = APICallStats()
-        self._cache = ValidationCache(config.cache)
+        self._cache = (
+            cache if cache is not None else ValidationCache(config.cache)
+        )
         self._validation_method: ValidationMethod | None = None
 
     async def __aenter__(self) -> ActionCallValidator:
@@ -117,8 +128,13 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
-        # Check for suspicious cache patterns and auto-purge if needed
-        self._cache.auto_purge_if_suspicious()
+        # Eagerly run startup-time cache checks (version mismatch /
+        # suspicious-patterns purge) on the first call. prime() is
+        # idempotent: if the CLI passed a pre-primed shared cache via
+        # ``cache=``, this is a no-op. If the validator built its own
+        # cache (ad-hoc / library use), this is the only place that
+        # would otherwise prime it.
+        self._cache.prime()
         if self._validation_method == ValidationMethod.GITHUB_API:
             if not self._github_client:
                 raise RuntimeError("GitHub client not initialized")
@@ -204,7 +220,9 @@ class ActionCallValidator:
         Returns:
             List of validation errors
         """
-        self.logger.debug("Starting action call validation using Git operations")
+        self.logger.debug(
+            "Starting action call validation using Git operations"
+        )
         return await self._perform_validation(
             action_calls, progress, task_id, use_github_api=False
         )
@@ -564,7 +582,9 @@ class ActionCallValidator:
                     and action_call.reference_type != ReferenceType.COMMIT_SHA
                 ):
                     # Add error for each occurrence of this unpinned call
-                    for file_path, actual_action_call in call_locations[call_key]:
+                    for file_path, actual_action_call in call_locations[
+                        call_key
+                    ]:
                         error = ValidationError(
                             file_path=file_path,
                             action_call=actual_action_call,
@@ -614,7 +634,11 @@ class ActionCallValidator:
             task = progress.tasks[task_id]
             # Only update if not already completed
             if task.total is not None and task.completed < task.total:
-                progress.update(task_id, completed=task.total, description="Validation complete")
+                progress.update(
+                    task_id,
+                    completed=task.total,
+                    description="Validation complete",
+                )
 
         return errors
 

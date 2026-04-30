@@ -12,7 +12,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
@@ -26,8 +25,9 @@ import typer
 
 from ._version import __version__
 from .auto_fix import AutoFixer
-from .cache import ValidationCache
+from .cache import CachePrimeReport, ValidationCache
 from .config import ConfigManager
+from .console import console
 from .exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -100,13 +100,43 @@ def cache_help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
     raise typer.Exit()
 
 
-console = Console()
-
-
 def _print_version() -> None:
     """Print version string with consistent formatting."""
-    # Two spaces fixes rendering issues in terminal applications
-    console.print(f"🏷️  gha-workflow-linter version {__version__}")
+    # Keep version output formatting consistent across CLI help and callbacks.
+    console.print(f"gha-workflow-linter version {__version__} 🏷️")
+
+
+def _render_cache_prime_banners(
+    prime_report: CachePrimeReport, *, quiet: bool = False
+) -> None:
+    """Render any user-facing banners surfaced by ``ValidationCache.prime()``.
+
+    Centralizes the banner-printing logic so that any code path that
+    primes a cache (the lint flow, the standalone cache subcommand,
+    future entry points) renders identical output. Emoji follow the
+    project convention (trailing) for consistent terminal spacing.
+
+    Args:
+        prime_report: The report returned by
+            ``ValidationCache.prime()``. The function silently no-ops
+            when this is not a real ``CachePrimeReport`` (test suites
+            occasionally mock ``ValidationCache`` entirely, in which
+            case the return is a ``Mock``).
+        quiet: When True, suppress all output.
+    """
+    if quiet or not isinstance(prime_report, CachePrimeReport):
+        return
+    if prime_report.version_mismatch_purged:
+        console.print(
+            "[cyan]Cache version mismatch; "
+            "purging cache to ensure consistency ♻️[/cyan]"
+        )
+    if prime_report.suspicious_patterns_purged:
+        reasons = ", ".join(prime_report.suspicious_reasons) or "unknown"
+        console.print(
+            "[yellow]Suspicious cache patterns detected "
+            f"({reasons}); purging cache ♻️[/yellow]"
+        )
 
 
 def version_callback(value: bool) -> None:
@@ -116,7 +146,9 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _preprocess_args_for_default_command(args: list[str] | None = None) -> list[str]:
+def _preprocess_args_for_default_command(
+    args: list[str] | None = None,
+) -> list[str]:
     """
     Preprocess CLI arguments to inject 'lint' command if no subcommand is provided.
 
@@ -133,49 +165,86 @@ def _preprocess_args_for_default_command(args: list[str] | None = None) -> list[
     """
     import sys
 
-    if args is None:
-        args = sys.argv[1:]
-    else:
-        # Make a copy to avoid modifying the original
-        args = list(args)
+    # Use sys.argv when no args provided; otherwise copy to avoid mutation.
+    args = sys.argv[1:] if args is None else list(args)
 
     # Known subcommands
     known_commands = {"lint", "cache"}
 
-    # Skip if we have no arguments, or if help/version is requested
+    # Options that consume the following token as their value when used
+    # in the bare (non ``--name=value``) form. Only used to skip past
+    # an option's value when scanning for the first positional; we no
+    # longer need to insert ``lint`` between option pairs because we
+    # always prepend.
+    value_taking_options = {
+        "--config",
+        "-c",
+        "--github-token",
+        "--workers",
+        "-j",
+        "--exclude",
+        "-e",
+        "--cache-ttl",
+        "--validation-method",
+        "--log-level",
+        "--format",
+        "-f",
+        "--files",
+    }
+
+    # No args at all: behave like the explicit `lint` subcommand.
     if not args:
         args.append("lint")
         return args
 
-    # Check for eager options that should be handled at the app level
-    for arg in args:
-        if arg in ("--help", "--version"):
-            return args
+    # If --help or --version is the *only* meaningful argument, let it
+    # route to the top-level app so the user sees the application banner /
+    # help text. When other tokens are present we prepend ``lint`` (below)
+    # and let Typer route --help/--version to the lint subcommand, where
+    # it remains useful.
+    has_eager = any(a in ("--help", "--version") for a in args)
+    has_other_tokens = any(a not in ("--help", "--version") for a in args)
+    if has_eager and not has_other_tokens:
+        return args
 
-    # Check if first non-option argument is a known command
-    for i, arg in enumerate(args):
-        # Skip options and their values
+    # Detect whether the *first non-option positional token* is a known
+    # subcommand. Restricting detection to that position (rather than
+    # scanning the entire argv) avoids mis-classifying values of
+    # value-taking options — e.g. ``--config lint`` should not be
+    # treated as 'subcommand already present', because ``lint`` there
+    # is the *value* of ``--config``, not a command.
+    i = 0
+    first_positional: str | None = None
+    while i < len(args):
+        arg = args[i]
         if arg.startswith("-"):
-            # Check if this is a flag that takes a value
-            if arg in ("--config", "-c", "--github-token", "--workers", "-j",
-                      "--exclude", "-e", "--cache-ttl", "--validation-method",
-                      "--log-level", "--format", "-f", "--files"):
-                # Skip the next argument (the value) if it exists
-                continue
+            # ``--name=value`` carries its value in the same token, so
+            # advance by 1; bare value-taking options consume the next
+            # token as the value, so advance by 2.
+            if (
+                "=" not in arg
+                and arg in value_taking_options
+                and i + 1 < len(args)
+            ):
+                i += 2
+            else:
+                i += 1
             continue
+        first_positional = arg
+        break
 
-        # Found a non-option argument
-        if arg in known_commands:
-            # Already has a subcommand
-            return args
-        else:
-            # No subcommand found, inject 'lint' before this argument
-            args.insert(i, "lint")
-            return args
+    if first_positional is not None and first_positional in known_commands:
+        # The user explicitly invoked a subcommand; leave argv untouched.
+        return args
 
-    # No positional arguments found, add 'lint' at the end
-    args.append("lint")
-    return args
+    # Otherwise the user is in "default lint" mode. Prepend ``lint`` so
+    # every subsequent option/argument is parsed as a lint-subcommand
+    # token. We must not insert ``lint`` *between* an option and its
+    # positional path (e.g. ``--config foo.yml src/``) because Click /
+    # Typer parse options that appear before the subcommand name as
+    # *top-level* options and would error out — ``--verbose`` and
+    # ``--config`` are lint-subcommand options, not app-level options.
+    return ["lint", *args]
 
 
 app = typer.Typer(
@@ -347,7 +416,6 @@ def lint(
         "--no-cache",
         help="Bypass local cache and always validate against remote repositories",
     ),
-
     cache_ttl: int | None = typer.Option(
         None,
         "--cache-ttl",
@@ -394,7 +462,6 @@ def lint(
         "--files",
         help="Specific files to scan (supports wildcards, can be specified multiple times)",
     ),
-
     _help: bool = typer.Option(
         False,
         "--help",
@@ -599,19 +666,25 @@ def lint(
                 config.validation_method = ValidationMethod.GIT
                 if not quiet:
                     console.print(
-                        "[yellow]ℹ️ No GitHub token available, using Git validation method[/yellow]"
+                        "[yellow]No GitHub token available, using Git validation method ℹ️[/yellow]"
                     )
 
         # Display validation method being used (suppress for JSON output)
         if not quiet and output_format != "json":
             if config.validation_method == ValidationMethod.GITHUB_API:
-                console.print("[blue]🔍 Using validation method: [GraphQL][/blue]")
+                console.print(
+                    "[blue]Using validation method: [GraphQL] 🔍[/blue]"
+                )
             else:
-                console.print("[blue]🔍 Using validation method: [Git/SSH][/blue]")
+                console.print(
+                    "[blue]Using validation method: [Git/SSH] 🔍[/blue]"
+                )
 
             # Display number of parallel workers
             worker_source = "auto-detected" if workers is None else "configured"
-            console.print(f"[blue]⚙️  Using {config.parallel_workers} parallel worker(s) ({worker_source})[/blue]")
+            console.print(
+                f"[blue]Using {config.parallel_workers} parallel worker(s) ({worker_source}) ⚙️[/blue]"
+            )
 
         # Only check rate limits if using GitHub API
         if config.validation_method == ValidationMethod.GITHUB_API:
@@ -624,7 +697,7 @@ def lint(
                 # If we get here, we're not rate limited
                 if not effective_token and not quiet:
                     logger.warning(
-                        "⚠️ No GitHub token available; API requests may be rate-limited"
+                        "No GitHub token available; API requests may be rate-limited ⚠️"
                     )
             except SystemExit:
                 # Rate limit check triggered exit, re-raise to exit cleanly
@@ -693,16 +766,20 @@ def cache(
     config = config_manager.load_config(config_file)
 
     cache_instance = ValidationCache(config.cache)
+    # Prime the cache so version-mismatch / suspicious-patterns purges
+    # are surfaced to the user. Without this, ``cache --info`` could
+    # silently empty an incompatible cache file with no explanation.
+    _render_cache_prime_banners(cache_instance.prime())
 
     if purge:
         removed_count = cache_instance.purge()
-        console.print(f"[green]✅ Purged {removed_count} cache entries[/green]")
+        console.print(f"[green]Purged {removed_count} cache entries ✅[/green]")
         return
 
     if cleanup:
         removed_count = cache_instance.cleanup()
         console.print(
-            f"[green]✅ Removed {removed_count} expired cache entries[/green]"
+            f"[green]Removed {removed_count} expired cache entries ✅[/green]"
         )
         return
 
@@ -769,7 +846,7 @@ def cache(
     console.print(f"Cache file: {cache_info['cache_file']}")
 
 
-def run_linter(config: Config, options: CLIOptions) -> int:
+def run_linter(config: Config, options: CLIOptions) -> int:  # noqa: PLR0911
     """
     Run the main linting process.
 
@@ -782,9 +859,28 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     """
     logger = logging.getLogger(__name__)
 
-    # Initialize scanner and validator
+    # ------------------------------------------------------------------
+    # Phase 1 — prepare. Free to print: no Progress / Live UI is active.
+    # ------------------------------------------------------------------
     scanner = WorkflowScanner(config)
 
+    # Build a single ValidationCache and share it across the validator
+    # and (later) the auto-fixer to avoid duplicate disk I/O and
+    # competing save() calls.
+    shared_cache = ValidationCache(config.cache)
+
+    # Eagerly load the cache and run all startup-time checks so any
+    # banners render *before* opening the Rich Progress UI (printing
+    # inside the progress block would interleave with the active
+    # spinner and corrupt output).
+    _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
+
+    # ------------------------------------------------------------------
+    # Phase 2 — scan + validate. Progress / Live UI is active. No
+    # out-of-band console.print calls below until the Progress block
+    # closes (banners, errors, and tables print after the ``with``
+    # exits in phase 3).
+    # ------------------------------------------------------------------
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -818,7 +914,7 @@ def run_linter(config: Config, options: CLIOptions) -> int:
         )
 
         try:
-            validator = ActionCallValidator(config)
+            validator = ActionCallValidator(config, cache=shared_cache)
             validation_errors = validator.validate_action_calls(
                 workflow_calls, progress, validate_task
             )
@@ -884,7 +980,10 @@ def run_linter(config: Config, options: CLIOptions) -> int:
             logger.error(f"Unexpected error validating action calls: {e}")
             return 1
 
-    # Auto-fix validation errors if enabled, or collect skipped testing items
+    # ------------------------------------------------------------------
+    # Phase 3 — report + auto-fix. Progress / Live UI has closed; we
+    # are free to console.print again.
+    # ------------------------------------------------------------------
     fixed_files: dict[Path, list[dict[str, str]]] = {}
     redirect_stats: dict[str, int] = {"actions_moved": 0, "calls_updated": 0}
     stale_actions_summary: dict[str, list[dict[str, Any]]] = {}
@@ -892,19 +991,36 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # Determine if we should run auto-fix:
     # - If auto_fix is enabled, fix validation errors and check for outdated versions
     # - If auto_latest is also enabled, update to latest versions
-    should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (validation_errors or config.auto_fix)
+    should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (
+        validation_errors or config.auto_fix
+    )
     if should_run_auto_fix:
         try:
-            async def run_auto_fix() -> tuple[dict[Path, list[dict[str, str]]], dict[str, int], dict[str, list[dict[str, Any]]]]:
-                async with AutoFixer(config, base_path=options.path) as auto_fixer:
+
+            async def run_auto_fix() -> tuple[
+                dict[Path, list[dict[str, str]]],
+                dict[str, int],
+                dict[str, list[dict[str, Any]]],
+            ]:
+                async with AutoFixer(
+                    config,
+                    base_path=options.path,
+                    cache=shared_cache,
+                ) as auto_fixer:
                     # When auto_fix is enabled, always pass all action calls to check
                     # check_for_updates=True only when auto_latest is enabled (update to latest versions)
                     # check_for_updates=False means: fix validation errors, report outdated versions
                     all_calls = workflow_calls if config.auto_fix else {}
                     check_for_updates = config.auto_latest
-                    return await auto_fixer.fix_validation_errors(validation_errors, all_calls, check_for_updates=check_for_updates)
+                    return await auto_fixer.fix_validation_errors(
+                        validation_errors,
+                        all_calls,
+                        check_for_updates=check_for_updates,
+                    )
 
-            fixed_files, redirect_stats, stale_actions_summary = asyncio.run(run_auto_fix())
+            fixed_files, redirect_stats, stale_actions_summary = asyncio.run(
+                run_auto_fix()
+            )
 
             if fixed_files and not options.quiet:
                 # Separate skipped items from actual fixes
@@ -922,15 +1038,23 @@ def run_linter(config: Config, options: CLIOptions) -> int:
                             has_fixes = True
 
                     if has_fixes:
-                        files_with_fixes[file_path] = [c for c in changes if c.get("skipped") != "true"]
+                        files_with_fixes[file_path] = [
+                            c for c in changes if c.get("skipped") != "true"
+                        ]
                     if has_skipped:
-                        files_with_skipped[file_path] = [c for c in changes if c.get("skipped") == "true"]
+                        files_with_skipped[file_path] = [
+                            c for c in changes if c.get("skipped") == "true"
+                        ]
 
                 # Display skipped testing items first
                 if files_with_skipped:
-                    console.print(f"\n[cyan]⏩ Skipped {sum(len(v) for v in files_with_skipped.values())} testing action(s) in {len(files_with_skipped)} file(s):[/cyan]")
+                    console.print(
+                        f"\n[cyan]Skipped {sum(len(v) for v in files_with_skipped.values())} testing action(s) in {len(files_with_skipped)} file(s): ⏩[/cyan]"
+                    )
                     for file_path, changes in files_with_skipped.items():
-                        console.print(f"\n[bold]📄 {_get_relative_path(file_path, options.path)}[/bold]")
+                        console.print(
+                            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
+                        )
                         for change in changes:
                             # Extract just the uses: part from the raw line
                             line = change["old_line"].strip()
@@ -941,21 +1065,29 @@ def run_linter(config: Config, options: CLIOptions) -> int:
 
                 # Display actual fixes
                 if files_with_fixes:
-                    total_workflow_calls_updated = sum(len(changes) for changes in files_with_fixes.values())
-                    console.print(f"\n[yellow]🔧 Updated {total_workflow_calls_updated} workflow call(s) in {len(files_with_fixes)} file(s):[/yellow]")
+                    total_workflow_calls_updated = sum(
+                        len(changes) for changes in files_with_fixes.values()
+                    )
+                    console.print(
+                        f"\n[yellow]Updated {total_workflow_calls_updated} workflow call(s) in {len(files_with_fixes)} file(s): 🔧[/yellow]"
+                    )
                     for file_path, changes in files_with_fixes.items():
-                        console.print(f"\n[bold]📄 {_get_relative_path(file_path, options.path)}[/bold]")
+                        console.print(
+                            f"\n[bold]{_get_relative_path(file_path, options.path)} 📄[/bold]"
+                        )
                         for change in changes:
-                            console.print(f"[red]  - {change['old_line'].strip()}[/red]")
-                            console.print(f"[green]  + {change['new_line'].strip()}[/green]")
+                            console.print(
+                                f"[red]  - {change['old_line'].strip()}[/red]"
+                            )
+                            console.print(
+                                f"[green]  + {change['new_line'].strip()}[/green]"
+                            )
                     console.print()  # Add blank line after changes
-
-
 
         except Exception as e:
             logger.warning(f"Auto-fix failed: {e}")
             if not options.quiet:
-                console.print(f"[yellow]⚠️ Auto-fix failed: {e}[/yellow]")
+                console.print(f"[yellow]Auto-fix failed: {e} ⚠️[/yellow]")
 
     # Generate and display results
     scan_summary = scanner.get_scan_summary(workflow_calls)
@@ -1012,7 +1144,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # Otherwise, exit with error only if there are validation errors (excluding test references) and fail_on_error is enabled
     if options.fail_on_error:
         # Count actual errors (excluding test references)
-        actual_errors = [e for e in validation_errors if not has_test_comment(e.action_call)]
+        actual_errors = [
+            e for e in validation_errors if not has_test_comment(e.action_call)
+        ]
         if actual_errors:
             return 1
 
@@ -1023,7 +1157,7 @@ def _create_scan_summary_table(
     scan_summary: dict[str, Any],
     validation_summary: dict[str, Any],
     total_fixes: int = 0,
-    redirect_stats: dict[str, int] | None = None
+    redirect_stats: dict[str, int] | None = None,
 ) -> Table:
     """Create the scan summary table.
 
@@ -1065,8 +1199,12 @@ def _create_scan_summary_table(
 
     # Redirect statistics - always displayed when redirects are found
     if redirect_stats and redirect_stats.get("actions_moved", 0) > 0:
-        table.add_row("Actions moved/relocated", str(redirect_stats["actions_moved"]))
-        table.add_row("Calls updated (relocated)", str(redirect_stats["calls_updated"]))
+        table.add_row(
+            "Actions moved/relocated", str(redirect_stats["actions_moved"])
+        )
+        table.add_row(
+            "Calls updated (relocated)", str(redirect_stats["calls_updated"])
+        )
 
     return table
 
@@ -1106,22 +1244,24 @@ def _create_api_stats_table(validation_summary: dict[str, Any]) -> Table | None:
     return api_table
 
 
-def _display_validation_summary(validation_summary: dict[str, Any], skip_success: bool = False) -> None:
+def _display_validation_summary(
+    validation_summary: dict[str, Any], skip_success: bool = False
+) -> None:
     """Display validation results summary."""
     # Calculate actual errors (excluding test references)
-    actual_errors = validation_summary["total_errors"] - validation_summary.get("test_references", 0)
+    actual_errors = validation_summary["total_errors"] - validation_summary.get(
+        "test_references", 0
+    )
     test_refs = validation_summary.get("test_references", 0)
 
     if actual_errors == 0 and test_refs == 0:
         if not skip_success:
-            console.print("[green]✅ All action calls are valid![/green]")
+            console.print("[green]All action calls are valid! ✅[/green]")
         return
 
     # Show actual errors
     if actual_errors > 0:
-        console.print(
-            f"[red]❌ Found {actual_errors} validation errors[/red]"
-        )
+        console.print(f"[red]Found {actual_errors} validation errors ❌[/red]")
 
         if validation_summary["invalid_repositories"] > 0:
             console.print(
@@ -1147,7 +1287,7 @@ def _display_validation_summary(validation_summary: dict[str, Any], skip_success
         if actual_errors > 0:
             console.print()  # Add spacing between errors and warnings
         console.print(
-            f"[yellow]⚠️  Found {test_refs} test action references[/yellow]"
+            f"[yellow]Found {test_refs} test action references ⚠️[/yellow]"
         )
 
     # Show deduplication and API efficiency
@@ -1170,8 +1310,6 @@ def _display_validation_summary(validation_summary: dict[str, Any], skip_success
         )
 
 
-
-
 def _display_stale_actions_from_summary(
     stale_actions: dict[str, list[dict[str, Any]]],
     _options: CLIOptions,
@@ -1183,10 +1321,9 @@ def _display_stale_actions_from_summary(
         stale_actions: Dictionary mapping relative file paths to lists of stale action info
         options: CLI options
     """
-    console = Console()
-
+    # Already imported at module level via .console singleton.
     if not stale_actions:
-        console.print("[green]✅ All action calls are up to date![/green]\n")
+        console.print("[green]All action calls are up to date! ✅[/green]\n")
         return
 
     # Count incorrect (invalid) and outdated actions separately
@@ -1206,17 +1343,29 @@ def _display_stale_actions_from_summary(
 
     # Display separate counts for incorrect and outdated actions
     if incorrect_count > 0:
-        console.print(f"\n[red]Found {incorrect_count} incorrect action call(s) in {len(incorrect_files)} file(s)[/red]")
+        console.print(
+            f"\n[red]Found {incorrect_count} incorrect action call(s) in {len(incorrect_files)} file(s)[/red]"
+        )
     if outdated_count > 0:
-        console.print(f"[yellow]Found {outdated_count} outdated action call(s) in {len(outdated_files)} file(s)[/yellow]")
+        console.print(
+            f"[yellow]Found {outdated_count} outdated action call(s) in {len(outdated_files)} file(s)[/yellow]"
+        )
 
     console.print()
 
     for file_path in sorted(stale_actions.keys()):
-        console.print(f"[bold]📄 {file_path}[/bold]")
+        console.print(f"[bold]{file_path} 📄[/bold]")
         for action_info in stale_actions[file_path]:
-            current_display = action_info["current_ref"][:12] + "..." if len(action_info["current_ref"]) > 40 else action_info["current_ref"]
-            latest_display = action_info["latest_ref"][:12] + "..." if len(action_info["latest_ref"]) > 40 else action_info["latest_ref"]
+            current_display = (
+                action_info["current_ref"][:12] + "..."
+                if len(action_info["current_ref"]) > 40
+                else action_info["current_ref"]
+            )
+            latest_display = (
+                action_info["latest_ref"][:12] + "..."
+                if len(action_info["latest_ref"]) > 40
+                else action_info["latest_ref"]
+            )
 
             # Check if this is an invalid reference (validation error) or just outdated
             is_invalid = action_info.get("is_invalid", False)
@@ -1229,24 +1378,76 @@ def _display_stale_actions_from_summary(
             # Use different colors and labels based on whether it's invalid or just outdated
             if is_invalid:
                 # Invalid reference - entire line in red, correction line in green
-                console.print(f"  [red]Line {action_info['line']}:[/red] [red]{action_display}[/red]")
+                console.print(
+                    f"  [red]Line {action_info['line']}:[/red] [red]{action_display}[/red]"
+                )
                 if action_info["current_comment"]:
-                    console.print(f"    [red]Invalid:  @{current_display} # {action_info['current_comment'].lstrip('#').strip()}[/red]")
+                    console.print(
+                        f"    [red]Invalid:  @{current_display} # {action_info['current_comment'].lstrip('#').strip()}[/red]"
+                    )
                 else:
-                    console.print(f"    [red]Invalid:  @{current_display}[/red]")
-                console.print(f"    [green]Correct:  @{latest_display} # {action_info['latest_version']}[/green]")
+                    console.print(
+                        f"    [red]Invalid:  @{current_display}[/red]"
+                    )
+                console.print(
+                    f"    [green]Correct:  @{latest_display} # {action_info['latest_version']}[/green]"
+                )
             else:
                 # Just outdated - use yellow for line and current ref
-                console.print(f"  [yellow]Line {action_info['line']}:[/yellow] {action_display}")
-                console.print(f"    [yellow]Current:[/yellow]  @{current_display}", end="")
+                console.print(
+                    f"  [yellow]Line {action_info['line']}:[/yellow] {action_display}"
+                )
+                console.print(
+                    f"    [yellow]Current:[/yellow]  @{current_display}", end=""
+                )
                 if action_info["current_comment"]:
-                    console.print(f" [dim]# {action_info['current_comment'].lstrip('#').strip()}[/dim]")
+                    console.print(
+                        f" [dim]# {action_info['current_comment'].lstrip('#').strip()}[/dim]"
+                    )
                 else:
                     console.print()
-                console.print(f"    [green]Latest:[/green]   @{latest_display} [dim]# {action_info['latest_version']}[/dim]")
+                console.print(
+                    f"    [green]Latest:[/green]   @{latest_display} [dim]# {action_info['latest_version']}[/dim]"
+                )
         console.print()
 
-    console.print("[cyan]💡 Run with [bold]--auto-fix --auto-latest[/bold] to update these actions[/cyan]\n")
+    console.print(
+        "[cyan]Run with [bold]--auto-fix --auto-latest[/bold] to update these actions 💡[/cyan]\n"
+    )
+
+
+def _print_deduplicated_action_refs(items: list[dict[str, Any]]) -> None:
+    """
+    Print a list of action references, collapsing duplicates per file.
+
+    Items are dicts with at least ``action_ref`` and ``line`` keys. When the
+    same ``action_ref`` appears more than once for a file, a single entry is
+    printed annotated with the number of occurrences and the sorted set of
+    distinct source line numbers, instead of repeating the same line N times.
+    """
+    # Preserve first-seen order while grouping by action_ref. Use a set so
+    # that repeated (ref, line) pairs collapse to a single line number, then
+    # render in sorted order for stable output.
+    grouped: dict[str, set[int]] = {}
+    occurrences: dict[str, int] = {}
+    for item in items:
+        ref = item["action_ref"]
+        line = item["line"]
+        grouped.setdefault(ref, set()).add(line)
+        occurrences[ref] = occurrences.get(ref, 0) + 1
+
+    for ref, line_set in grouped.items():
+        count = occurrences[ref]
+        sorted_lines = sorted(line_set)
+        if count == 1:
+            console.print(f"   {ref} [dim][line {sorted_lines[0]}][/dim]")
+        else:
+            line_list = ", ".join(str(n) for n in sorted_lines)
+            label = "line" if len(sorted_lines) == 1 else "lines"
+            console.print(
+                f"   {ref} [dim](x{count})[/dim] "
+                f"[dim][{label} {line_list}][/dim]"
+            )
 
 
 def output_text_results(
@@ -1282,7 +1483,9 @@ def output_text_results(
                         total_fixes += 1
 
         # Display scan summary (with redirect stats if available)
-        table = _create_scan_summary_table(scan_summary, validation_summary, total_fixes, redirect_stats)
+        table = _create_scan_summary_table(
+            scan_summary, validation_summary, total_fixes, redirect_stats
+        )
 
         # Display API statistics if available
         api_table = _create_api_stats_table(validation_summary)
@@ -1305,12 +1508,19 @@ def output_text_results(
                     break
 
         # Display validation summary (but skip "all valid" message if files were modified or there are stale actions)
-        has_stale_actions = bool(stale_actions_summary and any(stale_actions_summary.values()))
-        _display_validation_summary(validation_summary, skip_success=(has_actual_fixes or has_stale_actions))
+        has_stale_actions = bool(
+            stale_actions_summary and any(stale_actions_summary.values())
+        )
+        _display_validation_summary(
+            validation_summary,
+            skip_success=(has_actual_fixes or has_stale_actions),
+        )
 
         # Display modification message after scan summary if files were modified
         if has_actual_fixes:
-            console.print("\n[yellow]⚠️ Files have been modified; please review the changes and commit them.[/yellow]")
+            console.print(
+                "\n[yellow]Files have been modified; please review the changes and commit them ⚠️[/yellow]"
+            )
 
     # Separate errors by type
     if errors:
@@ -1329,7 +1539,7 @@ def output_text_results(
             error_info = {
                 "action_ref": action_ref,
                 "line": error.action_call.line_number,
-                "result": error.result
+                "result": error.result,
             }
 
             # Check if this is a test reference based on comment
@@ -1338,22 +1548,24 @@ def output_text_results(
             else:
                 actual_errors[relative_path].append(error_info)
 
-        # Display actual validation errors
+        # Display actual validation errors (deduplicated per file: same
+        # action_ref appearing multiple times is collapsed with a count)
         if actual_errors:
             console.print("\n[red]Validation Errors:[/red]")
             for file_path in sorted(actual_errors.keys()):
-                console.print(f"❌ Invalid action call in workflow: [bold]{file_path}[/bold]")
-                for error_info in actual_errors[file_path]:
-                    console.print(f"   {error_info['action_ref']} [dim][line {error_info['line']}][/dim]")
+                console.print(
+                    f"Invalid action call in workflow: [bold]{file_path}[/bold] ❌"
+                )
+                _print_deduplicated_action_refs(actual_errors[file_path])
 
-        # Display test action warnings
+        # Display test action warnings (deduplicated per file)
         if test_warnings:
             console.print("\n[yellow]Test Action Calls:[/yellow]")
             for file_path in sorted(test_warnings.keys()):
-                # Two spaces is deliberate; fixes rendering in terminal output
-                console.print(f"⚠️  Test action calls in workflow: [bold]{file_path}[/bold]")
-                for warning_info in test_warnings[file_path]:
-                    console.print(f"   {warning_info['action_ref']} [dim][line {warning_info['line']}][/dim]")
+                console.print(
+                    f"Test action calls in workflow: [bold]{file_path}[/bold] ⚠️"
+                )
+                _print_deduplicated_action_refs(test_warnings[file_path])
 
 
 def output_json_results(

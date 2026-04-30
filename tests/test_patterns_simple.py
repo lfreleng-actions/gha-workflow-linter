@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Simple tests for patterns module to improve coverage."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 

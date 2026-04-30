@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Tests for CLI default lint behavior (no subcommand)."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 
@@ -547,3 +548,170 @@ class TestCLIDefaultLint:
             # Should run successfully
             assert result.exit_code == 0
             assert "No workflows found to validate" in result.stdout
+
+
+class TestPreprocessArgsForDefaultCommand:
+    """Unit tests for _preprocess_args_for_default_command argv rewriting."""
+
+    def test_no_args_appends_lint(self) -> None:
+        assert _preprocess_args_for_default_command([]) == ["lint"]
+
+    def test_help_passes_through(self) -> None:
+        assert _preprocess_args_for_default_command(["--help"]) == ["--help"]
+        assert _preprocess_args_for_default_command(["--version"]) == [
+            "--version"
+        ]
+
+    def test_known_subcommand_passes_through(self) -> None:
+        assert _preprocess_args_for_default_command(["lint", "foo"]) == [
+            "lint",
+            "foo",
+        ]
+        assert _preprocess_args_for_default_command(["cache", "--purge"]) == [
+            "cache",
+            "--purge",
+        ]
+
+    def test_positional_path_gets_lint_injected(self) -> None:
+        assert _preprocess_args_for_default_command(["src/"]) == [
+            "lint",
+            "src/",
+        ]
+
+    def test_value_taking_option_before_path(self) -> None:
+        """`lint` is prepended in default-lint mode so all options route
+        to the lint subcommand. Inserting `lint` mid-argv (e.g. between
+        --config and its value, or between --verbose and the path) would
+        cause Typer to interpret the leading options as *top-level*
+        options of the app and error out, since --verbose / --config /
+        etc. are lint-subcommand options."""
+        result = _preprocess_args_for_default_command(
+            ["--config", "foo.yml", "src/"]
+        )
+        assert result == ["lint", "--config", "foo.yml", "src/"]
+
+    def test_multiple_value_taking_options(self) -> None:
+        result = _preprocess_args_for_default_command(
+            [
+                "--config",
+                "foo.yml",
+                "--workers",
+                "4",
+                "--exclude",
+                "*.test.yml",
+                "src/",
+            ]
+        )
+        assert result == [
+            "lint",
+            "--config",
+            "foo.yml",
+            "--workers",
+            "4",
+            "--exclude",
+            "*.test.yml",
+            "src/",
+        ]
+
+    def test_value_taking_option_with_no_path(self) -> None:
+        """Even with no positional path, `lint` is prepended so Typer
+        routes the options to the lint subcommand rather than treating
+        them as top-level options of the app."""
+        result = _preprocess_args_for_default_command(["--config", "foo.yml"])
+        assert result == ["lint", "--config", "foo.yml"]
+
+    def test_short_value_taking_option(self) -> None:
+        result = _preprocess_args_for_default_command(["-c", "foo.yml", "src/"])
+        assert result == ["lint", "-c", "foo.yml", "src/"]
+
+    def test_boolean_flag_before_path_prepends_lint(self) -> None:
+        """Regression: `gha-workflow-linter --verbose src/` previously
+        produced argv `[--verbose, lint, src/]` which Typer rejects
+        because --verbose is a *lint*-subcommand option, not an app
+        option. The processor must prepend `lint` so all flags route
+        to the subcommand."""
+        result = _preprocess_args_for_default_command(["--verbose", "src/"])
+        assert result == ["lint", "--verbose", "src/"]
+
+    def test_path_with_help_injects_lint(self) -> None:
+        """Regression: `gha-workflow-linter src/ --help` should still
+        inject `lint` so Typer's help renders for the lint subcommand
+        rather than treating `src/` as an unknown subcommand."""
+        result = _preprocess_args_for_default_command(["src/", "--help"])
+        assert result == ["lint", "src/", "--help"]
+
+    def test_path_with_version_injects_lint(self) -> None:
+        result = _preprocess_args_for_default_command(["src/", "--version"])
+        assert result == ["lint", "src/", "--version"]
+
+    def test_lint_subcommand_with_help_passes_through(self) -> None:
+        """If a known subcommand is present we never inject; --help is
+        routed by Typer to the subcommand normally."""
+        result = _preprocess_args_for_default_command(["lint", "--help"])
+        assert result == ["lint", "--help"]
+
+    def test_subcommand_token_as_option_value_is_not_subcommand(
+        self,
+    ) -> None:
+        """Regression: ``--config lint src/`` must inject ``lint`` —
+        ``lint`` here is the *value* of ``--config``, not a subcommand
+        invocation. Detection must look at the first non-option
+        positional token, not scan the whole argv."""
+        result = _preprocess_args_for_default_command(
+            ["--config", "lint", "src/"]
+        )
+        assert result == ["lint", "--config", "lint", "src/"]
+
+    def test_subcommand_token_as_exclude_value_is_not_subcommand(
+        self,
+    ) -> None:
+        """Same regression for the ``cache`` token appearing as the
+        value of ``--exclude``."""
+        result = _preprocess_args_for_default_command(
+            ["--exclude", "cache", "src/"]
+        )
+        assert result == ["lint", "--exclude", "cache", "src/"]
+
+    def test_long_form_option_with_equals_value_does_not_consume_next(
+        self,
+    ) -> None:
+        """``--workers=8`` carries its value in the same token, so the
+        next token is the first positional. ``--config=lint`` is a more
+        adversarial variant of the same shape."""
+        assert _preprocess_args_for_default_command(
+            ["--workers=8", "src/"]
+        ) == ["lint", "--workers=8", "src/"]
+        assert _preprocess_args_for_default_command(
+            ["--config=lint", "src/"]
+        ) == ["lint", "--config=lint", "src/"]
+
+    def test_subcommand_option_before_positional_routes_correctly(
+        self,
+    ) -> None:
+        """Regression: ``--verbose <path>`` (a *lint*-subcommand option
+        followed by the path) must produce an argv shape Typer accepts.
+        Previously the processor inserted ``lint`` *between* ``--verbose``
+        and the path, producing ``[--verbose, lint, <path>]`` — which
+        Typer rejects because ``--verbose`` is a lint-subcommand option,
+        not an app-level option. The fix prepends ``lint`` so the option
+        routes to the subcommand correctly."""
+        import tempfile
+
+        from typer.testing import CliRunner
+
+        from gha_workflow_linter.cli import app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = CliRunner()
+            processed = _preprocess_args_for_default_command(
+                ["--verbose", tmpdir]
+            )
+            assert processed[0] == "lint", (
+                "lint must be prepended so --verbose routes to the "
+                f"lint subcommand; got {processed!r}"
+            )
+            result = runner.invoke(app, processed)
+            assert result.exit_code != 2, (
+                "Typer should not reject the argv as malformed. "
+                f"Output: {result.stdout}"
+            )

@@ -48,7 +48,9 @@ def get_default_worker_count() -> int:
     # For I/O-bound tasks, use the full logical CPU count
     # Minimum of 2 to ensure some parallelism even on very limited systems
     workers = max(2, cpu_count)
-    logger.debug(f"Using {workers} parallel workers (logical CPUs: {cpu_count})")
+    logger.debug(
+        f"Using {workers} parallel workers (logical CPUs: {cpu_count})"
+    )
     return workers
 
 

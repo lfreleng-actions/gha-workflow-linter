@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """Tests for CLI interface."""
+# pyright: reportUninitializedInstanceVariable=false
 
 from __future__ import annotations
 
