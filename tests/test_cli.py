@@ -256,9 +256,16 @@ class TestCLICommands:
 
         # Should fail because --purge-cache is not a valid option for lint
         assert result.exit_code == 2
-        # Strip ANSI color codes for assertion
+        # Strip ANSI color codes for assertion and collapse whitespace so
+        # that Rich panel line wrapping (which can split the message across
+        # lines when the terminal width is narrow on CI) doesn't break the
+        # substring match. Different Click versions also format the option
+        # name with or without surrounding single quotes, so check for the
+        # error prefix and the option name independently.
         clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
-        assert "No such option: --purge-cache" in clean_output
+        normalized_output = re.sub(r"\s+", " ", clean_output)
+        assert "No such option" in normalized_output
+        assert "--purge-cache" in normalized_output
 
     @patch("gha_workflow_linter.cli.ConfigManager")
     @patch("gha_workflow_linter.cli.WorkflowScanner")
