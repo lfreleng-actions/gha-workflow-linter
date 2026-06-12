@@ -230,6 +230,44 @@ Example output (default behavior, test actions skipped):
   + - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
 ```
 
+### Update Cooldown
+
+To guard against supply-chain attacks and retracted releases, the linter
+can refuse to update an action call to a release until that release has
+been public for a set number of days. This mirrors the
+[Dependabot `cooldown`](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown-)
+policy.
+
+```bash
+# Update to releases at least 7 days old
+gha-workflow-linter lint --auto-fix --auto-latest --cooldown 7
+
+# Disable the cooldown (the default behaviour)
+gha-workflow-linter lint --auto-fix --auto-latest --cooldown 0
+```
+
+When `--cooldown` is not supplied, the linter walks up from the scanned
+path to find a `.github/dependabot.yml` (or `.yaml`) file and reuses its
+`cooldown.default-days` value, preferring the `github-actions` ecosystem.
+The linter reports that value once:
+
+```text
+Using cooldown timer/value [7] from dependabot configuration 🤖
+```
+
+When the linter finds no Dependabot configuration (and no flag sets a
+value) the cooldown defaults to `0`, preserving the original behaviour.
+The linter picks the newest release that satisfies the cooldown window,
+so it still updates an action to an older-but-eligible release when the
+latest release remains inside the window.
+
+> Note: the cooldown relies on a verifiable publication timestamp for
+> each candidate: the release publish date (GitHub API GraphQL/REST) or
+> an annotated tag's tagger date. Lightweight tags carry no creation
+> timestamp of their own, and the Git validation method cannot expose
+> release dates, so the linter skips candidates it cannot date while a
+> cooldown applies.
+
 ### As a Pre-commit Hook
 
 Add to your `.pre-commit-config.yaml`:
@@ -699,6 +737,9 @@ Options:
   --skip-actions             Skip scanning action.yaml/action.yml files
   --no-skip-actions          Scan action.yaml/action.yml files (default)
   --fix-test-calls           Fix actions with 'test' in comments
+  --cooldown INTEGER         Days a release must be public before updating
+                             (defaults to the Dependabot cooldown setting,
+                             then 0)
   --version                  Show version and exit
   --help                     Show this message and exit
 

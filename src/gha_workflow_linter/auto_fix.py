@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import re
@@ -130,6 +131,78 @@ def _find_most_specific_version_tag(
     )
 
     return sorted_by_specificity[0]
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp into a timezone-aware ``datetime``.
+
+    GitHub returns timestamps such as ``2026-01-02T03:04:05Z``. The
+    trailing ``Z`` is normalised to ``+00:00`` so ``fromisoformat`` can
+    parse it on all supported Python versions.
+
+    Args:
+        value: An ISO-8601 timestamp string, or ``None``.
+
+    Returns:
+        A timezone-aware ``datetime`` (UTC if no offset was provided), or
+        ``None`` if the value is missing or cannot be parsed.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _select_version_with_cooldown(
+    candidates: list[tuple[str, str, datetime | None]],
+    cooldown_days: int,
+    now: datetime | None = None,
+) -> tuple[str, str] | None:
+    """Pick the newest eligible ``(tag, sha)`` honouring a cooldown window.
+
+    The cooldown enforces a Dependabot-style policy: a release must have
+    been available for at least ``cooldown_days`` days before it is
+    eligible to be selected. This protects against deploying actions that
+    were recently retracted, superseded, or compromised by a supply-chain
+    attack.
+
+    Args:
+        candidates: ``(tag, sha, published)`` tuples ordered newest-first.
+            ``published`` may be ``None`` when a release date is unknown.
+        cooldown_days: Minimum age in days. Values ``<= 0`` disable the
+            cooldown and simply return the newest candidate.
+        now: Reference time (defaults to the current UTC time); primarily
+            an injection point for tests.
+
+    Returns:
+        The first eligible ``(tag, sha)`` tuple, or ``None`` when no
+        candidate satisfies the cooldown. When the cooldown is active and
+        a candidate's release date is unknown, it is skipped because its
+        age cannot be verified.
+    """
+    if not candidates:
+        return None
+
+    if cooldown_days <= 0:
+        tag, sha, _ = candidates[0]
+        return (tag, sha)
+
+    reference = now or datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=cooldown_days)
+
+    for tag, sha, published in candidates:
+        if published is None:
+            # Cannot verify the release age; skip under an active cooldown.
+            continue
+        if published <= cutoff:
+            return (tag, sha)
+
+    return None
 
 
 class AutoFixer:
@@ -1808,6 +1881,8 @@ class AutoFixer:
                     {alias}: repository(owner: "{owner}", name: "{base_name}") {{
                         latestRelease {{
                             tagName
+                            createdAt
+                            publishedAt
                             tagCommit {{
                                 oid
                             }}
@@ -1820,6 +1895,9 @@ class AutoFixer:
                                         oid
                                     }}
                                     ... on Tag {{
+                                        tagger {{
+                                            date
+                                        }}
                                         target {{
                                             ... on Commit {{
                                                 oid
@@ -1854,20 +1932,56 @@ class AutoFixer:
                 if not repo_data:
                     continue
 
-                # Collect all tags first for specificity resolution
+                # Collect all tags for specificity resolution. ``tag_dates``
+                # records a verifiable *publication* timestamp per tag so the
+                # cooldown can reason about release age: the tagger date for
+                # annotated tags. Lightweight tags carry no creation
+                # timestamp of their own (only the commit they point at,
+                # which may be far older than the tag), so they are recorded
+                # as undated and skipped while a cooldown applies. The latest
+                # release's publication date is layered on separately by
+                # ``_select_cooldown_version_graphql``.
                 refs = repo_data.get("refs", {}).get("nodes", [])
                 all_tags = []
+                tag_dates: dict[str, datetime | None] = {}
                 for ref in refs:
                     if ActionCallPatterns.VERSION_TAG_PATTERN.match(
                         ref["name"]
                     ):
                         target = ref.get("target", {})
                         if "oid" in target:
+                            # Lightweight tag: target is the commit itself and
+                            # has no verifiable tag-creation time.
                             all_tags.append((ref["name"], target["oid"]))
+                            tag_dates[ref["name"]] = None
                         elif "target" in target and "oid" in target["target"]:
+                            # Annotated tag: use the tagger date as the
+                            # publication timestamp.
                             all_tags.append(
                                 (ref["name"], target["target"]["oid"])
                             )
+                            tagger = target.get("tagger") or {}
+                            tag_dates[ref["name"]] = _parse_iso_datetime(
+                                tagger.get("date")
+                            )
+
+                # When a cooldown is active, select the newest version that
+                # has been available long enough, falling back to older
+                # eligible versions when the very latest is still "warming".
+                if self.config.cooldown_days > 0:
+                    cooldown_choice = self._select_cooldown_version_graphql(
+                        repo_data, all_tags, tag_dates
+                    )
+                    if cooldown_choice:
+                        results[repo_key] = cooldown_choice
+                    else:
+                        self.logger.debug(
+                            "No release for %s satisfies the %d-day "
+                            "cooldown; leaving reference unchanged",
+                            repo_key,
+                            self.config.cooldown_days,
+                        )
+                    continue
 
                 # Try latestRelease first, but only if prereleases are NOT allowed
                 # (latestRelease excludes prereleases by GitHub's API design)
@@ -1929,7 +2043,107 @@ class AutoFixer:
             self.logger.debug(f"GraphQL batch query failed: {e}")
             return {}
 
-    async def _get_latest_version_single(
+    def _select_cooldown_version_graphql(
+        self,
+        repo_data: dict[str, Any],
+        all_tags: list[tuple[str, str]],
+        tag_dates: dict[str, datetime | None],
+    ) -> tuple[str, str] | None:
+        """Choose a cooldown-eligible ``(tag, sha)`` from GraphQL repo data.
+
+        Builds a newest-first list of version-tag candidates (each
+        annotated with a verifiable publication timestamp) and delegates
+        to :func:`_select_version_with_cooldown`. The latest release's
+        publish date is layered on for its tag because it best reflects
+        when the version became consumable.
+
+        Args:
+            repo_data: The per-repository GraphQL response fragment.
+            all_tags: ``(tag, sha)`` pairs for every matching version tag.
+            tag_dates: Mapping of tag name to its publication ``datetime``
+                (``None`` when no verifiable publication time exists, e.g.
+                lightweight tags).
+
+        Returns:
+            The newest eligible ``(tag, sha)`` tuple, or ``None`` when no
+            version satisfies the configured cooldown.
+        """
+        # Prefer the published date of the latest release, which better
+        # reflects when the version became available to consumers.
+        latest_release = repo_data.get("latestRelease")
+        if latest_release:
+            release_tag = latest_release.get("tagName")
+            release_date = _parse_iso_datetime(
+                latest_release.get("publishedAt")
+                or latest_release.get("createdAt")
+            )
+            if release_tag and release_date is not None:
+                tag_dates[release_tag] = release_date
+
+        candidates = sorted(
+            ((name, sha, tag_dates.get(name)) for name, sha in all_tags),
+            key=lambda item: (
+                _parse_version(item[0]),
+                _get_version_specificity(item[0]),
+            ),
+            reverse=True,
+        )
+
+        selected = _select_version_with_cooldown(
+            candidates, self.config.cooldown_days
+        )
+        if not selected:
+            return None
+
+        tag, sha = selected
+        # Resolve to the most specific equivalent tag for the chosen SHA
+        # (e.g. prefer v8.0.0 over v8 when both point at the same commit).
+        specific_tag = _find_most_specific_version_tag(tag, sha, all_tags)
+        return (specific_tag, sha)
+
+    def _select_release_tag_with_cooldown(
+        self,
+        repo_key: str,
+        sorted_releases: list[dict[str, Any]],
+    ) -> str | None:
+        """Pick a REST release tag honouring the configured cooldown.
+
+        Args:
+            repo_key: Repository identifier (used for debug logging).
+            sorted_releases: REST API release objects ordered newest
+                version first.
+
+        Returns:
+            The chosen tag name, or ``None`` when no release satisfies the
+            cooldown window. When the cooldown is disabled the newest tag
+            is returned unchanged.
+        """
+        if self.config.cooldown_days <= 0:
+            return sorted_releases[0].get("tag_name")
+
+        candidates = [
+            (
+                release.get("tag_name", ""),
+                "",  # SHA is resolved separately by the caller
+                _parse_iso_datetime(
+                    release.get("published_at") or release.get("created_at")
+                ),
+            )
+            for release in sorted_releases
+        ]
+        selected = _select_version_with_cooldown(
+            candidates, self.config.cooldown_days
+        )
+        if selected is None:
+            self.logger.debug(
+                "No release for %s satisfies the %d-day cooldown",
+                repo_key,
+                self.config.cooldown_days,
+            )
+            return None
+        return selected[0]
+
+    async def _get_latest_version_single(  # noqa: PLR0911
         self, repo_key: str
     ) -> tuple[str, str] | None:
         """
@@ -1976,7 +2190,12 @@ class AutoFixer:
                             key=lambda r: _parse_version(r.get("tag_name", "")),
                             reverse=True,
                         )
-                        tag = sorted_releases[0].get("tag_name")
+                        tag = self._select_release_tag_with_cooldown(
+                            repo_key, sorted_releases
+                        )
+                        if tag is None:
+                            # No release satisfies the cooldown window.
+                            return None
                         # Get SHA for this tag
                         sha_info = await self._get_commit_sha_for_reference(
                             repo_key, tag
@@ -2001,6 +2220,16 @@ class AutoFixer:
                         )
                     ]
                     if clean_tags:
+                        if self.config.cooldown_days > 0:
+                            # The tags endpoint carries no release dates, so
+                            # we cannot verify the cooldown window here.
+                            self.logger.debug(
+                                "Cooldown active but %s exposes no release "
+                                "dates via the tags API; leaving reference "
+                                "unchanged",
+                                repo_key,
+                            )
+                            return None
                         sorted_tags = sorted(
                             clean_tags,
                             key=lambda t: _parse_version(t.get("name", "")),
@@ -2029,6 +2258,17 @@ class AutoFixer:
                         if ActionCallPatterns.VERSION_TAG_PATTERN.match(tag)
                     ]
                     if clean_tags:
+                        if self.config.cooldown_days > 0:
+                            # ``git ls-remote`` does not expose tag dates, so
+                            # the cooldown cannot be enforced for the Git
+                            # validation method.
+                            self.logger.debug(
+                                "Cooldown active but release dates are "
+                                "unavailable via Git for %s; leaving "
+                                "reference unchanged",
+                                repo_key,
+                            )
+                            return None
                         sorted_versions = sorted(
                             clean_tags, key=_parse_version, reverse=True
                         )

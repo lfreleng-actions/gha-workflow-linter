@@ -421,6 +421,15 @@ class Config(BaseModel):
         default=False,
         description="Enable action call fixes with test-related keywords in comments (e.g., test, testing)",
     )
+    cooldown_days: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum number of days an action release must have been "
+            "available before it is eligible for an update (0 disables "
+            "the cooldown)"
+        ),
+    )
 
     # pydantic BaseModel subclasses with all-defaulted fields require no
     # arguments (keyword args are still accepted), but basedpyright reports
@@ -508,6 +517,14 @@ class CLIOptions(BaseModel):
     )
     fix_test_calls: bool | None = Field(
         default=None, description="Fix action calls with test comments"
+    )
+    cooldown: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Minimum days a release must be available before updating "
+            "(falls back to Dependabot config, then 0)"
+        ),
     )
     files: list[str] | None = Field(
         default=None, description="Specific files to scan (supports wildcards)"

@@ -28,6 +28,7 @@ from .auto_fix import AutoFixer
 from .cache import CachePrimeReport, ValidationCache
 from .config import ConfigManager
 from .console import console
+from .dependabot import resolve_cooldown
 from .exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -66,6 +67,51 @@ def _get_relative_path(file_path: Path, base_path: Path) -> Path:
     except ValueError:
         # If relative path can't be computed, use the original path
         return file_path
+
+
+def _resolve_cooldown_days(
+    explicit: int | None,
+    scan_path: Path,
+    quiet: bool,
+    output_format: str,
+) -> int:
+    """Resolve the action-update cooldown window in days.
+
+    Precedence:
+        1. An explicit ``--cooldown`` CLI value.
+        2. The repository's Dependabot ``cooldown.default-days`` setting.
+        3. ``0`` (cooldown disabled; original behaviour).
+
+    When the value is sourced from the Dependabot configuration a single
+    informational line is emitted (unless suppressed by quiet/JSON mode).
+
+    Args:
+        explicit: The value passed via ``--cooldown`` (``None`` if unset).
+        scan_path: Path being linted; used to locate the Dependabot config.
+        quiet: Whether quiet mode is active.
+        output_format: The selected output format (``text`` or ``json``).
+
+    Returns:
+        The resolved cooldown window in days.
+    """
+    if explicit is not None:
+        return explicit
+
+    cooldown = resolve_cooldown(scan_path)
+    if cooldown is None:
+        return 0
+
+    if not quiet and output_format != "json":
+        # ``markup=False`` keeps the literal square brackets visible in the
+        # terminal instead of having Rich parse them as style tags. Emoji
+        # shortcodes are still rendered because emoji handling is a
+        # separate Rich option.
+        console.print(
+            f"Using cooldown timer/value [{cooldown.days}] from "
+            "dependabot configuration :robot_face:",
+            markup=False,
+        )
+    return cooldown.days
 
 
 def help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
@@ -185,6 +231,7 @@ def _preprocess_args_for_default_command(
         "--exclude",
         "-e",
         "--cache-ttl",
+        "--cooldown",
         "--validation-method",
         "--log-level",
         "--format",
@@ -457,6 +504,17 @@ def lint(
         "--fix-test-calls",
         help="Enable auto-fixing action calls with 'test' in comments (default: disabled unless overridden in config, test actions are skipped)",
     ),
+    cooldown: int | None = typer.Option(
+        None,
+        "--cooldown",
+        help=(
+            "Minimum number of days an action release must have been "
+            "available before updating to it. When unset, the value is "
+            "read from the repository's .github/dependabot.yml cooldown "
+            "setting, falling back to 0 (no cooldown)."
+        ),
+        min=0,
+    ),
     files: list[str] | None = typer.Option(
         None,
         "--files",
@@ -539,6 +597,9 @@ def lint(
         # Enable auto-fixing for actions with 'test' in comments (default is to skip them)
         gha-workflow-linter lint --auto-fix --fix-test-calls
 
+        # Only update to releases at least 7 days old (supply-chain cooldown)
+        gha-workflow-linter lint --auto-fix --auto-latest --cooldown 7
+
         # Scan only specific files
         gha-workflow-linter lint --files .github/workflows/ci.yml
 
@@ -600,6 +661,7 @@ def lint(
             two_space_comments=two_space_comments,
             skip_actions=skip_actions,
             fix_test_calls=fix_test_calls,
+            cooldown=cooldown,
             files=files,
         )
 
@@ -628,6 +690,13 @@ def lint(
             config.skip_actions = skip_actions
         if fix_test_calls is not None:
             config.fix_test_calls = fix_test_calls
+
+        # Resolve the action-update cooldown window. Precedence: explicit
+        # --cooldown flag, then the repository's Dependabot configuration,
+        # then 0 (no cooldown / original behaviour).
+        config.cooldown_days = _resolve_cooldown_days(
+            cooldown, path, quiet, output_format
+        )
 
         # Apply validation method override if specified
         if validation_method is not None:
