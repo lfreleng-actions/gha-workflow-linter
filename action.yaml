@@ -8,7 +8,11 @@ author: "The Linux Foundation"
 
 inputs:
   path:
-    description: "Path to scan for workflows (default: current directory)"
+    description: >
+      Path to scan for workflows (default: current directory).
+      Input values are passed to the linter as literal strings (they are not
+      subject to shell-variable expansion); use GitHub expression contexts
+      (such as the github.workspace context) for dynamic values.
     required: false
     default: "."
   config-file:
@@ -93,6 +97,18 @@ runs:
     - name: "Run gha-workflow-linter"
       id: gha-workflow-linter
       shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_LOG_LEVEL: ${{ inputs.log-level }}
+        INPUT_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        INPUT_PARALLEL: ${{ inputs.parallel }}
+        INPUT_WORKERS: ${{ inputs.workers }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_REQUIRE_PINNED_SHA: ${{ inputs.require-pinned-sha }}
+        INPUT_SKIP_ACTIONS: ${{ inputs.skip-actions }}
+        INPUT_VALIDATION_METHOD: ${{ inputs.validation-method }}
       run: |
         # Determine command prefix (uvx for PyPI, direct for local)
         if [[ "$USE_UVX" == "true" ]]; then
@@ -102,53 +118,53 @@ runs:
         fi
 
         # Build command arguments
-        args=("${{ inputs.path }}")
+        args=("$INPUT_PATH")
 
-        if [[ -n "${{ inputs.config-file }}" ]]; then
-          args+=(--config "${{ inputs.config-file }}")
+        if [[ -n "$INPUT_CONFIG_FILE" ]]; then
+          args+=(--config "$INPUT_CONFIG_FILE")
         fi
 
-        if [[ -n "${{ inputs.log-level }}" ]]; then
-          args+=(--log-level "${{ inputs.log-level }}")
+        if [[ -n "$INPUT_LOG_LEVEL" ]]; then
+          args+=(--log-level "$INPUT_LOG_LEVEL")
         fi
 
-        if [[ -n "${{ inputs.output-format }}" ]]; then
-          args+=(--format "${{ inputs.output-format }}")
+        if [[ -n "$INPUT_OUTPUT_FORMAT" ]]; then
+          args+=(--format "$INPUT_OUTPUT_FORMAT")
         fi
 
-        if [[ "${{ inputs.fail-on-error }}" == "false" ]]; then
+        if [[ "$INPUT_FAIL_ON_ERROR" == "false" ]]; then
           args+=(--no-fail-on-error)
         fi
 
-        if [[ "${{ inputs.parallel }}" == "false" ]]; then
+        if [[ "$INPUT_PARALLEL" == "false" ]]; then
           args+=(--no-parallel)
         fi
 
-        if [[ -n "${{ inputs.workers }}" ]]; then
-          args+=(--workers "${{ inputs.workers }}")
+        if [[ -n "$INPUT_WORKERS" ]]; then
+          args+=(--workers "$INPUT_WORKERS")
         fi
 
-        if [[ -n "${{ inputs.exclude }}" ]]; then
-          IFS=',' read -ra EXCLUDES <<< "${{ inputs.exclude }}"
+        if [[ -n "$INPUT_EXCLUDE" ]]; then
+          IFS=',' read -ra EXCLUDES <<< "$INPUT_EXCLUDE"
           for exclude in "${EXCLUDES[@]}"; do
             args+=(--exclude "$exclude")
           done
         fi
 
-        if [[ "${{ inputs.require-pinned-sha }}" == "false" ]]; then
+        if [[ "$INPUT_REQUIRE_PINNED_SHA" == "false" ]]; then
           args+=(--no-require-pinned-sha)
         fi
 
-        if [[ "${{ inputs.skip-actions }}" == "true" ]]; then
+        if [[ "$INPUT_SKIP_ACTIONS" == "true" ]]; then
           args+=(--skip-actions)
         fi
 
-        if [[ -n "${{ inputs.validation-method }}" ]]; then
-          args+=(--validation-method "${{ inputs.validation-method }}")
+        if [[ -n "$INPUT_VALIDATION_METHOD" ]]; then
+          args+=(--validation-method "$INPUT_VALIDATION_METHOD")
         fi
 
         # Run gha-workflow-linter and capture output
-        if [[ "${{ inputs.output-format }}" == "json" ]]; then
+        if [[ "$INPUT_OUTPUT_FORMAT" == "json" ]]; then
           output=$($cmd_prefix lint "${args[@]}" --no-cache)
           echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
           echo "$output" >> "$GITHUB_OUTPUT"
