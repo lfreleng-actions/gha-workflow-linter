@@ -23,6 +23,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _base_repository(repository: str) -> str:
+    """Return the ``owner/repo`` base, stripping any action subpath.
+
+    Monorepo / subdirectory actions are referenced as ``owner/repo/path``
+    (for example ``anchore/scan-action/download-grype`` or
+    ``github/codeql-action/init``). A Git remote only exists for the
+    ``owner/repo`` portion; the trailing path is a directory within the
+    repository. Strip it before building clone / ls-remote URLs so that
+    these actions validate against the correct remote.
+
+    Args:
+        repository: Repository identifier, possibly including a subpath.
+
+    Returns:
+        The ``owner/repo`` portion (first two path segments) when a
+        subpath is present, otherwise the input unchanged.
+    """
+    parts = repository.split("/")
+    if len(parts) > 2:
+        return "/".join(parts[:2])
+    return repository
+
+
 class GitValidationClient:
     """Client for validating GitHub Actions using Git operations."""
 
@@ -230,8 +253,11 @@ def _validate_repository_exists(
         ValidationResult indicating if repository exists
     """
     # Try both HTTPS and SSH URLs
-    https_url = f"https://github.com/{repository}.git"
-    ssh_url = f"git@github.com:{repository}.git"
+    # Strip any action subpath (e.g. anchore/scan-action/download-grype)
+    # so the URL targets the real owner/repo remote.
+    base_repo = _base_repository(repository)
+    https_url = f"https://github.com/{base_repo}.git"
+    ssh_url = f"git@github.com:{base_repo}.git"
 
     # Try HTTPS first (more likely to work without auth for public repos)
     for url in [https_url, ssh_url]:
@@ -264,8 +290,11 @@ def _validate_repository_references(
     results = {}
 
     # Try both HTTPS and SSH URLs
-    https_url = f"https://github.com/{repository}.git"
-    ssh_url = f"git@github.com:{repository}.git"
+    # Strip any action subpath (e.g. anchore/scan-action/download-grype)
+    # so the URL targets the real owner/repo remote.
+    base_repo = _base_repository(repository)
+    https_url = f"https://github.com/{base_repo}.git"
+    ssh_url = f"git@github.com:{base_repo}.git"
 
     # Group references by type for optimization
     commit_shas = []
