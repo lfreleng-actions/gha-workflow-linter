@@ -1398,8 +1398,15 @@ class AutoFixer:
                 if response.status_code == 200:
                     release_data = response.json()
                     return release_data.get("tag_name")  # type: ignore[no-any-return]
-            except Exception:
-                pass
+            except Exception as e:
+                # A request failure or malformed-JSON error: fall back to the
+                # tags API below. (A non-200 status such as 404 -- normal for
+                # repos that only tag -- is not an error here: it simply skips
+                # the block above and falls through, since the response is not
+                # raised for status.)
+                self.logger.debug(
+                    f"Failed to get latest release via API for {repo_key}: {e}"
+                )
 
             # Fall back to getting latest tag via API
             try:
@@ -1711,6 +1718,7 @@ class AutoFixer:
                         sha = result.stdout.strip().split("\t")[0]
                         return {"sha": sha, "type": "branch"}
                 except subprocess.CalledProcessError:
+                    # ref is not a branch; fall through to try it as a tag.
                     pass
 
                 # Try as tag - need to dereference annotated tags
@@ -1743,6 +1751,8 @@ class AutoFixer:
                             sha = lines[0].split("\t")[0]
                             return {"sha": sha, "type": "tag"}
                 except subprocess.CalledProcessError:
+                    # ref is not a tag either; leave it unresolved (returns
+                    # None below) so the caller can handle the miss.
                     pass
 
             except Exception as e:

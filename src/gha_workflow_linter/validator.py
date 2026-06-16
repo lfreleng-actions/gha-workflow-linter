@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 
     from rich.progress import Progress, TaskID
 
-    pass
-
 
 from .cache import ValidationCache
 from .exceptions import (

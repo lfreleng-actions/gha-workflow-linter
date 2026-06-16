@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 
     from .models import ActionCall, Config
 
-    pass
-
 import yaml
 
 from .patterns import ActionCallPatterns

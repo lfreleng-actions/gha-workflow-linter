@@ -158,10 +158,6 @@ module = [
 ]
 disable_error_code = ["attr-defined", "call-arg", "arg-type", "comparison-overlap", "index", "misc", "func-returns-value", "call-overload", "union-attr", "var-annotated", "operator", "no-untyped-def"]
 
-[[tool.mypy.overrides]]
-module = ["tests.test_exceptions_simple"]
-disable_error_code = ["unreachable"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]

@@ -19,6 +19,19 @@ from gha_workflow_linter.exceptions import (
 )
 
 
+def _raise(exc: BaseException) -> None:
+    """Raise ``exc``.
+
+    Tests use this indirection so the ``raise`` inside a
+    ``with pytest.raises(...)`` block is a normal function call rather than the
+    sole, unconditional statement of the block. That keeps the assertions that
+    follow the block reachable for static analysis (mypy ``warn_unreachable``
+    and CodeQL), neither of which models ``pytest.raises`` as suppressing the
+    exception.
+    """
+    raise exc
+
+
 class TestValidationError:
     """Test the ValidationError base class."""
 
@@ -225,14 +238,14 @@ class TestErrorExceptionHandling:
     def test_raise_and_catch_network_error(self) -> None:
         """Test raising and catching NetworkError."""
         with pytest.raises(NetworkError) as exc_info:
-            raise NetworkError("Test network error")
+            _raise(NetworkError("Test network error"))
 
         assert exc_info.value.message == "Test network error"
 
     def test_raise_and_catch_authentication_error(self) -> None:
         """Test raising and catching AuthenticationError."""
         with pytest.raises(AuthenticationError) as exc_info:
-            raise AuthenticationError("Bad token")
+            _raise(AuthenticationError("Bad token"))
 
         assert exc_info.value.message == "Bad token"
         assert exc_info.value.status_code == 401
@@ -240,13 +253,13 @@ class TestErrorExceptionHandling:
     def test_catch_base_validation_error(self) -> None:
         """Test catching derived errors as ValidationError."""
         with pytest.raises(ValidationError):
-            raise NetworkError("Network issue")
+            _raise(NetworkError("Network issue"))
 
         with pytest.raises(ValidationError):
-            raise GitHubAPIError("API issue")
+            _raise(GitHubAPIError("API issue"))
 
         with pytest.raises(ValidationError):
-            raise AuthenticationError("Auth issue")
+            _raise(AuthenticationError("Auth issue"))
 
     def test_exception_error_chaining(self) -> None:
         """Test exception chaining with original errors."""
