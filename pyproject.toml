@@ -47,6 +47,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest-asyncio>=0.25.0",
     "pytest-mock>=3.14.0",
+    "pytest-timeout>=2.3.1",
     "mypy>=1.19.1",
     "ruff>=0.14.10",
     "pre-commit>=4.5.1",
@@ -174,6 +175,12 @@ addopts = [
     "--cov-report=html",
     "--cov-report=xml",
     "--cov-fail-under=70",
+    # Fail (with a traceback of all threads) any test that hangs, instead of
+    # silently consuming the job's timeout-minutes. The thread method dumps
+    # stacks even when the hang is in C/subprocess code. No individual test
+    # should take anywhere near this long.
+    "--timeout=120",
+    "--timeout-method=thread",
 ]
 filterwarnings = [
     "ignore:install \"ipywidgets\" for Jupyter support:UserWarning",
