@@ -26,6 +26,11 @@ from .models import (
     GitHubAPIConfig,
     GitHubRateLimitInfo,
 )
+from .paths import (
+    action_subpath,
+    action_subpath_candidates,
+    base_repository,
+)
 from .system_utils import get_default_workers
 
 if TYPE_CHECKING:
@@ -61,6 +66,9 @@ class GitHubGraphQLClient:
         # Cache for validation results
         self._repository_cache: dict[str, bool] = {}
         self._reference_cache: dict[str, dict[str, bool]] = {}
+        # Cache for subdirectory-action subpath existence, keyed by
+        # (full action identifier including subpath, ref).
+        self._subpath_cache: dict[tuple[str, str], bool] = {}
 
         # Parallel workers for concurrent operations (set by validator)
         self.parallel_workers: int = (
@@ -292,6 +300,110 @@ class GitHubGraphQLClient:
         for repo_key, batch_result in batch_results_list:
             for ref, is_valid in batch_result.items():
                 results[(repo_key, ref)] = is_valid
+
+        return results
+
+    async def validate_subpaths_batch(
+        self, subpath_refs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], bool]:
+        """
+        Validate subdirectory-action subpaths exist at their referenced ref.
+
+        Each entry is a ``(repo_key, ref)`` tuple where ``repo_key`` is a full
+        action identifier that includes a subdirectory subpath
+        (``owner/repo/path``). The base repository and ref are assumed to have
+        already been validated; this method only confirms that ``path`` exists
+        in the repository tree at ``ref`` (preferring an ``action.yml`` /
+        ``action.yaml`` within it). A cheap GraphQL ``object(expression: ...)``
+        tree lookup is used, batched alongside other subpath checks, so this
+        adds ~O(1) extra work per subdirectory action.
+
+        Args:
+            subpath_refs: List of ``(repo_key, ref)`` tuples, where each
+                ``repo_key`` includes a subdirectory subpath.
+
+        Returns:
+            Dictionary mapping ``(repo_key, ref)`` to subpath-existence result.
+        """
+        results: dict[tuple[str, str], bool] = {}
+
+        # Check cache first.
+        uncached: list[tuple[str, str]] = []
+        for repo_key, ref in subpath_refs:
+            cache_key = (repo_key, ref)
+            if cache_key in self._subpath_cache:
+                self.api_stats.increment_cache_hit()
+                results[cache_key] = self._subpath_cache[cache_key]
+                self.logger.debug(f"Subpath cache hit: {repo_key}@{ref}")
+            else:
+                uncached.append((repo_key, ref))
+
+        if not uncached:
+            return results
+
+        self.logger.debug(
+            f"Validating {len(uncached)} subdirectory action subpaths via "
+            f"GraphQL (cache hits: {len(results)})"
+        )
+
+        # Process in batches - create all tasks for parallel execution.
+        batch_size = self.config.max_repositories_per_query
+        batches = [
+            uncached[i : i + batch_size]
+            for i in range(0, len(uncached), batch_size)
+        ]
+
+        semaphore = asyncio.Semaphore(self.parallel_workers)
+
+        async def process_subpath_batch_with_limit(
+            batch: list[tuple[str, str]],
+        ) -> dict[tuple[str, str], bool]:
+            """Process a single subpath batch with rate limiting."""
+            async with semaphore:
+                await self._check_rate_limit()
+                try:
+                    batch_results = (
+                        await self._validate_subpaths_graphql_batch(batch)
+                    )
+                    for cache_key, is_valid in batch_results.items():
+                        self._subpath_cache[cache_key] = is_valid
+                    return batch_results
+                except (
+                    NetworkError,
+                    GitHubAPIError,
+                    AuthenticationError,
+                    RateLimitError,
+                    TemporaryAPIError,
+                ):
+                    # Re-raise known API/network errors so the caller can
+                    # surface them rather than treating them as bogus paths.
+                    # (TemporaryAPIError subclasses GitHubAPIError, so it is
+                    # already covered; it is named explicitly for clarity and
+                    # to mirror the validator's abort handler.)
+                    self.logger.error(
+                        "Error validating subdirectory action subpaths"
+                    )
+                    raise
+                except Exception as e:
+                    # Propagate unexpected (non-API/network) errors instead of
+                    # caching a bogus ``False`` (INVALID_PATH) for every entry.
+                    # Returning False here would poison ``_subpath_cache`` for
+                    # the rest of the run and misclassify an internal bug as a
+                    # real bogus subpath. The validator turns any raised error
+                    # into a ValidationAbortedError, mirroring how the Git path
+                    # keeps inconclusive checks out of the cache.
+                    self.logger.error(
+                        f"Unexpected error validating subpath batch: {e}"
+                    )
+                    self.api_stats.increment_failed_call()
+                    raise
+
+        batch_results_list = await asyncio.gather(
+            *[process_subpath_batch_with_limit(batch) for batch in batches]
+        )
+
+        for batch_result in batch_results_list:
+            results.update(batch_result)
 
         return results
 
@@ -570,6 +682,141 @@ class GitHubGraphQLClient:
             # Found if exists as either branch or tag
             is_valid = bool(repo_data.get(alias) or repo_data.get(tag_alias))
             results[ref] = is_valid
+
+        return results
+
+    @staticmethod
+    def _graphql_string_literal(value: str) -> str:
+        """Escape a value for safe inclusion in a GraphQL string literal.
+
+        Refs and paths are interpolated into GraphQL ``expression`` strings;
+        escape the characters that would otherwise terminate or corrupt the
+        string literal. Refs/paths almost never contain these, but escaping
+        keeps the generated query well-formed regardless of input.
+
+        Args:
+            value: Raw string to embed inside a GraphQL double-quoted string.
+
+        Returns:
+            The escaped string (without surrounding quotes).
+        """
+        return (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+
+    async def _validate_subpaths_graphql_batch(
+        self, subpath_refs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], bool]:
+        """
+        Validate a batch of subdirectory subpaths using a single GraphQL query.
+
+        For each ``(repo_key, ref)`` entry, the subpath is probed at the ref
+        via ``object(expression: "<ref>:<candidate>")`` for each candidate path
+        returned by :func:`action_subpath_candidates` (the action metadata
+        files first, then the directory itself). The subpath is considered to
+        exist if any candidate object resolves to a non-null tree/blob.
+
+        Args:
+            subpath_refs: List of ``(repo_key, ref)`` tuples to validate.
+
+        Returns:
+            Dictionary mapping ``(repo_key, ref)`` to subpath-existence result.
+        """
+        query_parts: list[str] = []
+        # alias -> (cache_key, list of candidate aliases)
+        entry_aliases: dict[tuple[str, str], list[str]] = {}
+
+        for i, (repo_key, ref) in enumerate(subpath_refs):
+            base = base_repository(repo_key)
+            subpath = action_subpath(repo_key)
+            if subpath is None:
+                # No subpath: nothing to verify, treat as present.
+                entry_aliases[(repo_key, ref)] = []
+                continue
+
+            try:
+                owner, name = base.split("/", 1)
+            except ValueError:
+                self.logger.warning(
+                    f"Invalid repository format for subpath check: {repo_key}"
+                )
+                entry_aliases[(repo_key, ref)] = []
+                continue
+
+            repo_alias = f"sp_{i}"
+            object_parts: list[str] = []
+            candidate_aliases: list[str] = []
+            for j, candidate in enumerate(
+                action_subpath_candidates(subpath)
+            ):
+                obj_alias = f"{repo_alias}_c{j}"
+                candidate_aliases.append(f"{repo_alias}.{obj_alias}")
+                expression = self._graphql_string_literal(f"{ref}:{candidate}")
+                object_parts.append(
+                    f'{obj_alias}: object(expression: "{expression}") '
+                    f"{{ __typename }}"
+                )
+
+            owner_lit = self._graphql_string_literal(owner)
+            name_lit = self._graphql_string_literal(name)
+            query_parts.append(
+                f'{repo_alias}: repository(owner: "{owner_lit}", '
+                f'name: "{name_lit}") {{ {" ".join(object_parts)} }}'
+            )
+            entry_aliases[(repo_key, ref)] = candidate_aliases
+
+        results: dict[tuple[str, str], bool] = {}
+
+        # If no entry produced a queryable subpath (all entries lacked a
+        # subpath or had an invalid format), there is nothing to disprove, so
+        # treat them all as present.
+        if not query_parts:
+            return dict.fromkeys(entry_aliases, True)
+
+        query = f"query {{ {' '.join(query_parts)} }}"
+
+        try:
+            response_data = await self._execute_graphql_query(query)
+        except (
+            AuthenticationError,
+            RateLimitError,
+            NetworkError,
+            TemporaryAPIError,
+            GitHubAPIError,
+        ):
+            raise
+        except Exception as e:
+            # Propagate unexpected errors rather than reporting every entry as
+            # a bogus subpath. Returning False here would let the caller cache
+            # a potentially-wrong INVALID_PATH for a non-data failure (e.g. a
+            # response-parsing bug); re-raising lets the validator abort the
+            # run, consistent with the Git path's inconclusive handling.
+            self.logger.debug(
+                f"Unexpected subpath batch validation error: {e}"
+            )
+            raise
+
+        data = response_data.get("data", {}) or {}
+
+        for cache_key, candidate_aliases in entry_aliases.items():
+            if not candidate_aliases:
+                # No subpath to verify (defensive: should not normally reach
+                # here since such entries are filtered out upstream).
+                results[cache_key] = True
+                continue
+
+            found = False
+            for combined in candidate_aliases:
+                repo_alias, obj_alias = combined.split(".", 1)
+                repo_obj = data.get(repo_alias) or {}
+                if repo_obj.get(obj_alias) is not None:
+                    found = True
+                    break
+            results[cache_key] = found
 
         return results
 

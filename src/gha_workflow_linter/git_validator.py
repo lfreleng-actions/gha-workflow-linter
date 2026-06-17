@@ -10,12 +10,15 @@ from concurrent.futures import ProcessPoolExecutor
 import logging
 import multiprocessing
 import re
+import tempfile
 from typing import TYPE_CHECKING
 
 from .exceptions import (
     GitError,
 )
 from .models import APICallStats, GitConfig, ReferenceType, ValidationResult
+from .paths import action_subpath, action_subpath_candidates
+from .paths import base_repository as _shared_base_repository
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,24 +29,19 @@ logger = logging.getLogger(__name__)
 def _base_repository(repository: str) -> str:
     """Return the ``owner/repo`` base, stripping any action subpath.
 
-    Monorepo / subdirectory actions are referenced as ``owner/repo/path``
-    (for example ``anchore/scan-action/download-grype`` or
-    ``github/codeql-action/init``). A Git remote only exists for the
-    ``owner/repo`` portion; the trailing path is a directory within the
-    repository. Strip it before building clone / ls-remote URLs so that
-    these actions validate against the correct remote.
+    Thin wrapper around :func:`gha_workflow_linter.paths.base_repository` so
+    the Git validation path shares a single definition of how subdirectory
+    action identifiers are split. Kept as an explicit module-level function so
+    it remains an importable symbol for callers and tests.
 
     Args:
         repository: Repository identifier, possibly including a subpath.
 
     Returns:
-        The ``owner/repo`` portion (first two path segments) when a
-        subpath is present, otherwise the input unchanged.
+        The ``owner/repo`` portion when a subpath is present, otherwise the
+        input unchanged.
     """
-    parts = repository.split("/")
-    if len(parts) > 2:
-        return "/".join(parts[:2])
-    return repository
+    return _shared_base_repository(repository)
 
 
 class GitValidationClient:
@@ -229,6 +227,110 @@ class GitValidationClient:
 
         self.logger.debug(
             f"Reference validation complete: {len(results)} results"
+        )
+        return results
+
+    async def validate_subpaths_batch(
+        self, subpath_refs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], ValidationResult]:
+        """
+        Validate subdirectory-action subpaths exist at their referenced ref.
+
+        Each entry is a ``(repo_key, ref)`` tuple where ``repo_key`` is a full
+        action identifier that includes a subdirectory subpath
+        (``owner/repo/path``). The base repository and ref are assumed to have
+        already been validated; this method only confirms that ``path`` exists
+        in the repository tree at ``ref``.
+
+        ``ls-remote`` cannot inspect trees, so a blobless partial fetch of
+        the ref is performed (``--filter=blob:none``) followed by
+        ``git ls-tree`` of the candidate paths. This heavier path runs *only*
+        for subdirectory actions; plain ``owner/repo`` calls never reach here
+        and keep their lightweight ``ls-remote`` flow.
+
+        Args:
+            subpath_refs: List of ``(repo_key, ref)`` tuples, where each
+                ``repo_key`` includes a subdirectory subpath.
+
+        Returns:
+            Dictionary mapping ``(repo_key, ref)`` to a ``ValidationResult``:
+
+            * ``VALID`` -- the subpath exists at the ref.
+            * ``INVALID_PATH`` -- the ref was inspected cleanly and the
+              subpath is absent (a definitively bogus path).
+            * ``NETWORK_ERROR`` -- the check was inconclusive (e.g. a
+              transient partial-fetch / ``ls-tree`` failure, or a
+              gather-level error). Callers treat this as benefit-of-the-doubt
+              for the current run but must not cache it.
+        """
+        if not subpath_refs:
+            return {}
+
+        self.logger.debug(
+            f"Validating {len(subpath_refs)} subdirectory action subpaths "
+            f"using Git"
+        )
+
+        # Group entries by base repository so each repo is fetched once.
+        repo_to_entries: dict[str, list[tuple[str, str]]] = {}
+        for repo_key, ref in subpath_refs:
+            base = _base_repository(repo_key)
+            repo_to_entries.setdefault(base, []).append((repo_key, ref))
+
+        loop = asyncio.get_running_loop()
+        results: dict[tuple[str, str], ValidationResult] = {}
+
+        with ProcessPoolExecutor(max_workers=self._max_workers) as executor:
+            futures = []
+            entry_groups: list[list[tuple[str, str]]] = []
+            for base, entries in repo_to_entries.items():
+                futures.append(
+                    loop.run_in_executor(
+                        executor,
+                        _validate_repository_subpaths,
+                        base,
+                        entries,
+                        self.config,
+                    )
+                )
+                entry_groups.append(entries)
+
+            try:
+                group_results = await asyncio.gather(
+                    *futures, return_exceptions=True
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"Unexpected error in subpath validation: {e}"
+                )
+                # Propagate the exception per group so the isinstance branch
+                # below maps it to NETWORK_ERROR (inconclusive). Substituting
+                # empty dicts here would instead be read as INVALID_PATH and
+                # misclassify an internal failure as a bogus subpath.
+                group_results = [e] * len(futures)
+
+            for entries, group_result in zip(entry_groups, group_results):
+                if isinstance(group_result, Exception):
+                    self.logger.warning(
+                        f"Failed to validate subpaths: {group_result}"
+                    )
+                    for entry in entries:
+                        results[entry] = ValidationResult.NETWORK_ERROR
+                        self.api_stats.increment_failed_call()
+                elif isinstance(group_result, dict):
+                    for entry in entries:
+                        results[entry] = group_result.get(
+                            entry, ValidationResult.INVALID_PATH
+                        )
+                        self.api_stats.increment_git()
+                    self.api_stats.git_clone_operations += 1
+                else:
+                    for entry in entries:
+                        results[entry] = ValidationResult.NETWORK_ERROR
+                        self.api_stats.increment_failed_call()
+
+        self.logger.debug(
+            f"Subpath validation complete: {len(results)} results"
         )
         return results
 
@@ -786,3 +888,237 @@ def _determine_reference_type(reference: str) -> ReferenceType:
 
     # Default to branch for everything else
     return ReferenceType.BRANCH
+
+
+def _validate_repository_subpaths(
+    base_repository_key: str,
+    entries: list[tuple[str, str]],
+    config: GitConfig,
+) -> dict[tuple[str, str], ValidationResult]:
+    """
+    Validate that subdirectory subpaths exist at their referenced ref.
+
+    Runs in a separate process. Performs one partial (``--filter=blob:none``)
+    shallow fetch per unique ref into a throwaway repository, then checks the
+    candidate paths with ``git ls-tree``. ``blob:none`` keeps file *contents*
+    off the wire while still downloading the tree objects ``ls-tree`` needs, so
+    the path-existence check works entirely offline after the fetch.
+
+    Args:
+        base_repository_key: ``owner/repo`` base (no subpath).
+        entries: List of ``(repo_key, ref)`` tuples sharing this base repo,
+            where each ``repo_key`` includes a subdirectory subpath.
+        config: Git configuration.
+
+    Returns:
+        Dictionary mapping ``(repo_key, ref)`` to a ``ValidationResult``
+        (``VALID``, ``INVALID_PATH`` or ``NETWORK_ERROR``).
+    """
+    import pathlib
+
+    results: dict[tuple[str, str], ValidationResult] = {}
+
+    https_url = f"https://github.com/{base_repository_key}.git"
+    ssh_url = f"git@github.com:{base_repository_key}.git"
+
+    # Group entries by ref so each ref is fetched only once.
+    ref_to_repo_keys: dict[str, list[str]] = {}
+    for repo_key, ref in entries:
+        ref_to_repo_keys.setdefault(ref, []).append(repo_key)
+
+    with tempfile.TemporaryDirectory(prefix="gha-subpath-") as tmpdir:
+        repo_dir = pathlib.Path(tmpdir)
+        if not _run_git_init(repo_dir, config):
+            for repo_key, ref in entries:
+                results[(repo_key, ref)] = ValidationResult.NETWORK_ERROR
+            return results
+
+        for ref, repo_keys in ref_to_repo_keys.items():
+            fetched = False
+            for url in (https_url, ssh_url):
+                if _run_git_fetch_partial(repo_dir, url, ref, config):
+                    fetched = True
+                    break
+
+            for repo_key in repo_keys:
+                entry = (repo_key, ref)
+                if not fetched:
+                    # The ref was already validated to exist, so a fetch
+                    # failure here is treated as a transient/network problem
+                    # rather than a bogus subpath.
+                    results[entry] = ValidationResult.NETWORK_ERROR
+                    continue
+
+                subpath = action_subpath(repo_key)
+                if subpath is None:
+                    results[entry] = ValidationResult.VALID
+                    continue
+
+                try:
+                    exists = _run_git_subpath_exists(
+                        repo_dir, "FETCH_HEAD", subpath, config
+                    )
+                except GitError as e:
+                    # The ls-tree check could not be completed (a local or
+                    # transient Git failure, distinct from the subpath being
+                    # absent). Treat as inconclusive so the caller does not
+                    # report or cache it as a bogus path.
+                    logger.debug(
+                        f"Inconclusive subpath check for {repo_key}@{ref}: {e}"
+                    )
+                    results[entry] = ValidationResult.NETWORK_ERROR
+                    continue
+
+                results[entry] = (
+                    ValidationResult.VALID
+                    if exists
+                    else ValidationResult.INVALID_PATH
+                )
+
+    return results
+
+
+def _run_git_init(repo_dir: Path, config: GitConfig) -> bool:
+    """Initialise an empty Git repository for partial fetches.
+
+    Args:
+        repo_dir: Directory in which to initialise the repository.
+        config: Git configuration.
+
+    Returns:
+        True if initialisation succeeded, False otherwise.
+    """
+    import subprocess
+
+    cmd = ["git", "init", "--quiet", str(repo_dir)]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.timeout_seconds,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _run_git_fetch_partial(
+    repo_dir: Path, url: str, ref: str, config: GitConfig
+) -> bool:
+    """Shallow, blobless fetch of a single ref into ``repo_dir``.
+
+    ``--filter=blob:none`` omits file contents while still fetching the tree
+    objects required to enumerate paths. ``--depth=1`` keeps history minimal.
+    Fetching by branch, tag, or (server permitting) commit SHA all resolve to
+    ``FETCH_HEAD``.
+
+    Args:
+        repo_dir: Initialised repository directory.
+        url: Git remote URL for the base ``owner/repo``.
+        ref: The branch, tag, or commit SHA to fetch.
+        config: Git configuration.
+
+    Returns:
+        True if the fetch succeeded, False otherwise.
+    """
+    import subprocess
+
+    cmd = [
+        "git",
+        "-C",
+        str(repo_dir),
+        "-c",
+        "protocol.version=2",
+        "fetch",
+        "--depth=1",
+        "--filter=blob:none",
+        "--no-tags",
+        "--quiet",
+        url,
+        ref,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.timeout_seconds,
+            check=False,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
+
+def _run_git_subpath_exists(
+    repo_dir: Path, treeish: str, subpath: str, config: GitConfig
+) -> bool:
+    """Check whether a subdirectory action path exists at ``treeish``.
+
+    Probes the candidate paths from :func:`action_subpath_candidates` (the
+    action metadata files first, then the directory itself) in a single
+    ``git ls-tree`` call. Non-empty output means at least one candidate exists.
+
+    A definitive absence (``ls-tree`` succeeds with no matching entry) is
+    distinguished from a failure to run the check at all (non-zero exit,
+    timeout, or other error). The former returns ``False``; the latter raises
+    ``GitError`` so callers can treat it as inconclusive rather than a bogus
+    path.
+
+    Args:
+        repo_dir: Repository directory containing the fetched objects.
+        treeish: Tree-ish to inspect (typically ``FETCH_HEAD``).
+        subpath: The subdirectory path to verify.
+        config: Git configuration.
+
+    Returns:
+        True if the subpath exists at the ref, False if it is definitively
+        absent.
+
+    Raises:
+        GitError: If the ``ls-tree`` check could not be completed.
+    """
+    import subprocess
+
+    candidates = action_subpath_candidates(subpath)
+    cmd = [
+        "git",
+        "-C",
+        str(repo_dir),
+        "ls-tree",
+        treeish,
+        "--",
+        *candidates,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise GitError(
+            f"Git ls-tree timed out for {treeish} in {repo_dir}"
+        ) from None
+    except Exception as e:
+        raise GitError(
+            f"Git ls-tree failed for {treeish} in {repo_dir}: {e}"
+        ) from e
+
+    if result.returncode != 0:
+        # A non-zero exit means the command itself failed (e.g. a missing
+        # object or a local Git problem), which is distinct from the subpath
+        # being absent. Surface it as inconclusive rather than bogus.
+        raise GitError(
+            f"Git ls-tree failed (exit {result.returncode}) for {treeish} "
+            f"in {repo_dir}: {result.stderr.strip()}"
+        )
+
+    # Exit 0: the subpath exists iff ls-tree listed a matching entry.
+    return bool(result.stdout.strip())

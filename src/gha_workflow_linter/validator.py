@@ -39,6 +39,11 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
+from .paths import (
+    action_subpath,
+    base_repository,
+    has_action_subpath,
+)
 from .utils import has_test_comment
 
 
@@ -493,6 +498,91 @@ class ActionCallValidator:
                     original_error=e,
                 ) from e
 
+        # Step 2.5: Validate subdirectory (monorepo) action subpaths.
+        #
+        # Both validation methods strip any subpath to ``owner/repo`` for the
+        # repository and reference checks above. For subdirectory actions
+        # (``owner/repo/path@ref``) we additionally confirm that ``path``
+        # exists in the repository tree at ``ref``; otherwise an action with a
+        # valid base repo and ref but a bogus subpath would pass. This work is
+        # gated to subdirectory actions whose repo + ref already validated, so
+        # plain ``owner/repo`` calls add no extra network work.
+        subpath_results: dict[tuple[str, str], bool] = {}
+        # Subpath checks that could not be decided (e.g. a transient Git fetch
+        # failure on an already-valid ref). These are given the benefit of the
+        # doubt for the current run's surfaced result, but must NOT be cached
+        # so a transient failure cannot persist as a false VALID that masks a
+        # bogus subpath; the next run re-checks them instead.
+        inconclusive_subpaths: set[tuple[str, str]] = set()
+        subpath_refs_to_validate = [
+            (repo_key, ref)
+            for (repo_key, ref) in valid_repo_refs_to_validate
+            if has_action_subpath(repo_key)
+            and ref_results.get((repo_key, ref), False)
+        ]
+
+        if subpath_refs_to_validate:
+            self.logger.debug(
+                f"Validating {len(subpath_refs_to_validate)} subdirectory "
+                f"action subpaths (after cache)"
+            )
+            try:
+                if use_github_api:
+                    assert self._github_client is not None
+                    subpath_results = (
+                        await self._github_client.validate_subpaths_batch(
+                            subpath_refs_to_validate
+                        )
+                    )
+                    self._merge_api_stats(self._github_client.get_api_stats())
+                else:
+                    assert self._git_client is not None
+                    git_subpath_results = (
+                        await self._git_client.validate_subpaths_batch(
+                            subpath_refs_to_validate
+                        )
+                    )
+                    # Classify into three states. A definitive INVALID_PATH
+                    # marks the subpath bogus; VALID marks it present; any
+                    # other (e.g. NETWORK_ERROR/TIMEOUT) is inconclusive --
+                    # given the benefit of the doubt for this run but recorded
+                    # so it is excluded from caching.
+                    for key, result in git_subpath_results.items():
+                        if result == ValidationResult.INVALID_PATH:
+                            subpath_results[key] = False
+                        elif result == ValidationResult.VALID:
+                            subpath_results[key] = True
+                        else:
+                            subpath_results[key] = True
+                            inconclusive_subpaths.add(key)
+            except (
+                NetworkError,
+                GitHubAPIError,
+                AuthenticationError,
+                RateLimitError,
+                TemporaryAPIError,
+            ) as e:
+                error_context = (
+                    "GitHub API/Network" if use_github_api else "Git/Network"
+                )
+                self.logger.error(
+                    f"{error_context} error during subpath validation: {e}"
+                )
+                raise ValidationAbortedError(
+                    "Unable to validate GitHub Actions due to API/network issues",
+                    reason=str(e),
+                    original_error=e,
+                ) from e
+            except Exception as e:
+                self.logger.error(
+                    f"Unexpected error during subpath validation: {e}"
+                )
+                raise ValidationAbortedError(
+                    "Validation failed due to unexpected error",
+                    reason=str(e),
+                    original_error=e,
+                ) from e
+
         # Merge cached reference results
         for (repo, ref), cached_entry in cached_results.items():
             ref_results[(repo, ref)] = (
@@ -511,10 +601,19 @@ class ActionCallValidator:
         # Cache new validation results
         cache_entries_to_store = []
         for repo, ref in refs_to_validate:
+            # Skip caching entries whose subpath check was inconclusive so a
+            # transient failure is retried next run rather than persisted as a
+            # (benefit-of-the-doubt) VALID.
+            if (repo, ref) in inconclusive_subpaths:
+                continue
+
             repo_valid = repo_results.get(repo, False)
             ref_valid = ref_results.get((repo, ref), False)
+            # Subpath is considered valid unless we explicitly determined it is
+            # bogus. Entries without a subpath never populate subpath_results.
+            subpath_valid = subpath_results.get((repo, ref), True)
 
-            if repo_valid and ref_valid:
+            if repo_valid and ref_valid and subpath_valid:
                 result = ValidationResult.VALID
                 api_call_type = "graphql" if use_github_api else "git"
                 error_message = None
@@ -522,11 +621,18 @@ class ActionCallValidator:
                 result = ValidationResult.INVALID_REPOSITORY
                 api_call_type = "graphql" if use_github_api else "git"
                 error_message = f"Repository {repo} not found or not accessible"
-            else:
+            elif not ref_valid:
                 result = ValidationResult.INVALID_REFERENCE
                 api_call_type = "graphql" if use_github_api else "git"
                 error_message = (
                     f"Reference {ref} not found in repository {repo}"
+                )
+            else:
+                result = ValidationResult.INVALID_PATH
+                api_call_type = "graphql" if use_github_api else "git"
+                error_message = (
+                    f"Subdirectory path '{action_subpath(repo)}' not found in "
+                    f"{base_repository(repo)} at {ref}"
                 )
 
             cache_entries_to_store.append(
@@ -548,18 +654,29 @@ class ActionCallValidator:
         # all_repo_refs = repo_refs  # Not needed since we use repo_refs directly
         all_repo_results = repo_results.copy()
         all_ref_results = ref_results.copy()
+        all_subpath_results = dict(subpath_results)
 
-        # Add cached results to the full results dictionaries
+        # Add cached results to the full results dictionaries. A cached
+        # INVALID_PATH means the base repo and ref are valid but the
+        # subdirectory subpath is bogus, so it must be reflected as
+        # repo-valid + ref-valid + subpath-invalid (not as an invalid ref).
         for (repo, ref), cached_entry in cached_results.items():
             all_repo_results[repo] = cached_entry.result not in [
                 ValidationResult.INVALID_REPOSITORY
             ]
-            all_ref_results[(repo, ref)] = (
-                cached_entry.result == ValidationResult.VALID
+            all_ref_results[(repo, ref)] = cached_entry.result in (
+                ValidationResult.VALID,
+                ValidationResult.INVALID_PATH,
+            )
+            all_subpath_results[(repo, ref)] = (
+                cached_entry.result != ValidationResult.INVALID_PATH
             )
 
         validation_results = self._combine_validation_results(
-            unique_calls, all_repo_results, all_ref_results
+            unique_calls,
+            all_repo_results,
+            all_ref_results,
+            all_subpath_results,
         )
 
         for call_key, result in validation_results.items():
@@ -723,18 +840,23 @@ class ActionCallValidator:
         unique_calls: dict[str, ActionCall],
         repo_results: dict[str, bool],
         ref_results: dict[tuple[str, str], bool],
+        subpath_results: dict[tuple[str, str], bool] | None = None,
     ) -> dict[str, ValidationResult]:
         """
-        Combine repository and reference validation results.
+        Combine repository, reference and subpath validation results.
 
         Args:
             unique_calls: Dictionary of unique action calls
             repo_results: Repository validation results
             ref_results: Reference validation results
+            subpath_results: Subdirectory-action subpath validation results,
+                keyed by ``(repo_key, ref)``. Entries are present only for
+                subdirectory actions; a missing entry is treated as valid.
 
         Returns:
             Dictionary mapping call keys to validation results
         """
+        subpath_results = subpath_results or {}
         validation_results = {}
 
         for call_key, action_call in unique_calls.items():
@@ -758,7 +880,14 @@ class ActionCallValidator:
                 )
                 continue
 
-            # Both repository and reference are valid
+            # Check subdirectory subpath validity (subdir actions only)
+            if has_action_subpath(repo_key) and not subpath_results.get(
+                ref_key, True
+            ):
+                validation_results[call_key] = ValidationResult.INVALID_PATH
+                continue
+
+            # Repository, reference and subpath are all valid
             validation_results[call_key] = ValidationResult.VALID
 
         return validation_results
@@ -791,6 +920,7 @@ class ActionCallValidator:
         messages = {
             ValidationResult.INVALID_REPOSITORY: "Repository not found",
             ValidationResult.INVALID_REFERENCE: "Invalid branch, tag, or commit SHA",
+            ValidationResult.INVALID_PATH: "Subdirectory action path not found at reference",
             ValidationResult.INVALID_SYNTAX: "Invalid action call syntax",
             ValidationResult.NETWORK_ERROR: "Network error during validation",
             ValidationResult.TIMEOUT: "Timeout during validation",
@@ -824,6 +954,7 @@ class ActionCallValidator:
             "duplicate_calls_avoided": max(0, total_calls - unique_calls),
             "invalid_repositories": 0,
             "invalid_references": 0,
+            "invalid_paths": 0,
             "syntax_errors": 0,
             "network_errors": 0,
             "timeouts": 0,
@@ -848,6 +979,8 @@ class ActionCallValidator:
                 summary["invalid_repositories"] += 1
             elif error.result == ValidationResult.INVALID_REFERENCE:
                 summary["invalid_references"] += 1
+            elif error.result == ValidationResult.INVALID_PATH:
+                summary["invalid_paths"] += 1
             elif error.result == ValidationResult.INVALID_SYNTAX:
                 summary["syntax_errors"] += 1
             elif error.result == ValidationResult.NETWORK_ERROR:

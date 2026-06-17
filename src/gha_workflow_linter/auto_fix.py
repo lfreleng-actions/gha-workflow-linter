@@ -36,6 +36,7 @@ from .models import (
     ValidationMethod,
     ValidationResult,
 )
+from .paths import base_repository
 from .patterns import ActionCallPatterns
 from .utils import has_test_comment
 
@@ -365,10 +366,13 @@ class AutoFixer:
                 should_fix = False
             elif error.result in [
                 ValidationResult.INVALID_SYNTAX,
+                ValidationResult.INVALID_PATH,
                 ValidationResult.NETWORK_ERROR,
                 ValidationResult.TIMEOUT,
             ]:
-                # Cannot auto-fix these - skip
+                # Cannot auto-fix these - skip.
+                # INVALID_PATH means the subdirectory subpath itself is bogus;
+                # changing the ref will not make a non-existent path appear.
                 should_fix = False
 
             if should_fix:
@@ -2473,10 +2477,7 @@ class AutoFixer:
         Returns:
             Base repository (owner/repo)
         """
-        parts = repo_key.split("/")
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
-        return repo_key
+        return base_repository(repo_key)
 
     def _build_fixed_line(
         self,

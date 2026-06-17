@@ -642,6 +642,7 @@ gha-workflow-linter lint --format json
     "total_errors": 8,
     "invalid_repositories": 0,
     "invalid_references": 0,
+    "invalid_paths": 0,
     "syntax_errors": 0,
     "network_errors": 0,
     "timeouts": 0,
@@ -785,14 +786,15 @@ docker run --rm -v "$(pwd):/workspace" \
 
 <!-- markdownlint-disable MD013 -->
 
-| Error Type           | Description              | Resolution                                         |
-| -------------------- | ------------------------ | -------------------------------------------------- |
-| `invalid_repository` | Repository not found     | Check org/repo name spelling                       |
-| `invalid_reference`  | Branch/tag/SHA not found | Verify reference exists                            |
-| `invalid_syntax`     | Malformed action call    | Fix YAML syntax                                    |
-| `network_error`      | Connection failed        | Check network/credentials                          |
-| `timeout`            | Validation timed out     | Increase timeout settings                          |
-| `not_pinned_to_sha`  | Action not using SHA     | Pin to commit SHA or use `--no-require-pinned-sha` |
+| Error Type           | Description                                              | Resolution                                                              |
+| -------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `invalid_repository` | Repository not found                                     | Check org/repo name spelling                                            |
+| `invalid_reference`  | Branch/tag/SHA not found                                 | Verify reference exists                                                 |
+| `invalid_path`       | Subdirectory action path not found at the referenced ref | Check the subdirectory path (e.g. `owner/repo/path`) exists at that ref |
+| `invalid_syntax`     | Malformed action call                                    | Fix YAML syntax                                                         |
+| `network_error`      | Connection failed                                        | Check network/credentials                                               |
+| `timeout`            | Validation timed out                                     | Increase timeout settings                                               |
+| `not_pinned_to_sha`  | Action not using SHA                                     | Pin to commit SHA or use `--no-require-pinned-sha`                      |
 
 <!-- markdownlint-enable MD013 -->
 

@@ -1340,6 +1340,11 @@ def _display_validation_summary(
             console.print(
                 f"  - {validation_summary['invalid_references']} invalid references"
             )
+        if validation_summary.get("invalid_paths", 0) > 0:
+            console.print(
+                f"  - {validation_summary['invalid_paths']} invalid "
+                f"subdirectory action paths"
+            )
         if validation_summary["network_errors"] > 0:
             console.print(
                 f"  - {validation_summary['network_errors']} network errors"

@@ -37,6 +37,7 @@ class ValidationResult(str, Enum):
     VALID = "valid"
     INVALID_REPOSITORY = "invalid_repository"
     INVALID_REFERENCE = "invalid_reference"
+    INVALID_PATH = "invalid_path"
     INVALID_SYNTAX = "invalid_syntax"
     NETWORK_ERROR = "network_error"
     TIMEOUT = "timeout"
