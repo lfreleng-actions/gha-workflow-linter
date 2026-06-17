@@ -148,7 +148,7 @@ class TestSelectCooldownVersionGraphql:
             "v2": _days_ago(20),
         }
         assert fixer._select_cooldown_version_graphql(
-            repo_data, all_tags, tag_dates
+            repo_data, all_tags, tag_dates, now=NOW
         ) == ("v2", "sha2")
 
     def test_selects_release_when_old_enough(self) -> None:
@@ -166,7 +166,7 @@ class TestSelectCooldownVersionGraphql:
             "v2": _days_ago(60),
         }
         assert fixer._select_cooldown_version_graphql(
-            repo_data, all_tags, tag_dates
+            repo_data, all_tags, tag_dates, now=NOW
         ) == ("v3", "sha3")
 
     def test_prefers_more_specific_tag_for_sha(self) -> None:
@@ -179,12 +179,14 @@ class TestSelectCooldownVersionGraphql:
             "v8.0.0": _days_ago(30),
         }
         assert fixer._select_cooldown_version_graphql(
-            repo_data, all_tags, tag_dates
+            repo_data, all_tags, tag_dates, now=NOW
         ) == ("v8.0.0", "sha8")
 
     def test_returns_none_when_no_tags(self) -> None:
         fixer = _make_fixer(7)
-        assert fixer._select_cooldown_version_graphql({}, [], {}) is None
+        assert (
+            fixer._select_cooldown_version_graphql({}, [], {}, now=NOW) is None
+        )
 
 
 class TestResolveCooldownDays:
