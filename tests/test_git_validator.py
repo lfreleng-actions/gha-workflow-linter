@@ -320,7 +320,7 @@ async def test_validate_subpaths_batch_gather_failure_is_network_error(
             future.set_result({})
             return future
 
-    monkeypatch.setattr(git_validator, "ProcessPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(git_validator, "ThreadPoolExecutor", _FakeExecutor)
 
     async def boom(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("gather exploded")

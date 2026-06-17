@@ -1845,7 +1845,7 @@ class AutoFixer:
         else:
             fetch_results = []
 
-        for repo_key, result in zip(repos_to_fetch, fetch_results):
+        for repo_key, result in zip(repos_to_fetch, fetch_results, strict=True):
             if isinstance(result, Exception):
                 self.logger.debug(
                     f"Failed to fetch latest version for {repo_key}: {result}"
@@ -2052,6 +2052,7 @@ class AutoFixer:
         repo_data: dict[str, Any],
         all_tags: list[tuple[str, str]],
         tag_dates: dict[str, datetime | None],
+        now: datetime | None = None,
     ) -> tuple[str, str] | None:
         """Choose a cooldown-eligible ``(tag, sha)`` from GraphQL repo data.
 
@@ -2067,6 +2068,8 @@ class AutoFixer:
             tag_dates: Mapping of tag name to its publication ``datetime``
                 (``None`` when no verifiable publication time exists, e.g.
                 lightweight tags).
+            now: Reference time for the cooldown window (defaults to the
+                current UTC time); primarily an injection point for tests.
 
         Returns:
             The newest eligible ``(tag, sha)`` tuple, or ``None`` when no
@@ -2094,7 +2097,7 @@ class AutoFixer:
         )
 
         selected = _select_version_with_cooldown(
-            candidates, self.config.cooldown_days
+            candidates, self.config.cooldown_days, now=now
         )
         if not selected:
             return None
@@ -2400,7 +2403,7 @@ class AutoFixer:
         ]
         fetch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for (repo_key, ref), result in zip(refs, fetch_results):
+        for (repo_key, ref), result in zip(refs, fetch_results, strict=True):
             if isinstance(result, Exception):
                 self.logger.debug(
                     f"Failed to fetch SHA for {repo_key}@{ref}: {result}"

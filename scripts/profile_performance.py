@@ -19,7 +19,6 @@ import pstats
 from pstats import SortKey
 import sys
 import time
-from typing import Optional
 
 # Add parent directory to path to import the linter
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -28,7 +27,7 @@ from gha_workflow_linter.cli import app as cli_app
 
 
 def profile_with_cprofile(
-    args: list[str], output_file: Optional[str] = None
+    args: list[str], output_file: str | None = None
 ) -> pstats.Stats:
     """Profile the linter using cProfile."""
     profiler = cProfile.Profile()

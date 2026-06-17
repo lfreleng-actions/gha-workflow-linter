@@ -8,8 +8,6 @@ This module defines exception classes that provide more granular error handling,
 particularly for network connectivity and API access issues.
 """
 
-from typing import Optional
-
 
 class ValidationError(Exception):
     """Base class for validation errors."""
@@ -20,9 +18,7 @@ class ValidationError(Exception):
 class NetworkError(ValidationError):
     """Raised when network connectivity issues prevent validation."""
 
-    def __init__(
-        self, message: str, original_error: Optional[Exception] = None
-    ):
+    def __init__(self, message: str, original_error: Exception | None = None):
         self.message = message
         self.original_error = original_error
         super().__init__(message)
@@ -34,8 +30,8 @@ class GitHubAPIError(ValidationError):
     def __init__(
         self,
         message: str,
-        status_code: Optional[int] = None,
-        original_error: Optional[Exception] = None,
+        status_code: int | None = None,
+        original_error: Exception | None = None,
     ):
         self.message = message
         self.status_code = status_code
@@ -63,8 +59,8 @@ class TemporaryAPIError(GitHubAPIError):
     def __init__(
         self,
         message: str,
-        status_code: Optional[int] = None,
-        original_error: Optional[Exception] = None,
+        status_code: int | None = None,
+        original_error: Exception | None = None,
     ):
         self.message = message
         self.status_code = status_code
@@ -79,7 +75,7 @@ class ValidationAbortedError(ValidationError):
         self,
         message: str,
         reason: str,
-        original_error: Optional[Exception] = None,
+        original_error: Exception | None = None,
     ):
         self.message = message
         self.reason = reason
@@ -90,9 +86,7 @@ class ValidationAbortedError(ValidationError):
 class GitError(ValidationError):
     """Raised when Git operations fail."""
 
-    def __init__(
-        self, message: str, original_error: Optional[Exception] = None
-    ):
+    def __init__(self, message: str, original_error: Exception | None = None):
         self.message = message
         self.original_error = original_error
         super().__init__(message)
@@ -101,7 +95,7 @@ class GitError(ValidationError):
 class RepositoryNotFoundError(ValidationError):
     """Raised when a repository cannot be found or accessed."""
 
-    def __init__(self, repository: str, message: Optional[str] = None):
+    def __init__(self, repository: str, message: str | None = None):
         self.repository = repository
         if message is None:
             message = f"Repository not found: {repository}"
@@ -112,7 +106,7 @@ class ReferenceNotFoundError(ValidationError):
     """Raised when a Git reference cannot be found."""
 
     def __init__(
-        self, repository: str, reference: str, message: Optional[str] = None
+        self, repository: str, reference: str, message: str | None = None
     ):
         self.repository = repository
         self.reference = reference
