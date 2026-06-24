@@ -1,0 +1,28 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# zizmor configuration for gha-workflow-linter.
+#
+# The workflows under test_autofix/.github/workflows/ are deliberately
+# malformed fixtures consumed by the auto-fix test suite (see tests/).
+# They intentionally pin outdated, vulnerable, and invalid action
+# references so the linter's own detection and auto-fix behaviour can be
+# exercised, so the findings they trigger are ignored here rather than
+# "fixed" (which would defeat the fixtures). The base filenames below are
+# unique to these fixtures and do not collide with the real workflows
+# (build-test.yaml, build-test-release.yaml, testing.yaml).
+rules:
+  artipacked:
+    ignore:
+      - test.yaml
+  excessive-permissions:
+    ignore:
+      - test.yaml
+      - test-skip-testing.yaml
+  impostor-commit:
+    ignore:
+      - test-skip-testing.yaml
+  known-vulnerable-actions:
+    ignore:
+      - test.yaml
