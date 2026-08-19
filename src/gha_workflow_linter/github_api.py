@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 import time
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -1232,13 +1231,29 @@ class GitHubGraphQLClient:
             and self._rate_limit_info.reset_at > current_time
         )
 
-    def check_rate_limit_and_exit_if_needed(self) -> None:
+    def check_rate_limit(self) -> bool:
         """
-        Synchronously check rate limits and exit if rate limited.
+        Synchronously check rate limits and report the result.
 
-        This method performs a synchronous HTTP request to check rate limits
-        and exits the program if rate limited. Should be called early in the
-        application flow before showing progress bars.
+        This performs a synchronous HTTP request to check rate limits.
+        It is called early, before any progress bar opens, so a caller
+        can decide what to do while it still owes the user nothing.
+
+        Deciding here is not the same as acting here. An earlier version
+        called ``sys.exit(0)`` on discovering a rate limit, which ended
+        the process from inside the API client: before the command
+        dispatched, before any output contract was met, and before the
+        validation that sits after pre-flight could run. A ``--format
+        json`` run emitted no document at all yet exited successfully,
+        which a consumer cannot tell from a crash. Reporting the state
+        and leaving the decision to the caller keeps both the document
+        and the exit code in the hands of the code that promised them.
+
+        Returns:
+            ``True`` when the API reports the client is rate-limited.
+            ``False`` when it is not, and also when the check itself
+            could not run -- a failed check is not evidence of a rate
+            limit, and the async flow reports its own errors later.
         """
         # We can check rate limits even without a token for unauthenticated requests
 
@@ -1276,14 +1291,15 @@ class GitHubGraphQLClient:
                         used=graphql_limits.get("used", 0),
                     )
 
-                    # Check if we're rate limited and exit if so
                     if self._is_rate_limited():
                         self.logger.warning(
                             "GitHub API Rate-limited; Skipping Checks ⚠️"
                         )
-                        sys.exit(0)
+                        return True
 
         except Exception as e:
-            # If we can't check rate limits, log it but don't exit
-            # The async flow will handle errors later
+            # If we can't check rate limits, log it but carry on.
+            # The async flow will handle errors later.
             self.logger.debug(f"Could not check rate limits synchronously: {e}")
+
+        return False
