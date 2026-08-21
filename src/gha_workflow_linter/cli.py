@@ -474,12 +474,18 @@ def _configure_validation_backend(
     options: CLIOptions,
     github_token: str | None,
     workers: int | None,
-) -> None:
+) -> bool:
     """Resolve the GitHub token, select a validation method, and pre-flight it.
 
     Applies the resolved method/token back onto ``config`` and prints the
     chosen backend (unless quiet/JSON). When the GitHub API backend is
     selected, this also performs the rate-limit pre-flight check.
+
+    Returns:
+        ``True`` when the API reported the client is rate-limited. The
+        caller decides what that means: pre-flight reports the state and
+        terminates nothing, so the command still reaches its output
+        contract and the validation that follows this stage still runs.
     """
     logger = logging.getLogger(__name__)
 
@@ -529,16 +535,14 @@ def _configure_validation_backend(
         from .github_api import GitHubGraphQLClient
 
         github_client = GitHubGraphQLClient(config.github_api)
-        try:
-            github_client.check_rate_limit_and_exit_if_needed()
-            # If we get here, we're not rate limited
-            if not effective_token and not options.quiet:
-                logger.warning(
-                    "No GitHub token available; API requests may be rate-limited ⚠️"
-                )
-        except SystemExit:
-            # Rate limit check triggered exit, re-raise to exit cleanly
-            raise
+        if github_client.check_rate_limit():
+            return True
+        if not effective_token and not options.quiet:
+            logger.warning(
+                "No GitHub token available; API requests may be rate-limited ⚠️"
+            )
+
+    return False
 
 
 def _resolve_update_actions(
@@ -980,14 +984,14 @@ def lint(
         logger.debug(f"Starting gha-workflow-linter {__version__}")
 
         # Resolve token, select validation method, and pre-flight it
-        _configure_validation_backend(
+        rate_limited = _configure_validation_backend(
             config, cli_options, github_token, workers
         )
 
         # Only show scanning path if we're actually going to proceed
         logger.debug(f"Scanning path: {path}")
 
-        exit_code = run_linter(config, cli_options)
+        exit_code = run_linter(config, cli_options, rate_limited=rate_limited)
 
     except typer.Exit:
         # Re-raise typer.Exit to avoid catching it as a general exception
@@ -1292,6 +1296,8 @@ def _scan_and_validate(
     options: CLIOptions,
     scanner: WorkflowScanner,
     shared_cache: ValidationCache,
+    *,
+    rate_limited: bool = False,
 ) -> _ScanShortCircuit | _ValidationOutcome:
     """Scan workflows and validate their action calls.
 
@@ -1330,6 +1336,19 @@ def _scan_and_validate(
 
         # Count total calls for progress tracking
         total_calls = sum(len(calls) for calls in workflow_calls.values())
+
+        if rate_limited:
+            # Nothing can be validated, but the scan already succeeded,
+            # so the run returns an outcome rather than short-circuiting:
+            # the caller still emits its document, still reports what it
+            # scanned, and still reaches the exit-code decision. Zero
+            # errors here means "none observed", which is why the exit
+            # code -- not this outcome -- carries the fact that nothing
+            # was checked.
+            validator = ActionCallValidator(config, cache=shared_cache)
+            return _ValidationOutcome(
+                workflow_calls, [], validator, total_calls
+            )
 
         validate_task = progress.add_task(
             "Validating action calls...", total=total_calls
@@ -1815,6 +1834,8 @@ def _determine_exit_code(
     autofix: _AutoFixOutcome,
     config: Config,
     allow_list: AllowListOutcome | None = None,
+    *,
+    rate_limited: bool = False,
 ) -> int:
     """Compute the process exit code from fixes and validation errors.
 
@@ -1829,10 +1850,17 @@ def _determine_exit_code(
         autofix: Outcome of the auto-fix stage.
         config: Resolved configuration.
         allow_list: Outcome of the allow-list stage, when it ran.
+        rate_limited: Whether the API was rate-limited, so the checks a
+            ``--verify-*`` flag asked about never ran. An advisory run
+            asked no question and still succeeds; a verifying run did
+            ask, and "could not look" is not an answer to it.
 
     Returns:
         A code from :mod:`gha_workflow_linter.exit_codes`.
     """
+    if rate_limited and (options.verify_actions or options.verify_allow_list):
+        return exit_codes.RATE_LIMITED
+
     codes: list[int] = []
 
     # A rewrite the caller asked for that could not be written is a
@@ -1955,19 +1983,26 @@ class RunOutcome:
     json_payload: dict[str, Any] | None = None
 
 
-def run_linter(config: Config, options: CLIOptions) -> int:
+def run_linter(
+    config: Config, options: CLIOptions, *, rate_limited: bool = False
+) -> int:
     """
     Run the main linting process.
 
     Args:
         config: Configuration object
         options: CLI options
+        rate_limited: Whether pre-flight found the GitHub API
+            rate-limited. The run still scans, still reports, and still
+            emits its document; it skips only the checks it cannot
+            perform, and says so in the exit code when the caller asked
+            for them.
 
     Returns:
         Exit code from :mod:`gha_workflow_linter.exit_codes`.
     """
     if options.multi_repo:
-        return _run_multi_repo(config, options)
+        return _run_multi_repo(config, options, rate_limited=rate_limited)
 
     shared_cache = ValidationCache(config.cache)
     # Eagerly load the cache and run all startup-time checks so any
@@ -1975,7 +2010,9 @@ def run_linter(config: Config, options: CLIOptions) -> int:
     # inside the progress block would interleave with the active
     # spinner and corrupt output).
     _render_cache_prime_banners(shared_cache.prime(), quiet=options.quiet)
-    return _run_one_repository(config, options, shared_cache).exit_code
+    return _run_one_repository(
+        config, options, shared_cache, rate_limited=rate_limited
+    ).exit_code
 
 
 def _run_one_repository(
@@ -1984,6 +2021,7 @@ def _run_one_repository(
     shared_cache: ValidationCache,
     *,
     collect_json: bool = False,
+    rate_limited: bool = False,
 ) -> RunOutcome:
     """Scan, validate, fix and report a single repository.
 
@@ -1995,13 +2033,19 @@ def _run_one_repository(
         collect_json: Return the JSON payload on the outcome instead of
             printing it, so a sweep can assemble one document rather
             than emitting several.
+        rate_limited: Whether pre-flight found the API rate-limited. The
+            scan still runs -- so an unreadable path is still reported
+            rather than passing silently -- and the results still emit;
+            only the validation that needs the API is skipped.
 
     Returns:
         What the run produced, for aggregation by the caller.
     """
     scanner = WorkflowScanner(config)
 
-    scan_result = _scan_and_validate(config, options, scanner, shared_cache)
+    scan_result = _scan_and_validate(
+        config, options, scanner, shared_cache, rate_limited=rate_limited
+    )
     if isinstance(scan_result, _ScanShortCircuit):
         return RunOutcome(
             exit_code=scan_result.exit_code, error=scan_result.error
@@ -2040,7 +2084,12 @@ def _run_one_repository(
 
     return RunOutcome(
         exit_code=_determine_exit_code(
-            options, validation, autofix, config, allow_list
+            options,
+            validation,
+            autofix,
+            config,
+            allow_list,
+            rate_limited=rate_limited,
         ),
         allow_list=allow_list,
         files_changed=sum(
@@ -2128,7 +2177,9 @@ def _repository_label(repository: Path, root: Path) -> str:
     return resolved.name or str(resolved)
 
 
-def _run_multi_repo(config: Config, options: CLIOptions) -> int:
+def _run_multi_repo(
+    config: Config, options: CLIOptions, *, rate_limited: bool = False
+) -> int:
     """Visit every repository beneath the given path in turn.
 
     Repositories are processed sequentially. The intra-repository
@@ -2212,6 +2263,7 @@ def _run_multi_repo(config: Config, options: CLIOptions) -> int:
                     shared_cache,
                     repository,
                     silent=silent,
+                    rate_limited=rate_limited,
                     # Pointing --multi-repo at a checkout visits that one
                     # repository, which is the case
                     # GITHUB_REPOSITORY_OWNER describes correctly, so the
@@ -2289,6 +2341,7 @@ def _run_repository_in_sweep(
     silent: bool = False,
     use_environment_org: bool = False,
     label: str | None = None,
+    rate_limited: bool = False,
 ) -> RunOutcome:
     """Run one repository of a sweep, surviving its failure.
 
@@ -2357,6 +2410,7 @@ def _run_repository_in_sweep(
             repo_options,
             shared_cache,
             collect_json=options.output_format == "json",
+            rate_limited=rate_limited,
         )
     except ConfigurationError:
         # A bad setting is a usage error and applies to every repository,
