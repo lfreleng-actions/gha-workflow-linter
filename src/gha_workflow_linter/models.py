@@ -18,6 +18,7 @@ from pydantic import (
     field_validator,
 )
 
+from .check_modes import CheckMode
 from .system_utils import get_default_workers
 
 
@@ -531,6 +532,14 @@ class AllowListConfig(BaseModel):
         default=True,
         description="Detect harden-runner allow-list pins",
     )
+    mode: CheckMode = Field(
+        default=CheckMode.REPORT,
+        description=(
+            "What this check does about what it finds. Kept in step with "
+            "'enabled' and 'update', which it will replace once every "
+            "reader has moved onto it"
+        ),
+    )
     verify: bool = Field(
         default=False,
         description=(
@@ -633,6 +642,16 @@ class Config(BaseModel):
     )
     auto_fix: bool = Field(
         default=True, description="Automatically fix broken/invalid references"
+    )
+    action_calls_mode: CheckMode = Field(
+        default=CheckMode.FIX,
+        description=(
+            "What the action-call check does about what it finds. Kept in "
+            "step with 'auto_fix' and 'update_actions', which it will "
+            "replace once every reader has moved onto it. Note that no "
+            "mode decides whether findings *fail* the run: that is the "
+            "separate --verify-action-calls axis"
+        ),
     )
     update_actions: bool = Field(
         default=False,
@@ -740,6 +759,18 @@ class CLIOptions(BaseModel):
     )
     auto_fix: bool | None = Field(
         default=None, description="Automatically fix broken/invalid references"
+    )
+    action_calls_mode: CheckMode | None = Field(
+        default=None,
+        description=(
+            "Mode given to --action-calls. Authoritative when present: "
+            "the deprecated boolean flags are derived from it rather than "
+            "combined with it"
+        ),
+    )
+    allow_list_mode: CheckMode | None = Field(
+        default=None,
+        description="Mode given to --allow-list, authoritative when present",
     )
     update_actions: bool | None = Field(
         default=None,
