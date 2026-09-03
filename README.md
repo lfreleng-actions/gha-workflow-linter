@@ -182,6 +182,95 @@ gha-workflow-linter lint --auto-fix --no-update-actions
 gha-workflow-linter lint
 ```
 
+### Check Modes
+
+The linter runs independent checks. Each takes one option saying what it
+should do:
+
+<!-- markdownlint-disable MD013 -->
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Option           | Modes                      | Default  | Check                                  |
+| ---------------- | -------------------------- | -------- | -------------------------------------- |
+| `--action-calls` | `off｜report｜fix｜update` | `fix`    | Action and workflow `uses:` references |
+| `--allow-list`   | `off｜report｜update`      | `report` | `harden-runner` allow-list pins        |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+<!-- markdownlint-enable MD013 -->
+
+The modes form a ladder of escalating intervention:
+
+- **`off`** — the check does not run. It scans nothing, reports nothing,
+  writes nothing, and takes no part in the exit code.
+- **`report`** — the check runs and reports. It never writes.
+- **`fix`** — as `report`, and repairs what is wrong *without changing
+  which version a reference names*. Pinning `@v4` to the commit SHA of
+  v4 counts as a repair, as does peeling an annotated tag to its commit.
+  A reference that no longer resolves forms the exception, because it
+  cannot stay.
+- **`update`** — as `fix`, and also advances references to newer
+  releases.
+
+```bash
+# Report; never touch the working tree
+gha-workflow-linter lint --action-calls report
+
+# Run nothing but the allow-list check
+gha-workflow-linter lint --action-calls off
+
+# Repair and advance to the latest releases
+gha-workflow-linter lint --action-calls update
+```
+
+The linter refuses a mode a check does not offer, rather than
+downgrading it:
+
+```console
+$ gha-workflow-linter lint --allow-list fix
+Configuration error: --allow-list does not support mode 'fix': repairing
+an allow-list pin without advancing its version is not implemented yet
+[...]; use 'update'. Supported modes: off, report, update
+```
+
+#### Modes do not decide what fails the run
+
+The `--verify-*` flags carry a separate axis: whether a finding fails
+the run.
+
+```bash
+# Repair what the linter can, and fail if anything remains outdated
+gha-workflow-linter lint --action-calls fix --verify-action-calls
+```
+
+The two axes stay orthogonal on purpose. `--action-calls fix` answers
+*change my files*; `--verify-action-calls` answers *fail my build*.
+Neither implies the other, and you want both together. Defect
+findings — a reference that is wrong now — always count towards the
+exit code, whichever mode you choose.
+
+#### Superseded flags
+
+The older flags keep working and name their replacement once:
+
+<!-- markdownlint-disable MD013 -->
+
+| Deprecated             | Use instead              |
+| ---------------------- | ------------------------ |
+| `--auto-fix`           | `--action-calls fix`     |
+| `--no-auto-fix`        | `--action-calls report`  |
+| `--update-actions`     | `--action-calls update`  |
+| `--auto-latest`        | `--action-calls update`  |
+| `--no-allow-list`      | `--allow-list off`       |
+| `--update-allow-list`  | `--allow-list update`    |
+| `--verify-actions`     | `--verify-action-calls`  |
+
+<!-- markdownlint-enable MD013 -->
+
+When a mode option appears beside one of these, the mode wins, and the
+run reports the flag it ignored.
+
 ### Auto-Fix Feature
 
 The linter can automatically fix invalid action references and pin them to

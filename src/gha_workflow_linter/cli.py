@@ -21,8 +21,9 @@ from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
+import sys
 import textwrap
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.logging import RichHandler
 from rich.progress import (
@@ -48,6 +49,7 @@ from .allow_list_report import (
     render_text as render_allow_list,
 )
 from .cache import CachePrimeReport, ValidationCache
+from .check_modes import ACTION_CALLS, ALLOW_LIST, CheckId, CheckMode
 from .config import ConfigManager
 from .console import console, err_console
 from .dependabot import resolve_cooldown
@@ -76,6 +78,9 @@ from .multi_repo import find_repositories, is_repository
 from .scanner import WorkflowScanner
 from .system_utils import get_default_workers
 from .utils import has_test_comment
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _get_relative_path(file_path: Path, base_path: Path) -> Path:
@@ -419,6 +424,8 @@ def _apply_cli_overrides(
     """Apply CLI option overrides onto the loaded configuration."""
     logger = logging.getLogger(__name__)
 
+    _warn_deprecated_check_flags(options)
+
     if workers is not None:
         config.parallel_workers = workers
     else:
@@ -469,6 +476,98 @@ def _apply_cli_overrides(
         config.allow_list.show_suppressed = True
     if options.allow_list_org is not None:
         config.allow_list.org = options.allow_list_org
+
+    # Resolve the action-update cooldown window. Precedence: explicit
+    # --cooldown flag, then the repository's Dependabot configuration,
+    # then 0 (no cooldown / original behaviour).
+    #
+    # A sweep skips this. The cooldown belongs to each checkout, and
+    # ``_run_repository_in_sweep`` resolves it there from that
+    # repository's own configuration, so reading the container's would
+    # announce a value that is then discarded -- and an unreadable one
+    # would abort the whole command before the per-repository failure
+    # boundary exists.
+    config.cooldown_days = (
+        0
+        if options.multi_repo
+        else _resolve_cooldown_days(
+            options.cooldown,
+            options.path,
+            options.quiet,
+            options.output_format,
+        )
+    )
+
+    _apply_check_modes(config, options)
+
+
+def _apply_check_modes(config: Config, options: CLIOptions) -> None:
+    """Settle each check's mode, and keep the legacy fields in step.
+
+    A mode given on the command line is authoritative: it names the
+    whole behaviour, so the booleans are *derived* from it rather than
+    combined with it. That is what stops ``--action-calls report
+    --update-actions`` meaning something nobody can predict.
+
+    With no mode given, the legacy overrides applied above have already
+    settled those booleans against the configuration file, and the mode
+    is read back off them. Deriving in that direction preserves every
+    existing precedence rule exactly, rather than reimplementing it.
+
+    Args:
+        config: Configuration to update in place.
+        options: Resolved CLI options.
+    """
+    if options.action_calls_mode is not None:
+        mode = ACTION_CALLS.validate(options.action_calls_mode)
+        config.action_calls_mode = mode
+        config.auto_fix = mode.remediates
+        config.update_actions = mode.advances_version
+    else:
+        config.action_calls_mode = _mode_from_action_call_flags(config)
+
+    if options.allow_list_mode is not None:
+        allow_mode = ALLOW_LIST.validate(options.allow_list_mode)
+        config.allow_list.mode = allow_mode
+        config.allow_list.enabled = allow_mode.runs
+        config.allow_list.update = allow_mode.advances_version
+    else:
+        config.allow_list.mode = _mode_from_allow_list_flags(config)
+
+
+def _mode_from_action_call_flags(config: Config) -> CheckMode:
+    """Describe the settled action-call booleans as a mode.
+
+    ``update_actions`` only ever took effect through the fixer, so
+    requesting it with the fixer disabled has always meant "report", and
+    is reported as such rather than as an update that will not happen.
+
+    Args:
+        config: Configuration whose booleans have been settled.
+
+    Returns:
+        The mode those booleans describe. Never ``off``: no legacy flag
+        could disable the check, which is why ``--action-calls`` exists.
+    """
+    if not config.auto_fix:
+        return CheckMode.REPORT
+    return CheckMode.UPDATE if config.update_actions else CheckMode.FIX
+
+
+def _mode_from_allow_list_flags(config: Config) -> CheckMode:
+    """Describe the settled allow-list booleans as a mode.
+
+    Args:
+        config: Configuration whose booleans have been settled.
+
+    Returns:
+        The mode those booleans describe. ``update`` rather than ``fix``
+        because remediation currently rewrites every finding to the
+        latest release; see :data:`~gha_workflow_linter.check_modes.ALLOW_LIST`.
+    """
+    if not config.allow_list.enabled:
+        return CheckMode.OFF
+    return CheckMode.UPDATE if config.allow_list.update else CheckMode.REPORT
 
 
 def _configure_validation_backend(
@@ -583,6 +682,84 @@ def _resolve_update_actions(
         # name to an existing invocation gets what it asked for.
         return update_actions
     return auto_latest
+
+
+def _warn_deprecated_check_flags(options: CLIOptions) -> None:
+    """Name each superseded flag once, with what to write instead.
+
+    A mode option given alongside its predecessors wins outright, so the
+    notice says which flag was ignored: discarding one the caller passed
+    without a word is how an invocation ends up meaning something nobody
+    intended.
+
+    Args:
+        options: Resolved CLI options, carrying both the mode options
+            and the superseded flags they replace.
+    """
+    if options.quiet:
+        return
+
+    action_calls = options.action_calls_mode
+    allow_list = options.allow_list_mode
+
+    # (given, deprecated spelling, replacement, mode option that supersedes it)
+    superseded: list[tuple[bool, str, str, CheckMode | None]] = [
+        (
+            options.auto_fix is True,
+            "--auto-fix",
+            "--action-calls fix",
+            action_calls,
+        ),
+        (
+            options.auto_fix is False,
+            "--no-auto-fix",
+            "--action-calls report",
+            action_calls,
+        ),
+        (
+            options.update_actions is True,
+            "--update-actions",
+            "--action-calls update",
+            action_calls,
+        ),
+        (
+            options.allow_list is False,
+            "--no-allow-list",
+            "--allow-list off",
+            allow_list,
+        ),
+        (
+            options.update_allow_list,
+            "--update-allow-list",
+            "--allow-list update",
+            allow_list,
+        ),
+        (
+            # Click records only the resolved value, not which spelling
+            # produced it, so the raw arguments are the one place the
+            # deprecated one stays visible.
+            "--verify-actions" in sys.argv,
+            "--verify-actions",
+            "--verify-action-calls",
+            None,
+        ),
+    ]
+
+    for given, old, replacement, mode in superseded:
+        if not given:
+            continue
+        # stderr, never stdout: --format json must stay machine-readable.
+        if mode is None:
+            err_console.print(
+                f"[yellow]{old} is deprecated; use {replacement} \u26a0\ufe0f"
+                f"[/yellow]"
+            )
+        else:
+            err_console.print(
+                f"[yellow]{old} is deprecated and ignored here: "
+                f"{replacement.split()[0]} was given and settles the whole "
+                f"behaviour \u26a0\ufe0f[/yellow]"
+            )
 
 
 def _reject_conflicting_verbosity(
@@ -723,26 +900,31 @@ def lint(
         "--validation-method",
         help="Validation method: github-api or git (auto-detected if not specified)",
     ),
+    action_calls: CheckMode | None = typer.Option(
+        None,
+        "--action-calls",
+        metavar="MODE",
+        help=(
+            "What the action-call check does: off, report, fix or update "
+            "(default: fix). 'fix' repairs references without changing "
+            "which version they name; 'update' also advances them. "
+            "Failing the run is separate: see --verify-action-calls"
+        ),
+    ),
     auto_fix: bool | None = typer.Option(
         None,
         "--auto-fix/--no-auto-fix",
-        help="Automatically fix broken/invalid SHA pins, versions, and branches (default: enabled unless overridden in config)",
+        help=("(deprecated) Use --action-calls fix or --action-calls report"),
     ),
     update_actions: bool | None = typer.Option(
         None,
         "--update-actions/--no-update-actions",
-        help=(
-            "When auto-fixing, update action calls to the latest release "
-            "(default: disabled unless overridden in config)"
-        ),
+        help="(deprecated) Use --action-calls update",
     ),
     auto_latest: bool | None = typer.Option(
         None,
         "--auto-latest/--no-auto-latest",
-        help=(
-            "(deprecated) Former name for --update-actions. Still "
-            "honoured; will be removed in a future major release"
-        ),
+        help="(deprecated) Use --action-calls update",
     ),
     allow_prerelease: bool | None = typer.Option(
         None,
@@ -782,20 +964,28 @@ def lint(
     ),
     verify_actions: bool = typer.Option(
         False,
+        "--verify-action-calls",
         "--verify-actions",
         help=(
             "Treat outdated action calls as errors and exit with status 5. "
-            "Without this flag outdated actions are reported but do not "
-            "fail the run"
+            "Independent of --action-calls: that says what the check does, "
+            "this says how its findings score. '--verify-actions' is the "
+            "deprecated spelling"
         ),
     ),
-    allow_list: bool | None = typer.Option(
+    allow_list: CheckMode | None = typer.Option(
         None,
-        "--allow-list/--no-allow-list",
+        "--allow-list",
+        metavar="MODE",
         help=(
-            "Detect stale harden-runner allow-list pins (default: enabled). "
-            "Findings are advisory unless --verify-allow-list is given"
+            "What the allow-list check does: off, report or update "
+            "(default: report). Advisory unless --verify-allow-list"
         ),
+    ),
+    no_allow_list: bool = typer.Option(
+        False,
+        "--no-allow-list",
+        help="(deprecated) Use --allow-list off",
     ),
     verify_allow_list: bool = typer.Option(
         False,
@@ -808,10 +998,7 @@ def lint(
     update_allow_list: bool = typer.Option(
         False,
         "--update-allow-list",
-        help=(
-            "Rewrite stale allow-list pins in place. Pins carrying an "
-            "'allow-list-pin-ok' directive are never rewritten"
-        ),
+        help="(deprecated) Use --allow-list update",
     ),
     show_suppressed: bool = typer.Option(
         False,
@@ -875,67 +1062,42 @@ def lint(
         --no-cache: Bypass cache and always validate against remote repositories
         --cache-ttl: Override default cache TTL (7 days) in seconds
 
-    GitHub API Authentication (for github-api method):
-
-        # Using environment variable (recommended)
-        export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-        gha-workflow-linter lint
-
-        # Using CLI flag
-        gha-workflow-linter lint --github-token ghp_xxxxxxxxxxxxxxxxxxxx
-
-        # Using GitHub CLI (automatic fallback)
-        gh auth login
-        gha-workflow-linter lint
-
-    Git Authentication (for git method):
-
-        # Uses your existing Git configuration, SSH keys, or ssh-agent
-        # No additional setup required if you can already clone GitHub repos
+    Authentication:
+        github-api reads a token from --github-token, then GITHUB_TOKEN,
+        then 'gh auth token'. git needs no token and uses your existing
+        Git configuration, SSH keys or ssh-agent.
 
     Examples:
 
         # Scan current directory (auto-detects validation method)
         gha-workflow-linter lint
 
-        # Force Git validation method
+        # Report without touching the working tree
+        gha-workflow-linter lint --action-calls report
+
+        # Repair references, and advance them to newer releases
+        gha-workflow-linter lint --action-calls update
+
+        # Fail the run when an action call has fallen behind
+        gha-workflow-linter lint --verify-action-calls
+
+        # Rewrite stale allow-list pins in place
+        gha-workflow-linter lint --allow-list update
+
+        # Force a validation backend
         gha-workflow-linter lint --validation-method git
-
-        # Force GitHub API method
-        gha-workflow-linter lint --validation-method github-api
-
-        # Scan specific path with custom workers
-        gha-workflow-linter lint /path/to/project --workers 8
 
         # Use custom config and output JSON
         gha-workflow-linter lint --config config.yaml --format json
 
-        # Verbose output with 8 workers and token
-        gha-workflow-linter lint --verbose --workers 8 --github-token ghp_xxx
-
         # Disable SHA pinning requirement
         gha-workflow-linter lint --no-require-pinned-sha
 
-        # Auto-fix issues without using latest versions
-        gha-workflow-linter lint --auto-fix --no-update-actions
-
-        # Auto-fix with two-space comment formatting
-        gha-workflow-linter lint --auto-fix --two-space-comments
-
-        # Enable auto-fixing for actions with 'test' in comments (default is to skip them)
-        gha-workflow-linter lint --auto-fix --fix-test-calls
-
         # Only update to releases at least 7 days old (supply-chain cooldown)
-        gha-workflow-linter lint --auto-fix --update-actions --cooldown 7
+        gha-workflow-linter lint --action-calls update --cooldown 7
 
-        # Scan only specific files
-        gha-workflow-linter lint --files .github/workflows/ci.yml
-
-        # Scan multiple files with wildcards
-        gha-workflow-linter lint --files ".github/workflows/*.yml" --files "action.yml"
-
-        # Auto-fix only specific files
-        gha-workflow-linter lint --auto-fix --files .github/workflows/release.yml
+        # Scan specific files, with wildcards
+        gha-workflow-linter lint --files ".github/workflows/*.yml"
     """
     _reject_conflicting_verbosity(
         verbose=verbose,
@@ -998,7 +1160,9 @@ def lint(
             cooldown=cooldown,
             files=files,
             verify_actions=verify_actions,
-            allow_list=allow_list,
+            action_calls_mode=action_calls,
+            allow_list_mode=allow_list,
+            allow_list=False if no_allow_list else None,
             verify_allow_list=verify_allow_list,
             update_allow_list=update_allow_list,
             show_suppressed=show_suppressed,
@@ -1009,22 +1173,6 @@ def lint(
 
         # Apply CLI overrides to config
         _apply_cli_overrides(config, cli_options, workers)
-
-        # Resolve the action-update cooldown window. Precedence: explicit
-        # --cooldown flag, then the repository's Dependabot configuration,
-        # then 0 (no cooldown / original behaviour).
-        #
-        # A sweep skips this. The cooldown belongs to each checkout, and
-        # ``_run_repository_in_sweep`` resolves it there from that
-        # repository's own configuration, so reading the container's
-        # would announce a value that is then discarded -- and an
-        # unreadable one would abort the whole command before the
-        # per-repository failure boundary exists.
-        config.cooldown_days = (
-            0
-            if multi_repo
-            else _resolve_cooldown_days(cooldown, path, quiet, output_format)
-        )
 
         logger.debug(f"Starting gha-workflow-linter {__version__}")
 
@@ -1432,7 +1580,7 @@ def _scan_and_validate(
             logger.error(f"Error scanning workflows: {reason}")
             return _ScanShortCircuit(1, f"Error scanning workflows: {reason}")
 
-        if rate_limited:
+        if rate_limited or not config.action_calls_mode.runs:
             # Nothing can be validated, but the scan already succeeded,
             # so the run returns an outcome rather than short-circuiting:
             # the caller still emits its document, still reports what it
@@ -1440,6 +1588,13 @@ def _scan_and_validate(
             # errors here means "none observed", which is why the exit
             # code -- not this outcome -- carries the fact that nothing
             # was checked.
+            #
+            # Two conditions share this path for different reasons. Under
+            # a rate limit the check *could not* run; under
+            # '--action-calls off' the caller said not to. The scan still
+            # happens either way, so an unreadable path is still reported
+            # and the document keeps its shape, and the allow-list check
+            # beside it is unaffected.
             #
             # This is decided before the empty-scan check below, because
             # that check reports a clean result -- a repository with
@@ -1660,6 +1815,23 @@ def _display_applied_fixes(
     console.print()  # Add blank line after changes
 
 
+def _check_modes(config: Config) -> dict[str, str]:
+    """Describe every check's settled mode, for the JSON document.
+
+    Args:
+        config: Resolved configuration.
+
+    Returns:
+        Mode values by check name, keyed as the command-line options
+        name them so a reader can map a document back onto an
+        invocation.
+    """
+    return {
+        CheckId.ACTION_CALLS.value: config.action_calls_mode.value,
+        CheckId.ALLOW_LIST.value: config.allow_list.mode.value,
+    }
+
+
 def _emit_results(
     options: CLIOptions,
     scanner: WorkflowScanner,
@@ -1716,6 +1888,7 @@ def _emit_results(
                 options.path,
                 allow_list,
                 rate_limited=rate_limited,
+                check_modes=_check_modes(config),
             )
         output_json_results(
             scan_summary,
@@ -1724,6 +1897,7 @@ def _emit_results(
             options.path,
             allow_list,
             rate_limited=rate_limited,
+            check_modes=_check_modes(config),
         )
         return None
 
@@ -1737,6 +1911,7 @@ def _emit_results(
         autofix.redirect_stats,
         autofix.stale_actions_summary,
         rate_limited=rate_limited,
+        action_calls_ran=config.action_calls_mode.runs,
     )
     if allow_list is not None and not options.quiet:
         # Only suggest remediation when it has not already run.
@@ -2234,6 +2409,7 @@ def _short_circuit_document(
             None,
             rate_limited=rate_limited,
             error=outcome.error,
+            check_modes=_check_modes(config),
         )
 
     validator = ActionCallValidator(config, cache=shared_cache)
@@ -2244,6 +2420,7 @@ def _short_circuit_document(
         Path(),
         None,
         rate_limited=rate_limited,
+        check_modes=_check_modes(config),
     )
 
 
@@ -2318,7 +2495,17 @@ def _run_one_repository(
         )
         allow_list = None
     else:
-        autofix = _run_auto_fix_stage(config, options, shared_cache, validation)
+        # '--action-calls off' silences the fixer too: it is the
+        # remediating half of that check, not a stage of its own, so
+        # running it for a check the caller disabled would rewrite files
+        # on behalf of something switched off.
+        autofix = (
+            _run_auto_fix_stage(config, options, shared_cache, validation)
+            if config.action_calls_mode.runs
+            else _AutoFixOutcome(
+                {}, {"actions_moved": 0, "calls_updated": 0}, {}
+            )
+        )
 
         allow_list = _run_allow_list_stage(config, options, shared_cache)
 
@@ -3242,6 +3429,7 @@ def output_text_results(
     stale_actions_summary: dict[str, list[dict[str, Any]]] | None = None,
     *,
     rate_limited: bool = False,
+    action_calls_ran: bool = True,
 ) -> None:
     """
     Output results in human-readable text format.
@@ -3300,9 +3488,23 @@ def output_text_results(
         _display_validation_summary(
             validation_summary,
             skip_success=(
-                has_actual_fixes or has_stale_actions or rate_limited
+                has_actual_fixes
+                or has_stale_actions
+                or rate_limited
+                or not action_calls_ran
             ),
         )
+
+        if not action_calls_ran:
+            # Same reasoning as the rate-limited notice below, for the
+            # other way a run can reach this point having checked
+            # nothing. There the tool could not look; here the caller
+            # said not to. Either way "All action calls are valid" would
+            # describe an examination that never happened.
+            console.print(
+                "[yellow]Action-call checking is off; no action calls were "
+                "checked \u26a0\ufe0f[/yellow]"
+            )
 
         if rate_limited:
             # "All action calls are valid" would be the text-mode twin of
@@ -3375,6 +3577,7 @@ def build_json_results(
     *,
     rate_limited: bool = False,
     error: str | None = None,
+    check_modes: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Build the JSON results document for one repository.
@@ -3393,6 +3596,10 @@ def build_json_results(
         rate_limited: Whether the API was rate-limited, so the checks
             never ran
         error: Why the run could not complete, when it could not
+        check_modes: Each check's mode, by check name. Recorded so a
+            consumer can tell an empty ``errors`` list produced by a
+            clean repository from one produced by a check that was
+            switched off -- the JSON twin of the text notice.
 
     Returns:
         The results as a JSON-serialisable mapping.
@@ -3404,6 +3611,13 @@ def build_json_results(
         # "checks skipped" from "checks found nothing" -- the very
         # confusion this key exists to prevent.
         "rate_limited": rate_limited,
+        # Same contract, per check: "ran" is derived here rather than
+        # left to the consumer, so nobody has to know that "off" is the
+        # one mode that does nothing.
+        "checks": {
+            name: {"mode": mode, "ran": mode != CheckMode.OFF.value}
+            for name, mode in sorted((check_modes or {}).items())
+        },
         # Likewise always present. A run that failed before it could
         # examine anything reports no findings, which is indistinguishable
         # from finding none unless it says why.
@@ -3443,6 +3657,7 @@ def output_json_results(
     allow_list: AllowListOutcome | None = None,
     *,
     rate_limited: bool = False,
+    check_modes: Mapping[str, str] | None = None,
 ) -> None:
     """
     Output results in JSON format.
@@ -3456,6 +3671,7 @@ def output_json_results(
             key when the check ran
         rate_limited: Whether the API was rate-limited, so the checks
             never ran
+        check_modes: Each check's mode, by check name
     """
     result = build_json_results(
         scan_summary,
@@ -3464,6 +3680,7 @@ def output_json_results(
         scan_path,
         allow_list,
         rate_limited=rate_limited,
+        check_modes=check_modes,
     )
 
     # Use plain print() to avoid Rich formatting/ANSI codes in JSON output
