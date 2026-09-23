@@ -352,15 +352,15 @@ class TestGitHubGraphQLClient:
         query = "query { viewer { login } }"
 
         async with self.client as client:
-            with patch.object(
-                client._http_client,
-                "post",
-                side_effect=httpx.ConnectError("Connection failed"),
+            with (
+                patch.object(
+                    client._http_client,
+                    "post",
+                    side_effect=httpx.ConnectError("Connection failed"),
+                ),
+                pytest.raises(NetworkError, match="Network connection failed"),
             ):
-                with pytest.raises(
-                    NetworkError, match="Network connection failed"
-                ):
-                    await client._execute_graphql_query(query)
+                await client._execute_graphql_query(query)
 
     @pytest.mark.asyncio
     async def test_execute_graphql_query_timeout(self) -> None:
@@ -368,15 +368,15 @@ class TestGitHubGraphQLClient:
         query = "query { viewer { login } }"
 
         async with self.client as client:
-            with patch.object(
-                client._http_client,
-                "post",
-                side_effect=httpx.TimeoutException("Request timed out"),
+            with (
+                patch.object(
+                    client._http_client,
+                    "post",
+                    side_effect=httpx.TimeoutException("Request timed out"),
+                ),
+                pytest.raises(NetworkError, match="Network request failed"),
             ):
-                with pytest.raises(
-                    NetworkError, match="Network request failed"
-                ):
-                    await client._execute_graphql_query(query)
+                await client._execute_graphql_query(query)
 
     @pytest.mark.asyncio
     async def test_execute_graphql_query_auth_error(self) -> None:
@@ -392,14 +392,16 @@ class TestGitHubGraphQLClient:
         }
 
         async with self.client as client:
-            with patch.object(
-                client._http_client, "post", return_value=mock_response
-            ):
-                with pytest.raises(
+            with (
+                patch.object(
+                    client._http_client, "post", return_value=mock_response
+                ),
+                pytest.raises(
                     AuthenticationError,
                     match="GitHub API authentication failed",
-                ):
-                    await client._execute_graphql_query(query)
+                ),
+            ):
+                await client._execute_graphql_query(query)
 
     @pytest.mark.asyncio
     async def test_execute_graphql_query_rate_limit(self) -> None:
@@ -420,13 +422,15 @@ class TestGitHubGraphQLClient:
         }
 
         async with self.client as client:
-            with patch.object(
-                client._http_client, "post", return_value=mock_response
-            ):
-                with pytest.raises(
+            with (
+                patch.object(
+                    client._http_client, "post", return_value=mock_response
+                ),
+                pytest.raises(
                     RateLimitError, match="GitHub API rate limit exceeded"
-                ):
-                    await client._execute_graphql_query(query)
+                ),
+            ):
+                await client._execute_graphql_query(query)
 
     @pytest.mark.asyncio
     async def test_execute_graphql_query_server_error(self) -> None:
@@ -442,13 +446,15 @@ class TestGitHubGraphQLClient:
         }
 
         async with self.client as client:
-            with patch.object(
-                client._http_client, "post", return_value=mock_response
-            ):
-                with pytest.raises(
+            with (
+                patch.object(
+                    client._http_client, "post", return_value=mock_response
+                ),
+                pytest.raises(
                     TemporaryAPIError, match="GitHub API server error"
-                ):
-                    await client._execute_graphql_query(query)
+                ),
+            ):
+                await client._execute_graphql_query(query)
 
     @pytest.mark.asyncio
     async def test_execute_graphql_query_graphql_errors(self) -> None:
@@ -465,11 +471,13 @@ class TestGitHubGraphQLClient:
         }
 
         async with self.client as client:
-            with patch.object(
-                client._http_client, "post", return_value=mock_response
+            with (
+                patch.object(
+                    client._http_client, "post", return_value=mock_response
+                ),
+                pytest.raises(GitHubAPIError, match="GraphQL errors"),
             ):
-                with pytest.raises(GitHubAPIError, match="GraphQL errors"):
-                    await client._execute_graphql_query(query)
+                await client._execute_graphql_query(query)
 
     @pytest.mark.skip(reason="Retry functionality not implemented")
     @pytest.mark.asyncio
