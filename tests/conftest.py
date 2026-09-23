@@ -333,6 +333,43 @@ def isolate_github_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+#: Variables through which an enclosing git process tells a child which
+#: repository to act on. Each one overrides the discovery that ``git -C``
+#: would otherwise perform.
+_GIT_LOCATION_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_from_enclosing_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the suite from acting on the repository it is run from.
+
+    Git exports its location variables to any hook it runs, and the
+    ``pytest`` pre-commit hook is such a child. With ``GIT_DIR`` set,
+    ``git -C <tmp> remote add upstream ...`` does not act on ``<tmp>`` at
+    all: it acts on the real checkout, where ``upstream`` already exists,
+    and fails with exit 3. The linter's own ``git -C <root> remote
+    get-url`` then reads that checkout's remotes rather than the fixture's,
+    so a test asserting no organisation could be inferred finds one.
+
+    Twelve tests failed that way when committing from a linked worktree,
+    and passed every time the suite was run by hand. Clearing the
+    variables makes every test see what CI sees: no enclosing repository.
+
+    Args:
+        monkeypatch: Used to clear the environment.
+    """
+    for name in _GIT_LOCATION_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
 #: The genuine startup refresh, captured before it is stubbed, so a test
 #: that exercises it can ask for the real one back.
 REAL_UPDATE_RATE_LIMIT_INFO = (

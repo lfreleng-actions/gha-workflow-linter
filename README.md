@@ -1185,31 +1185,39 @@ anything a document could answer.
 
 ## GitHub Action Inputs
 
+Each check takes one mode input, mirroring the command line. The
+deprecated inputs still work: the Action translates each into the mode
+it asks for and reports a warning naming the input to use instead.
+An input left unset passes nothing to the linter, so a configuration
+file given with `config-file` still decides it.
+
 <!-- markdownlint-disable MD013 -->
 
-| Input                | Description                                  | Required | Default |
-| -------------------- | -------------------------------------------- | -------- | ------- |
-| `path`               | Path to scan for workflows                   | No       | `.`     |
-| `config-file`        | Path to configuration file                   | No       |         |
-| `validation-method`  | Validation method (github-api or git)        | No       | auto    |
-| `log-level`          | Logging level                                | No       | `INFO`  |
-| `output-format`      | Output format (text, json)                   | No       | `text`  |
-| `fail-on-error`      | Exit with error on failures                  | No       | `true`  |
-| `parallel`           | Enable parallel processing                   | No       | `true`  |
-| `workers`            | Number of parallel workers                   | No       | Auto    |
-| `exclude`            | Comma-separated exclude patterns             | No       |         |
-| `require-pinned-sha` | Require actions pinned to commit SHAs        | No       | `true`  |
-| `auto-fix`           | Auto-fix broken/invalid references           | No       | `true`  |
-| `update-actions`     | Update action calls to the latest release    | No       | `false` |
-| `allow-prerelease`   | Allow prerelease versions for latest         | No       | `false` |
-| `two-space-comments` | Use two spaces before inline comments        | No       | `false` |
-| `skip-actions`       | Skip scanning action.yaml/action.yml files   | No       | `false` |
-| `fix-test-calls`     | Fix actions with 'test' in comments          | No       | `false` |
-| `cooldown`           | Days a release must have been public         | No       |         |
-| `allow-list`         | Detect stale harden-runner allow-list pins   | No       | `true`  |
-| `verify-allow-list`  | Fail when stale allow-list pins remain       | No       | `false` |
-| `update-allow-list`  | Rewrite stale allow-list pins in place       | No       | `false` |
-| `allow-list-org`     | Org for the allow-list `@` shorthand         | No       |         |
+| Input                 | Description                                                   | Required | Default |
+| --------------------- | ------------------------------------------------------------- | -------- | ------- |
+| `path`                | Path to scan for workflows                                    | No       | `.`     |
+| `config-file`         | Path to configuration file                                    | No       |         |
+| `log-level`           | Logging level                                                 | No       | `INFO`  |
+| `output-format`       | Output format (text, json)                                    | No       | `text`  |
+| `fail-on-error`       | Exit with error on failures                                   | No       | `true`  |
+| `parallel`            | Enable parallel processing                                    | No       | `true`  |
+| `workers`             | Number of parallel workers; auto-detected when unset          | No       |         |
+| `exclude`             | Comma-separated exclude patterns                              | No       |         |
+| `require-pinned-sha`  | Require actions pinned to commit SHAs                         | No       | `true`  |
+| `skip-actions`        | Skip scanning action.yaml/action.yml files                    | No       | `false` |
+| `action-calls`        | Action-call check mode: `off`, `report`, `fix` or `update`    | No       |         |
+| `verify-action-calls` | Fail on outdated action calls; not effective with `report`    | No       | `false` |
+| `auto-fix`            | Deprecated: use `action-calls`                                | No       | `true`  |
+| `update-actions`      | Deprecated: use `action-calls: update`                        | No       | `false` |
+| `allow-prerelease`    | Allow prerelease versions for latest                          | No       | `false` |
+| `two-space-comments`  | Use two spaces before inline comments                         | No       | `true`  |
+| `fix-test-calls`      | Fix actions with 'test' in comments                           | No       | `false` |
+| `cooldown`            | Days a release must have been public                          | No       |         |
+| `validation-method`   | Validation method (github-api or git); auto-detected if unset | No       |         |
+| `allow-list`          | Allow-list check mode: `off`, `report` or `update`            | No       |         |
+| `verify-allow-list`   | Fail when stale allow-list pins remain                        | No       | `false` |
+| `update-allow-list`   | Deprecated: use `allow-list: update`                          | No       | `false` |
+| `allow-list-org`      | Org for the allow-list `@` shorthand                          | No       |         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1217,11 +1225,13 @@ anything a document could answer.
 
 <!-- markdownlint-disable MD013 -->
 
-| Output         | Description                 |
-| -------------- | --------------------------- |
-| `errors-found` | Number of validation errors |
-| `total-calls`  | Total action calls scanned  |
-| `scan-summary` | JSON summary of results     |
+| Output             | Description                          |
+| ------------------ | ------------------------------------ |
+| `errors-found`     | Number of validation errors          |
+| `total-calls`      | Total action calls scanned           |
+| `scan-summary`     | JSON summary of results              |
+| `allow-list-stale` | Number of stale allow-list pins      |
+| `allow-list-fixed` | Number of allow-list pins rewritten  |
 
 <!-- markdownlint-enable MD013 -->
 
