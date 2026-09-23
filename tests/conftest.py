@@ -333,18 +333,56 @@ def isolate_github_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-#: Variables through which an enclosing git process tells a child which
-#: repository to act on. Each one overrides the discovery that ``git -C``
-#: would otherwise perform.
-_GIT_LOCATION_VARIABLES = (
+#: What ``git rev-parse --local-env-vars`` lists as of git 2.53: the
+#: variables through which an enclosing git process tells a child which
+#: repository, index and configuration to use. Kept for a host where
+#: git cannot be asked, and for a git that lists fewer names.
+_FALLBACK_GIT_LOCAL_VARIABLES = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
     "GIT_DIR",
     "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
     "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
     "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
 )
+
+
+def _git_local_variables() -> tuple[str, ...]:
+    """Name every variable an enclosing git process may export.
+
+    Git itself clears exactly this set when it moves to another
+    repository, so asking it tracks new git releases without a code
+    change. The fallback is merged in rather than used as a default: a
+    variable an older git forgets to list is still worth clearing.
+
+    Returns:
+        The names git reports, followed by any fallback name it omits.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _FALLBACK_GIT_LOCAL_VARIABLES
+    reported = tuple(completed.stdout.split())
+    return tuple(dict.fromkeys(reported + _FALLBACK_GIT_LOCAL_VARIABLES))
+
+
+#: Resolved once, at import, before any fixture replaces ``subprocess.run``.
+_GIT_LOCAL_VARIABLES = _git_local_variables()
 
 
 @pytest.fixture(autouse=True)
@@ -360,13 +398,15 @@ def isolate_from_enclosing_git(monkeypatch: pytest.MonkeyPatch) -> None:
     so a test asserting no organisation could be inferred finds one.
 
     Twelve tests failed that way when committing from a linked worktree,
-    and passed every time the suite was run by hand. Clearing the
-    variables makes every test see what CI sees: no enclosing repository.
+    and passed every time the suite was run by hand. Configuration
+    travels the same way: ``git -c key=value commit`` hands the setting
+    to its hooks in ``GIT_CONFIG_PARAMETERS``. Clearing every variable
+    git names makes each test see what CI sees: no enclosing repository.
 
     Args:
         monkeypatch: Used to clear the environment.
     """
-    for name in _GIT_LOCATION_VARIABLES:
+    for name in _GIT_LOCAL_VARIABLES:
         monkeypatch.delenv(name, raising=False)
 
 
