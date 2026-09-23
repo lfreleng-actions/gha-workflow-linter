@@ -156,3 +156,12 @@ class ConfigurationError(Exception):
     """Raised when there's an issue with configuration."""
 
     pass
+
+
+class OutputPathRefusedError(ConfigurationError):
+    """Raised when ``--json-output`` names a path the run must not write.
+
+    Distinct from other configuration errors because the refusal is
+    about the document's own destination: a handler reporting the
+    failure must not publish the refusal to the path it refused.
+    """

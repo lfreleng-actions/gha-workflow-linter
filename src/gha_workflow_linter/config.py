@@ -174,6 +174,23 @@ class ConfigManager:
         """Initialize the configuration manager."""
         self.logger = logging.getLogger(__name__)
 
+    def effective_config_file(self, config_file: Path | None) -> Path | None:
+        """Name the file :meth:`load_config` reads for ``config_file``.
+
+        The file given, or else the default it discovers. Exposed so a
+        caller that must not overwrite the configuration can find it
+        when no ``--config`` named it.
+
+        Args:
+            config_file: The file given, if any.
+
+        Returns:
+            The file, or ``None`` when there is none to read.
+        """
+        if config_file is None:
+            return self._find_default_config_file()
+        return config_file
+
     def load_config(self, config_file: Path | None = None) -> Config:
         """
         Load configuration from file and environment variables.
@@ -190,8 +207,7 @@ class ConfigManager:
         config_data: dict[str, Any] = {}
 
         # Load from default location if no file specified
-        if config_file is None:
-            config_file = self._find_default_config_file()
+        config_file = self.effective_config_file(config_file)
 
         # Load from file if it exists
         if config_file and config_file.exists():

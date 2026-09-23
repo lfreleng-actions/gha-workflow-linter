@@ -16,14 +16,21 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+import contextlib
+from contextvars import ContextVar
 import dataclasses
 from dataclasses import dataclass, field
+import fnmatch
+from functools import partial
 import json
 import logging
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
+import secrets
+import stat
 import sys
 import textwrap
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from rich.logging import RichHandler
 from rich.progress import (
@@ -52,7 +59,7 @@ from .cache import CachePrimeReport, ValidationCache
 from .check_modes import ACTION_CALLS, ALLOW_LIST, CheckId, CheckMode
 from .config import ConfigManager
 from .console import console, err_console
-from .dependabot import resolve_cooldown
+from .dependabot import find_dependabot_config, resolve_cooldown
 from .exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -60,6 +67,7 @@ from .exceptions import (
     GitUnreachableError,
     GitUnusableError,
     NetworkError,
+    OutputPathRefusedError,
     RateLimitError,
     TemporaryAPIError,
     ValidationAbortedError,
@@ -80,7 +88,7 @@ from .system_utils import get_default_workers
 from .utils import has_test_comment
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 
 
 def _get_relative_path(file_path: Path, base_path: Path) -> Path:
@@ -270,6 +278,7 @@ def _preprocess_args_for_default_command(
         "--log-level",
         "--format",
         "-f",
+        "--json-output",
         "--files",
         "--allow-list-org",
         "--repo-depth",
@@ -856,6 +865,93 @@ def _reject_conflicting_verbosity(
     raise typer.Exit(exit_codes.RUNTIME_ERROR)
 
 
+def _vet_arguments(config: Config, **arguments: Any) -> Path | None:
+    """Vet ``--json-output`` from the raw arguments.
+
+    ``CLIOptions`` validates every option as it is built, so an invalid
+    ``--format`` would abort before the path was vetted, and the refusal
+    it causes would never reach the file. Vetting reads only the path,
+    ``--config``, ``--json-output``, ``--files`` and the sweep, so those
+    are assembled without validation.
+
+    Args:
+        config: The loaded configuration.
+        arguments: Those fields, by ``CLIOptions`` name.
+
+    Returns:
+        The path, now safe for the run to write, or ``None``.
+    """
+    return _vet_json_output(config, CLIOptions.model_construct(**arguments))
+
+
+def _refuse_configuration(
+    error: Exception, *, verbose: bool, vetted: Path | None, **shape: Any
+) -> NoReturn:
+    """Report a configuration refusal, then exit.
+
+    Refused before any scanning, so nothing has been emitted yet and the
+    promised document is still owed -- to ``--json-output`` as well,
+    once it is vetted, unless the refusal is of that path itself.
+
+    Args:
+        error: What was refused.
+        verbose: Whether to log the traceback.
+        vetted: The ``--json-output`` path, once vetted.
+        shape: The document's shape, as :func:`_emit_setup_failure`
+            takes it: ``output_format``, ``multi_repo``, ``path`` and
+            ``check_modes``.
+
+    Raises:
+        typer.Exit: Always, with the runtime-error status.
+    """
+    logger = logging.getLogger(__name__)
+    logger.error(f"Configuration error: {error}")
+    if verbose:
+        logger.exception("Full traceback:")
+    _emit_setup_failure(
+        f"Configuration error: {error}",
+        json_output=None
+        if isinstance(error, OutputPathRefusedError)
+        else vetted,
+        **shape,
+    )
+    raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
+
+
+_JSON_OUTPUT_HELP = (
+    "Also write the JSON document to this file, whatever --format "
+    "prints. One run then serves both a reader and a program"
+)
+
+
+def _configure_logging(
+    output_format: str, verbose: bool, quiet: bool, log_level: LogLevel
+) -> bool:
+    """Settle the run's verbosity and configure logging to match.
+
+    JSON output implies quiet, because standard output belongs to the
+    document. Quiet also pins the package logger at ERROR, which is how
+    the auto-fixer detects it through ``logger.getEffectiveLevel()``.
+
+    Args:
+        output_format: The ``--format`` given.
+        verbose: Whether ``--verbose`` was given; it implies DEBUG.
+        quiet: Whether ``--quiet`` was given.
+        log_level: The ``--log-level`` given.
+
+    Returns:
+        Whether the run is quiet.
+    """
+    quiet = quiet or output_format == "json"
+    setup_logging(LogLevel.DEBUG if verbose else log_level, quiet)
+    if quiet:
+        logging.getLogger("gha_workflow_linter").setLevel(logging.ERROR)
+    logging.getLogger(__name__).debug(
+        f"Starting gha-workflow-linter {__version__}"
+    )
+    return quiet
+
+
 @app.command()
 def lint(
     path: Path | None = typer.Argument(
@@ -905,6 +1001,11 @@ def lint(
         "--format",
         "-f",
         help="Output format (text, json)",
+    ),
+    json_output: Path | None = typer.Option(
+        None,
+        "--json-output",
+        help=_JSON_OUTPUT_HELP,
     ),
     fail_on_error: bool = typer.Option(
         True,
@@ -1175,43 +1276,37 @@ def lint(
         path=path,
     )
 
-    # JSON format implies quiet mode (suppress console output)
-    if output_format == "json":
-        quiet = True
-
-    if verbose:
-        log_level = LogLevel.DEBUG
-
-    setup_logging(log_level, quiet)
+    quiet = _configure_logging(output_format, verbose, quiet, log_level)
     logger = logging.getLogger(__name__)
 
-    # Force set logger level to ERROR in quiet mode as safety measure
-    # (ensures AutoFixer can detect quiet mode via logger.getEffectiveLevel())
-    if quiet:
-        logging.getLogger("gha_workflow_linter").setLevel(logging.ERROR)
-
-    # Set default path
-    if path is None:
-        path = Path.cwd()
+    path = Path.cwd() if path is None else path
 
     settled_checks: dict[str, dict[str, Any]] | None = None
+    vetted: Path | None = None
 
     try:
-        config_manager = ConfigManager()
-        config = config_manager.load_config(config_file)
-
-        # Refused before any backend preflight: that preflight makes
-        # network calls and can exit on a rate limit, which would retire
-        # an invalid invocation as a success without ever reporting it.
+        config = ConfigManager().load_config(config_file)
+        vetted = _vet_arguments(
+            config,
+            path=path,
+            config_file=config_file,
+            json_output=json_output,
+            files=files,
+            multi_repo=multi_repo,
+            repo_depth=repo_depth,
+        )
+        # Refused before preflight, whose network calls and rate-limit
+        # exit would retire an invalid invocation unreported; and after
+        # vetting, so the refusal reaches the --json-output file.
         _reject_files_with_multi_repo(files, multi_repo=multi_repo)
 
-        # Override config with CLI options
         cli_options = CLIOptions(
             path=path,
             config_file=config_file,
             verbose=verbose,
             quiet=quiet,
             output_format=output_format,
+            json_output=vetted,
             fail_on_error=fail_on_error,
             parallel=parallel,
             exclude=exclude,
@@ -1242,17 +1337,13 @@ def lint(
             repo_depth=repo_depth,
         )
 
-        # Apply CLI overrides to config
         settled_checks = _apply_cli_overrides(config, cli_options, workers)
         _resolve_cooldown(config, cli_options)
-
-        logger.debug(f"Starting gha-workflow-linter {__version__}")
 
         rate_limited = _preflight_backend(
             config, cli_options, github_token, workers
         )
 
-        # Only show scanning path if we're actually going to proceed
         logger.debug(f"Scanning path: {path}")
 
         exit_code = run_linter(config, cli_options, rate_limited=rate_limited)
@@ -1265,19 +1356,15 @@ def lint(
         logger.error(f"Validation aborted: {e.message}")
         raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except (ValueError, ConfigurationError) as e:
-        logger.error(f"Configuration error: {e}")
-        if verbose:
-            logger.exception("Full traceback:")
-        # Refused before any scanning, so nothing has been emitted yet
-        # and the promised document is still owed.
-        _emit_setup_failure(
-            f"Configuration error: {e}",
+        _refuse_configuration(
+            e,
+            verbose=verbose,
             output_format=output_format,
             multi_repo=multi_repo,
             path=path,
             check_modes=settled_checks,
+            vetted=vetted,
         )
-        raise typer.Exit(exit_codes.RUNTIME_ERROR) from None
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         if verbose:
@@ -1564,6 +1651,666 @@ def _unsettled_check_modes() -> dict[str, dict[str, Any]]:
     return {check.value: {"mode": None, "ran": False} for check in CheckId}
 
 
+@dataclass(frozen=True)
+class _DocumentSink:
+    """Where a run's JSON document goes.
+
+    Standard output carries it under ``--format json``, and
+    ``--json-output`` names a file that receives it under any format.
+    Every document the command emits passes through here, so the two
+    destinations cannot disagree, and a text run needs no second, JSON
+    run to produce one. That second run was how the Action got its
+    outputs, and under a fixing mode it examined a tree the first run
+    had already repaired, reporting zero errors for what it had fixed.
+
+    Attributes:
+        to_stdout: Whether to print the document.
+        path: The file to write it to, if any.
+    """
+
+    to_stdout: bool
+    path: Path | None = None
+
+    @classmethod
+    def of(cls, output_format: str, json_output: Path | None) -> _DocumentSink:
+        """Build the sink a command line asked for.
+
+        Args:
+            output_format: The ``--format`` given.
+            json_output: The ``--json-output`` given, if any.
+
+        Returns:
+            The sink.
+        """
+        return cls(to_stdout=output_format == "json", path=json_output)
+
+    @classmethod
+    def for_options(cls, options: CLIOptions) -> _DocumentSink:
+        """Build the sink resolved options ask for.
+
+        Args:
+            options: Resolved CLI options.
+
+        Returns:
+            The sink.
+        """
+        return cls.of(options.output_format, options.json_output)
+
+    @property
+    def wanted(self) -> bool:
+        """Whether any destination expects a document.
+
+        Returns:
+            True when the document must be built.
+        """
+        return self.to_stdout or self.path is not None
+
+    def publish(self, document: Mapping[str, Any]) -> None:
+        """Send the document to every destination.
+
+        Args:
+            document: The document to emit.
+
+        Raises:
+            OSError: When the file cannot be written. Left to propagate,
+                so a run whose document was lost does not exit clean.
+        """
+        text = json.dumps(document, indent=2)
+        if self.to_stdout:
+            # Plain print() avoids Rich formatting/ANSI codes.
+            print(text)
+        if self.path is None:
+            return
+        try:
+            _replace_file(self.path, text + "\n")
+        except OSError as error:
+            raise OSError(
+                f"Cannot write --json-output {self.path}: "
+                f"{_describe_exception(error)}"
+            ) from error
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Replace the directory entry at ``path`` with a file holding ``text``.
+
+    Written beside the target and renamed over it, so the entry is
+    swapped rather than opened. A symbolic or hard link named as the
+    output therefore cannot carry the write through to the file it
+    shares -- a workflow, say -- and a reader never sees half a
+    document. ``O_EXCL`` refuses a temporary name that already exists,
+    link or not. The temporary name is a fixed length rather than
+    derived from the target's, so an output name near the filesystem's
+    limit is not pushed past it.
+
+    A regular file already at ``path`` keeps its permission bits, as a
+    shell redirect into it would: the Action names a private ``mktemp``
+    file, and a replacement created by the umask alone would widen it to
+    other local users. A new file, or a link named as the output, gets
+    the umask default; a link's own ``0o777`` is never copied.
+
+    The bits are applied through the open descriptor where the platform
+    has ``os.fchmod``, before any data is written: a path-based
+    ``chmod`` follows links, so another writer to the directory could
+    swap the temporary name for a link to a file of ours and have its
+    mode changed instead. Windows before Python 3.13 has no
+    ``os.fchmod``, and there the path-based ``chmod`` is the only option;
+    POSIX permission bits mean little there beyond read-only.
+
+    Args:
+        path: The file to replace.
+        text: Its new contents.
+
+    Raises:
+        OSError: When the file cannot be written or renamed into place.
+    """
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        mode = None
+    else:
+        mode = (
+            stat.S_IMODE(existing.st_mode)
+            if stat.S_ISREG(existing.st_mode)
+            else None
+        )
+    temporary = path.with_name(f".{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600 if mode is not None else 0o666,
+    )
+    try:
+        # fdopen owns the descriptor from here, so it is closed on every
+        # path, including an fchmod that raises.
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+            handle.write(text)
+        if mode is not None and not hasattr(os, "fchmod"):
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
+#: What discovery raises that the run treats as advisory, and vetting
+#: must not make fatal: unreadable paths (OSError), an invalid depth or
+#: pattern (ValueError), and RuntimeError, which covers both a link loop
+#: -- discovery's own resolve() raises it before Python 3.13 -- and the
+#: NotImplementedError, a subclass, that an absolute extra_globs pattern
+#: raises.
+_DISCOVERY_ERRORS = (OSError, ValueError, RuntimeError)
+
+
+def _write_target(path: Path) -> Path:
+    """Name the directory entry a replacing write to ``path`` lands on.
+
+    The parent directories are resolved, since ``os.replace`` follows
+    them, but the final component is kept: the entry itself is replaced,
+    never followed.
+
+    Args:
+        path: The path to be written.
+
+    Returns:
+        The absolute entry.
+    """
+    return _resolved(path.absolute().parent) / path.name
+
+
+def _resolved(path: Path) -> Path:
+    """Resolve a path the way vetting may rely on, whatever it names.
+
+    Vetting reads paths the run treats as advisory -- a worktree's
+    gitdir, a swept repository, ``GIT_DIR`` -- and the run survives one
+    that cannot be resolved, such as a link loop, which raises
+    ``RuntimeError`` before Python 3.13 and ``OSError`` after. Asking
+    for a document must not make that fatal. The normalised absolute
+    path stands in: nothing lies behind a loop that could be written,
+    and an output beneath one is refused as unwritable before this runs.
+
+    Args:
+        path: The path to resolve.
+
+    Returns:
+        The resolved path, or the normalised absolute one.
+    """
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(path))
+
+
+def _linted_tree(root: Path) -> Path:
+    """Name the tree a ``--json-output`` file must stay out of.
+
+    That is the repository enclosing the scanned path -- found by the
+    same ``.git`` test a sweep uses, so a worktree's or submodule's
+    ``.git`` file counts -- or the scanned path itself when no repository
+    encloses it, as for a sweep's container.
+
+    Args:
+        root: The path the run scans.
+
+    Returns:
+        The resolved tree.
+    """
+    resolved = _resolved(root)
+    start = resolved if resolved.is_dir() else resolved.parent
+    for candidate in (start, *start.parents):
+        if is_repository(candidate):
+            return candidate
+    return start
+
+
+def _git_metadata_dirs(repository: Path) -> list[Path]:
+    """Find Git metadata a repository keeps outside its own tree.
+
+    A worktree or submodule carries a ``.git`` *file* naming its gitdir,
+    which lives elsewhere -- under the main checkout's ``.git`` for a
+    worktree, whose ``commondir`` file names that ``.git`` in turn. Git
+    reads both for ``git -C <repository> remote get-url``, so both are
+    inputs. A ``.git`` directory lies inside the tree and needs nothing
+    here. The format is Git's gitfile: ``gitdir: <path>``, relative to
+    the file's directory; ``commondir`` is relative to the gitdir.
+
+    Args:
+        repository: The repository's root.
+
+    Returns:
+        The resolved directories, possibly none.
+    """
+    try:
+        text = (repository / ".git").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not text.startswith("gitdir:"):
+        return []
+    gitdir = _resolved(repository / text[len("gitdir:") :].strip())
+    return [gitdir, *_commondir(gitdir)]
+
+
+def _commondir(gitdir: Path) -> list[Path]:
+    """Follow a gitdir's ``commondir`` file, as Git does.
+
+    A linked worktree's gitdir holds its own state, and names in
+    ``commondir`` -- relative to the gitdir -- the main checkout's
+    ``.git``, whose ``config`` Git reads for the remotes. Whichever way
+    the gitdir was reached, from a ``.git`` file or from ``GIT_DIR``,
+    that common directory is read too.
+
+    Args:
+        gitdir: The gitdir to look in.
+
+    Returns:
+        The common directory, or nothing when the gitdir names none.
+    """
+    try:
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [_resolved(gitdir / common)]
+
+
+def _protected_trees(root: Path, sweep_depth: int | None) -> list[Path]:
+    """List the directories ``--json-output`` must stay out of.
+
+    Args:
+        root: The path the run scans.
+        sweep_depth: The ``--repo-depth`` of a sweep, or ``None``.
+
+    Returns:
+        The linted tree, the external Git metadata of the repository
+        enclosing it, each repository a sweep would visit (resolved, so a
+        linked one outside the container counts) with its external Git
+        metadata, and any Git directory the environment names.
+    """
+    tree = _linted_tree(root)
+    trees = [tree, *_git_metadata_dirs(tree)]
+    # Every directory Git is run in, as 'git -C <dir>': the scanned path
+    # and each repository a sweep visits.
+    bases = [root]
+    if sweep_depth is not None:
+        # A discovery failure is the sweep's to report, not this check's.
+        # Each root is added resolved: discovery follows a link to a
+        # repository outside the container, and the sweep then lints,
+        # and Git reads, the tree behind it.
+        with contextlib.suppress(*_DISCOVERY_ERRORS):
+            for repository in find_repositories(root, depth=sweep_depth):
+                resolved = _resolved(repository)
+                trees.extend([resolved, *_git_metadata_dirs(resolved)])
+                bases.append(repository)
+    trees.extend(_environment_git_dirs(bases))
+    return trees
+
+
+def _environment_git_dirs(bases: list[Path]) -> list[Path]:
+    """Resolve the Git directories the environment redirects probes to.
+
+    Git changes to the ``-C`` directory before reading ``GIT_DIR``, so a
+    relative value names a different directory for each one; and a
+    relative ``GIT_COMMON_DIR`` is relative to the effective Git
+    directory. Both are resolved from every directory the run hands to
+    ``git -C``, and from the working directory as well, which costs
+    nothing and depends on no particular Git's reading.
+
+    Args:
+        bases: Every directory the run runs Git in.
+
+    Returns:
+        The resolved directories, possibly none.
+    """
+    git_dir = os.environ.get("GIT_DIR")
+    common = os.environ.get("GIT_COMMON_DIR")
+    found: list[Path] = []
+    if not (git_dir or common):
+        return found
+    for base in (Path.cwd(), *bases):
+        start = _resolved(base)
+        if git_dir:
+            effective = _resolved(start / git_dir)
+            found += [effective, *_commondir(effective)]
+        else:
+            tree = _linted_tree(start)
+            effective = next(iter(_git_metadata_dirs(tree)), tree / ".git")
+        if common:
+            found += [
+                _resolved(start / common),
+                _resolved(effective / common),
+            ]
+    return found
+
+
+def _read_inputs(config: Config, options: CLIOptions) -> set[Path]:
+    """Resolve every file the run's scan and allow-list check would read.
+
+    Discovery follows links, so an input can live anywhere: a workflow
+    in ``.github/workflows`` may be a link to a file outside every
+    protected tree. Discovery runs here as the run will run it, but with
+    nothing excluded and action files included, so the set can only be
+    wider than what the run reads, whatever the command line overrides.
+
+    Args:
+        config: The loaded configuration.
+        options: The resolved options, supplying the path, ``--files``
+            and the sweep.
+
+    Returns:
+        The resolved paths.
+    """
+    widest = config.model_copy(
+        update={"skip_actions": False, "exclude_patterns": []}
+    )
+    scanner = WorkflowScanner(widest)
+    roots = [options.path]
+    if options.multi_repo:
+        with contextlib.suppress(*_DISCOVERY_ERRORS):
+            roots = find_repositories(options.path, depth=options.repo_depth)
+    found: set[Path] = set()
+    for repository in roots:
+        # Each source separately, so a failure in one -- an absolute
+        # extra_globs pattern raises NotImplementedError -- costs only
+        # what that source would have found. With --files the patterns
+        # are resolved rather than scanned: every selected file is read
+        # whether or not it holds action calls.
+        if options.files:
+            found |= _gathered(
+                partial(
+                    scanner.resolve_specific_files, repository, options.files
+                )
+            )
+        else:
+            found |= _gathered(partial(scanner.find_workflow_files, repository))
+            for pattern in widest.allow_list.extra_globs:
+                found |= _gathered(partial(_glob_files, repository, pattern))
+        # Read for the cooldown unless one was given; included either
+        # way, since a wider set only refuses more.
+        found |= _gathered(partial(_dependabot_files, repository))
+    return found
+
+
+def _gathered(source: Callable[[], Iterable[Path]]) -> set[Path]:
+    """Resolve what one discovery source yields, keeping it if it fails.
+
+    A failure is the run's to report -- it treats discovery errors as
+    advisory -- and asking for a document must not make it fatal. What
+    the source yielded before failing is kept, so a partial walk still
+    protects the files it reached.
+
+    Args:
+        source: Produces the paths, lazily or not.
+
+    Returns:
+        The resolved paths it yielded.
+    """
+    found: set[Path] = set()
+    with contextlib.suppress(*_DISCOVERY_ERRORS):
+        for path in source():
+            found.add(_resolved(path))
+    return found
+
+
+def _glob_files(repository: Path, pattern: str) -> Iterator[Path]:
+    """List the files an ``allow_list.extra_globs`` pattern reads.
+
+    Args:
+        repository: The repository the pattern is relative to.
+        pattern: The pattern.
+
+    Yields:
+        Each matching file, as the allow-list stage globs it.
+    """
+    yield from (path for path in repository.glob(pattern) if path.is_file())
+
+
+def _dependabot_files(repository: Path) -> list[Path]:
+    """List the Dependabot configuration the cooldown lookup reads.
+
+    Args:
+        repository: The repository to look in.
+
+    Returns:
+        The file, or nothing.
+    """
+    found = find_dependabot_config(repository)
+    return [] if found is None else [found]
+
+
+def _json_output_refusal(
+    json_output: Path, config: Config, options: CLIOptions
+) -> str | None:
+    """Say why ``--json-output`` must not be written, if it must not.
+
+    The run writes the file once, after it has read everything, so the
+    document cannot alter what the run examines. These refusals protect
+    what it would overwrite. The linted repository is out of bounds as a
+    whole: its workflows, its ``.git`` in every form, its in-tree
+    configuration. Enumerating those one by one missed a new kind on
+    each attempt. Beyond it, the path must not be a file the run reads
+    -- resolved, since discovery follows links out of the tree -- nor a
+    name the scan or the allow-list globs would read, which ``--files``
+    and escaping patterns can reach; nor the ``--config`` file or the
+    validation cache. A path whose directory is missing or unwritable is
+    refused as well, so that failure comes before the run rather than
+    after it.
+
+    What is not protected is other tools' configuration the run happens
+    to consult through Git, such as ``~/.gitconfig`` or its includes:
+    that set is Git's, and unbounded. The run has read it by the time
+    the document is written, so naming one is a deliberate overwrite,
+    as ``> ~/.gitconfig`` would be.
+
+    Args:
+        json_output: The ``--json-output`` given.
+        config: The loaded configuration.
+        options: The resolved options, supplying the ``--config`` file,
+            the scanned path, ``--files`` and the sweep.
+
+    Returns:
+        The reason, or ``None`` when the path is safe to write.
+    """
+    unusable = _unwritable_reason(json_output)
+    if unusable is not None:
+        return unusable
+    target = _write_target(json_output)
+    sweep = options.repo_depth if options.multi_repo else None
+    inside = next(
+        (
+            tree
+            for tree in _protected_trees(options.path, sweep)
+            if target.is_relative_to(tree)
+        ),
+        None,
+    )
+    return (
+        _read_by_run_reason(
+            json_output,
+            config,
+            ConfigManager().effective_config_file(options.config_file),
+        )
+        or (f"it is inside {inside}, which the run reads" if inside else None)
+        or (
+            "the run reads it, through a link"
+            if target in _read_inputs(config, options)
+            else None
+        )
+    )
+
+
+def _unwritable_reason(json_output: Path) -> str | None:
+    """Say why the path cannot hold a file, checking without writing.
+
+    Args:
+        json_output: The ``--json-output`` given.
+
+    Returns:
+        The reason, or ``None``.
+    """
+    if json_output.is_dir():
+        return "it is a directory"
+    parent = json_output.absolute().parent
+    if not parent.is_dir():
+        return "its directory does not exist"
+    if not os.access(parent, os.W_OK | os.X_OK):
+        return "its directory is not writable"
+    return None
+
+
+def _read_by_run_reason(
+    json_output: Path, config: Config, config_file: Path | None
+) -> str | None:
+    """Say which of the run's inputs the path would land on, if any.
+
+    Args:
+        json_output: The ``--json-output`` given.
+        config: The loaded configuration.
+        config_file: The ``--config`` given, if any.
+
+    Returns:
+        The reason, or ``None``.
+    """
+    # Discovery globs '*{ext}', so a file is read when its name ends with
+    # a configured extension -- '.workflow.json' and 'json' included,
+    # which Path.suffix would not see. Compared case-blind, since glob's
+    # case sensitivity follows the filesystem.
+    name = json_output.name.lower()
+    for extension in (".yml", ".yaml", *config.scan_extensions):
+        if name.endswith(extension.lower()):
+            return f"the scan reads names ending {extension!r}"
+    target = _write_target(json_output)
+    for what, other in (
+        ("the --config file", config_file),
+        ("the validation cache", config.cache.cache_file_path),
+        # Written and renamed over the cache on every save, so a document
+        # there could be renamed away before the run publishes.
+        (
+            "the validation cache's temporary file",
+            config.cache.cache_file_path.with_suffix(".tmp"),
+        ),
+    ):
+        if other is not None and (
+            target in {_write_target(other), _resolved(other)}
+            or _same_file(json_output, other)
+        ):
+            return f"it is {what}"
+    for pattern in config.allow_list.extra_globs:
+        if fnmatch.fnmatch(json_output.name, PurePosixPath(pattern).name):
+            return f"allow_list.extra_globs reads {pattern!r}"
+    return None
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    """Whether two existing paths name one file, by device and inode.
+
+    A hard link shares the inode under a different name, which no path
+    comparison sees. The cache writes through its temporary file's name,
+    so an output linked to it would change before the run published.
+
+    Args:
+        first: One path.
+        second: The other.
+
+    Returns:
+        True when both exist and are the same file.
+    """
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+#: Loggers of the discovery vetting repeats. The run reports what they
+#: find; vetting must not report it a second time.
+_DISCOVERY_LOGGERS = (
+    "gha_workflow_linter.scanner",
+    "gha_workflow_linter.multi_repo",
+)
+
+#: Whether the current context is vetting. Context-local, so a run in
+#: another thread or task keeps its own diagnostics.
+_VETTING: ContextVar[bool] = ContextVar("_vetting", default=False)
+
+
+class _VettingFilter(logging.Filter):
+    """Drop discovery records emitted while the current context vets."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Pass a record unless it comes from vetting.
+
+        Args:
+            record: The record being logged.
+
+        Returns:
+            False while the current context is vetting.
+        """
+        return not _VETTING.get()
+
+
+_VETTING_FILTER = _VettingFilter()
+
+
+@contextlib.contextmanager
+def _discovery_silenced() -> Generator[None]:
+    """Mute discovery's diagnostics while vetting repeats it.
+
+    Vetting runs the same discovery as the run -- resolving ``--files``,
+    walking a sweep -- and each warns about what it cannot find or read.
+    The run then warns again, so every condition was reported twice
+    whenever ``--json-output`` was given, which is every Action run.
+
+    Nothing shared is switched off: a filter on the discovery loggers
+    drops only records logged in a context that is vetting, so a call
+    overlapping this one, in another thread or task, reports as usual.
+
+    Yields:
+        Nothing; the context's previous state is restored afterwards.
+    """
+    for name in _DISCOVERY_LOGGERS:
+        # A no-op once installed: addFilter skips a filter already there.
+        logging.getLogger(name).addFilter(_VETTING_FILTER)
+    token = _VETTING.set(True)
+    try:
+        yield
+    finally:
+        _VETTING.reset(token)
+
+
+def _vet_json_output(config: Config, options: CLIOptions) -> Path | None:
+    """Refuse an unsafe ``--json-output`` before the run begins.
+
+    Writes nothing. The file is written once, when the run has finished
+    reading, so the document cannot become one of its inputs; and the
+    checks here keep it from landing on one. A run that dies before
+    publishing leaves any earlier file in place, so its exit status, not
+    the file's presence, says whether the file is this run's.
+
+    Args:
+        config: The loaded configuration.
+        options: The resolved options, carrying ``--json-output``.
+
+    Returns:
+        The path to write, with its directory resolved as vetted. The
+        run publishes there, not to the path as given: a link above it
+        retargeted during the run would otherwise carry the write into
+        a directory that was never vetted.
+
+    Raises:
+        ConfigurationError: When the path is refused.
+    """
+    json_output = options.json_output
+    if json_output is None:
+        return None
+    with _discovery_silenced():
+        refusal = _json_output_refusal(json_output, config, options)
+    if refusal is not None:
+        raise OutputPathRefusedError(
+            f"Refusing --json-output {json_output}: {refusal}"
+        )
+    return _write_target(json_output)
+
+
 def _emit_setup_failure(
     reason: str,
     *,
@@ -1571,6 +2318,7 @@ def _emit_setup_failure(
     multi_repo: bool,
     path: Path,
     check_modes: Mapping[str, dict[str, Any]] | None = None,
+    json_output: Path | None = None,
 ) -> None:
     """Emit the JSON document for a run that failed before it started.
 
@@ -1591,30 +2339,32 @@ def _emit_setup_failure(
             failing. Omitted when it did not get that far, which is what
             makes a reported mode of ``None`` mean "never established"
             rather than "not recorded".
+        json_output: The ``--json-output`` file, if one was given.
     """
-    if output_format != "json":
+    sink = _DocumentSink.of(output_format, json_output)
+    if not sink.wanted:
         return
 
     if multi_repo:
-        _output_multi_repo_json(
+        document = _multi_repo_document(
             [], path, exit_code=exit_codes.RUNTIME_ERROR, error=reason
         )
-        return
-
-    print(
-        json.dumps(
-            build_json_results(
-                {},
-                {},
-                [],
-                path,
-                None,
-                error=reason,
-                check_modes=check_modes,
-            ),
-            indent=2,
+    else:
+        document = build_json_results(
+            {},
+            {},
+            [],
+            path,
+            None,
+            error=reason,
+            check_modes=check_modes,
         )
-    )
+    try:
+        sink.publish(document)
+    except OSError as error:
+        # Already failing, and the reason above is the one to report;
+        # an unwritable file is often that very reason.
+        logging.getLogger(__name__).debug("%s", error)
 
 
 def _reject_files_with_multi_repo(
@@ -2049,9 +2799,8 @@ def _emit_results(
             tell that from a clean run.
 
     Returns:
-        The JSON payload when ``collect_json`` is set and the output
-        format is JSON, so a caller may aggregate it; ``None``
-        otherwise.
+        The JSON payload when ``collect_json`` is set, so a caller may
+        aggregate it; ``None`` otherwise.
     """
     scan_summary = scanner.get_scan_summary(validation.workflow_calls)
 
@@ -2081,25 +2830,10 @@ def _emit_results(
         len(unique_calls) if action_calls_ran else 0,
     )
 
-    if options.output_format == "json":
-        if collect_json:
-            # The caller is assembling one document from several
-            # repositories, so hand back the payload rather than
-            # printing a top-level object of our own.
-            return build_json_results(
-                scan_summary,
-                validation_summary,
-                validation.validation_errors,
-                options.path,
-                allow_list,
-                rate_limited=rate_limited,
-                check_modes=_check_modes(
-                    config,
-                    action_calls_ran=action_calls_ran,
-                    allow_list_ran=allow_list_ran,
-                ),
-            )
-        output_json_results(
+    sink = _DocumentSink.for_options(options)
+    document: dict[str, Any] | None = None
+    if collect_json or sink.wanted:
+        document = build_json_results(
             scan_summary,
             validation_summary,
             validation.validation_errors,
@@ -2112,7 +2846,12 @@ def _emit_results(
                 allow_list_ran=allow_list_ran,
             ),
         )
-        return None
+        if not collect_json:
+            sink.publish(document)
+    collected = document if collect_json else None
+
+    if options.output_format == "json":
+        return collected
 
     output_text_results(
         scan_summary,
@@ -2135,7 +2874,7 @@ def _emit_results(
             show_suppressed=config.allow_list.show_suppressed,
             update_hint=not config.allow_list.update,
         )
-    return None
+    return collected
 
 
 #: Sentinel host key used when the allow-list stage itself fails, rather
@@ -2332,8 +3071,8 @@ def _allow_list_paths(
     paths: list[Path] = list(scanner.find_workflow_files(options.path))
     seen = set(paths)
     for pattern in config.allow_list.extra_globs:
-        for path in sorted(options.path.glob(pattern)):
-            if path.is_file() and path not in seen:
+        for path in sorted(_glob_files(options.path, pattern)):
+            if path not in seen:
                 seen.add(path)
                 paths.append(path)
     return paths
@@ -2572,6 +3311,14 @@ def run_linter(
     if options.output_format == "json" and not options.quiet:
         options = options.model_copy(update={"quiet": True})
 
+    # The command vets --json-output before pre-flight, so an unusable
+    # path fails before any network call. A library caller arrives
+    # unvetted, and is owed the same refusal; either way the run then
+    # publishes to the directory as vetted.
+    options = options.model_copy(
+        update={"json_output": _vet_json_output(config, options)}
+    )
+
     if options.multi_repo:
         return _run_multi_repo(config, options, rate_limited=rate_limited)
 
@@ -2685,7 +3432,8 @@ def _run_one_repository(
     )
     if isinstance(scan_result, _ScanShortCircuit):
         payload = None
-        if options.output_format == "json":
+        sink = _DocumentSink.for_options(options)
+        if collect_json or sink.wanted:
             # The run promised a document whether or not it got far
             # enough to fill one in. Without this, a failed scan and a
             # repository with nothing to check both emitted an empty
@@ -2694,7 +3442,7 @@ def _run_one_repository(
                 scanner, config, shared_cache, scan_result, rate_limited
             )
             if not collect_json:
-                print(json.dumps(payload, indent=2))
+                sink.publish(payload)
         return RunOutcome(
             exit_code=scan_result.exit_code,
             error=scan_result.error,
@@ -2861,7 +3609,7 @@ def _repository_label(repository: Path, root: Path) -> str:
 
 
 def _discover_or_report(
-    options: CLIOptions, *, json_mode: bool, rate_limited: bool
+    options: CLIOptions, *, sink: _DocumentSink, rate_limited: bool
 ) -> list[Path] | None:
     """Find the repositories to sweep, reporting a failure as a document.
 
@@ -2872,7 +3620,7 @@ def _discover_or_report(
 
     Args:
         options: Resolved CLI options, supplying the path and depth.
-        json_mode: Whether the caller owes a JSON document.
+        sink: Where the caller's document goes.
         rate_limited: Whether pre-flight found the API rate-limited.
 
     Returns:
@@ -2892,13 +3640,15 @@ def _discover_or_report(
         reason = f"Cannot read {options.path}: {_describe_exception(error)}"
 
     logger.error(reason)
-    if json_mode:
-        _output_multi_repo_json(
-            [],
-            options.path,
-            rate_limited=rate_limited,
-            exit_code=exit_codes.RUNTIME_ERROR,
-            error=reason,
+    if sink.wanted:
+        sink.publish(
+            _multi_repo_document(
+                [],
+                options.path,
+                rate_limited=rate_limited,
+                exit_code=exit_codes.RUNTIME_ERROR,
+                error=reason,
+            )
         )
     return None
 
@@ -2935,6 +3685,7 @@ def _run_multi_repo(
         The most significant exit code across every repository.
     """
     json_mode = options.output_format == "json"
+    sink = _DocumentSink.for_options(options)
 
     try:
         _reject_files_with_multi_repo(options.files, multi_repo=True)
@@ -2947,6 +3698,7 @@ def _run_multi_repo(
             output_format=options.output_format,
             multi_repo=True,
             path=options.path,
+            json_output=options.json_output,
         )
         raise
     # Anything written to standard output would sit alongside the JSON
@@ -2954,7 +3706,7 @@ def _run_multi_repo(
     silent = options.quiet or json_mode
 
     repositories = _discover_or_report(
-        options, json_mode=json_mode, rate_limited=rate_limited
+        options, sink=sink, rate_limited=rate_limited
     )
     if repositories is None:
         return exit_codes.RUNTIME_ERROR
@@ -2969,16 +3721,18 @@ def _run_multi_repo(
             if rate_limited and _demanded_an_answer(options, config)
             else exit_codes.SUCCESS
         )
-        if json_mode:
+        if sink.wanted:
             # An empty sweep still owes the caller a document, or a
             # consumer cannot tell it from a crash.
-            _output_multi_repo_json(
-                [],
-                options.path,
-                rate_limited=rate_limited,
-                exit_code=empty_code,
+            sink.publish(
+                _multi_repo_document(
+                    [],
+                    options.path,
+                    rate_limited=rate_limited,
+                    exit_code=empty_code,
+                )
             )
-        elif not options.quiet:
+        if not silent:
             console.print(
                 f"[yellow]No repositories found under {options.path} "
                 f"at depth {options.repo_depth} ⚠️[/yellow]"
@@ -3024,28 +3778,30 @@ def _run_multi_repo(
         *(outcome.exit_code for _, outcome in results)
     )
 
-    if json_mode:
-        _output_multi_repo_json(
-            results,
-            options.path,
-            rate_limited=rate_limited,
-            exit_code=sweep_code,
+    if sink.wanted:
+        sink.publish(
+            _multi_repo_document(
+                results,
+                options.path,
+                rate_limited=rate_limited,
+                exit_code=sweep_code,
+            )
         )
-    elif not options.quiet:
+    if not silent:
         _display_multi_repo_summary(results, options.path)
 
     return sweep_code
 
 
-def _output_multi_repo_json(
+def _multi_repo_document(
     results: list[tuple[Path, RunOutcome]],
     root: Path,
     *,
     rate_limited: bool = False,
     exit_code: int = exit_codes.SUCCESS,
     error: str | None = None,
-) -> None:
-    """Emit one JSON document covering the whole sweep.
+) -> dict[str, Any]:
+    """Build one JSON document covering the whole sweep.
 
     Printing each repository's payload as it completed would put several
     top-level objects on standard output, which no JSON parser accepts.
@@ -3068,8 +3824,11 @@ def _output_multi_repo_json(
             examining anything. Distinguishes that from a container that
             genuinely holds no repositories, which is otherwise the same
             empty document.
+
+    Returns:
+        The document.
     """
-    document = {
+    return {
         "error": error,
         "repositories": [
             {
@@ -3097,9 +3856,6 @@ def _output_multi_repo_json(
             "exit_code": exit_code,
         },
     }
-
-    # Plain print() avoids Rich formatting/ANSI codes in JSON output.
-    print(json.dumps(document, indent=2))
 
 
 def _run_repository_in_sweep(
@@ -3179,7 +3935,7 @@ def _run_repository_in_sweep(
             repo_config,
             repo_options,
             shared_cache,
-            collect_json=options.output_format == "json",
+            collect_json=_DocumentSink.for_options(options).wanted,
             rate_limited=rate_limited,
         )
     except ConfigurationError:

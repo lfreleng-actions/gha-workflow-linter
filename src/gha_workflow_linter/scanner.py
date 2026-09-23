@@ -431,7 +431,7 @@ class WorkflowScanner:
 
         # If specific files are provided, scan only those files
         if specific_files:
-            workflow_files = self._resolve_specific_files(
+            workflow_files = self.resolve_specific_files(
                 root_path, specific_files
             )
             for workflow_file in workflow_files:
@@ -471,7 +471,7 @@ class WorkflowScanner:
 
         return results
 
-    def _resolve_specific_files(
+    def resolve_specific_files(
         self, root_path: Path, file_patterns: list[str]
     ) -> list[Path]:
         """

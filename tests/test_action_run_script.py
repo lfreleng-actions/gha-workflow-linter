@@ -72,15 +72,24 @@ _STUB = """#!{python}
 import json, os, sys
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
+with open(os.environ["STUB_LOG"], encoding="utf-8") as log:
+    invocation = sum(1 for line in log if line.strip())
 args = sys.argv[1:]
 status = int(os.environ.get("STUB_EXIT", "0"))
+if "STUB_JSON_RAW" in os.environ:
+    document = os.environ["STUB_JSON_RAW"]
+else:
+    source = os.environ["STUB_DOCUMENT"]
+    if invocation > 1 and "STUB_LATER_DOCUMENT" in os.environ:
+        source = os.environ["STUB_LATER_DOCUMENT"]
+    with open(source, encoding="utf-8") as answer:
+        document = answer.read()
+if "--json-output" in args and "STUB_NO_JSON_OUTPUT" not in os.environ:
+    target = args[args.index("--json-output") + 1]
+    with open(target, "w", encoding="utf-8") as written:
+        written.write(document)
 if "--format" in args and args[args.index("--format") + 1] == "json":
-    if "STUB_JSON_RAW" in os.environ:
-        sys.stdout.write(os.environ["STUB_JSON_RAW"])
-    else:
-        with open(os.environ["STUB_DOCUMENT"], encoding="utf-8") as document:
-            sys.stdout.write(document.read())
-    status = int(os.environ.get("STUB_JSON_EXIT", status))
+    sys.stdout.write(document)
 else:
     print("linter text output")
 sys.exit(status)
@@ -222,21 +231,25 @@ def run_action(tmp_path: Path) -> Any:
         inputs: dict[str, str] | None = None,
         document: dict[str, Any] | None = None,
         exit_status: int = 0,
-        json_exit: int | None = None,
         json_raw: str | None = None,
+        later_document: dict[str, Any] | None = None,
+        writes_json_output: bool = True,
     ) -> Run:
         """Execute the script.
 
         Args:
             inputs: Values keyed by Action input name. Unnamed inputs get
                 their declared default, else empty -- what GitHub passes.
-            document: What the stub returns for ``--format json``.
+            document: What the stub reports, both in the ``--json-output``
+                file and on stdout under ``--format json``.
             exit_status: What every stub invocation exits with.
-            json_exit: Overrides the exit status of ``--format json``
-                invocations alone, so the two text-mode runs can differ.
-            json_raw: Raw text to return for ``--format json`` in place
-                of ``document``, such as nothing, or something that is
-                not JSON.
+            json_raw: Raw text to report in place of ``document``, such
+                as nothing, or something that is not JSON.
+            later_document: What any invocation after the first reports:
+                the tree as a fixing run left it. A script that asks
+                twice then publishes the second, wrong, answer.
+            writes_json_output: False to impersonate a linter that
+                accepts no ``--json-output`` and leaves the file empty.
 
         Returns:
             What the run produced.
@@ -253,20 +266,27 @@ def run_action(tmp_path: Path) -> Any:
         summary.write_text("", encoding="utf-8")
         answer = tmp_path / "document.json"
         answer.write_text(json.dumps(document or CLEAN), encoding="utf-8")
+        runner_temp = tmp_path / "runner_temp"
+        runner_temp.mkdir(exist_ok=True)
 
         env = {
             "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
             "USE_UVX": "false",
+            "RUNNER_TEMP": str(runner_temp),
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
             "STUB_LOG": str(log),
             "STUB_DOCUMENT": str(answer),
             "STUB_EXIT": str(exit_status),
         }
-        if json_exit is not None:
-            env["STUB_JSON_EXIT"] = str(json_exit)
         if json_raw is not None:
             env["STUB_JSON_RAW"] = json_raw
+        if later_document is not None:
+            later = tmp_path / "later_document.json"
+            later.write_text(json.dumps(later_document), encoding="utf-8")
+            env["STUB_LATER_DOCUMENT"] = str(later)
+        if not writes_json_output:
+            env["STUB_NO_JSON_OUTPUT"] = "1"
         for name, spec in ACTION["inputs"].items():
             value = given.get(name, spec.get("default"))
             env["INPUT_" + name.upper().replace("-", "_")] = (
@@ -595,32 +615,38 @@ class TestAFailingRunStillReports:
 class TestOutputsNeverComeFromNothing:
     """No success is claimed without a document to base it on.
 
-    In text mode the second, JSON run is the only source of the
-    machine-readable outputs. Its status used to be ignored, so a
-    transient failure there left the outputs empty and the step green,
-    and the summary then read an empty object as a clean result: "All 0
-    action calls are valid".
+    The ``--json-output`` file is the only source of the machine-readable
+    outputs. A linter that leaves it empty -- one that crashed, or an
+    older release that refuses the option -- must not have its silence
+    read as a clean result: an empty object yields "All 0 action calls
+    are valid".
     """
 
-    def test_a_failed_json_run_fails_the_step(self, run_action: Any) -> None:
-        """The display run passed; the outputs could not be produced."""
-        result = run_action(json_exit=1, json_raw="")
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_a_linter_that_writes_no_document_fails_the_step(
+        self, run_action: Any, output_format: str
+    ) -> None:
+        """Even when the linter itself exits zero.
+
+        Args:
+            output_format: The Action's 'output-format' input.
+        """
+        result = run_action(
+            {"output-format": output_format}, writes_json_output=False
+        )
 
         assert result.returncode != 0
         assert SUCCESS not in result.summary
-        assert "::error" in result.stdout
+        assert "::error title=No results::" in result.stdout
+        assert json.loads(result.outputs["scan-summary"]) == {}
 
-    def test_its_status_is_kept_when_the_display_run_passed(
+    def test_the_linter_status_is_kept_when_the_document_is_missing(
         self, run_action: Any
     ) -> None:
-        """The two runs disagreed; the failure must not be the one lost."""
-        assert run_action(json_exit=5).returncode == 5
+        """A refused option exits 2; that, not a generic 1, is reported."""
+        result = run_action(exit_status=2, writes_json_output=False)
 
-    def test_the_display_status_wins_when_both_failed(
-        self, run_action: Any
-    ) -> None:
-        """The first run is the one a reader saw fail."""
-        assert run_action(exit_status=1, json_exit=5).returncode == 1
+        assert result.returncode == 2
 
     @pytest.mark.parametrize("output_format", ["text", "json"])
     @pytest.mark.parametrize(
@@ -666,36 +692,87 @@ class TestOutputsNeverComeFromNothing:
         assert json.loads(result.outputs["scan-summary"]) == {}
 
 
-class TestTheJsonRunMirrorsTheDisplayRun:
-    """Text mode runs twice; the second must ask the same question.
+class TestOneRunServesBothOutputs:
+    """The reader and the outputs must describe the same run.
 
-    Its arguments were once derived by deleting every argument equal to
-    ``text`` from the first, meant to strip ``--format text``. That also
-    deleted any path or exclude pattern that happened to be ``text``,
-    shifting everything after it.
+    Text mode used to run the linter a second time, with ``--format
+    json``, for the outputs. Under ``fix`` or ``update`` the first run
+    rewrote the tree, so the second examined the repaired files and
+    published zero errors, zero stale pins and zero fixes for exactly the
+    findings the step had acted on.
     """
 
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    def test_the_linter_runs_once(
+        self, run_action: Any, output_format: str
+    ) -> None:
+        """Args:
+        output_format: The Action's 'output-format' input.
+        """
+        result = run_action({"output-format": output_format})
+
+        assert len(result.invocations) == 1
+        assert result.value_of("--format") == output_format
+        assert result.value_of("--json-output")
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize("mode", ["fix", "update"])
+    def test_outputs_describe_the_run_that_fixed(
+        self, run_action: Any, output_format: str, mode: str
+    ) -> None:
+        """Any later look at the tree would find it already repaired.
+
+        Args:
+            output_format: The Action's 'output-format' input.
+            mode: A mode that rewrites files.
+        """
+        before = {
+            **CLEAN,
+            "validation_summary": {"total_errors": 2},
+            "allow_list": {"summary": {"stale": 3, "fixed": 3}},
+        }
+        after = {
+            **CLEAN,
+            "allow_list": {"summary": {"stale": 0, "fixed": 0}},
+        }
+
+        result = run_action(
+            {
+                "output-format": output_format,
+                "action-calls": mode,
+                "allow-list": "update",
+            },
+            before,
+            exit_status=1,
+            later_document=after,
+        )
+
+        assert result.outputs["errors-found"] == "2"
+        assert result.outputs["allow-list-stale"] == "3"
+        assert result.outputs["allow-list-fixed"] == "3"
+        assert json.loads(result.outputs["scan-summary"]) == before
+        assert "Found 2 validation errors" in result.summary
+
     def test_an_argument_spelled_text_survives(self, run_action: Any) -> None:
-        display, machine = run_action({"exclude": "text"}).invocations
+        """Arguments once were filtered by value, deleting any ``text``."""
+        result = run_action({"exclude": "text"})
 
-        assert "text" in machine[machine.index("--exclude") + 1 :]
-        assert machine.count("--exclude") == display.count("--exclude")
+        assert result.value_of("--exclude") == "text"
 
-    def test_only_the_format_differs(self, run_action: Any) -> None:
-        display, machine = run_action({"exclude": "a,b"}).invocations
+    def test_the_document_file_is_removed(
+        self, run_action: Any, tmp_path: Path
+    ) -> None:
+        """The runner's temporary directory outlives the step.
 
-        def without_format(args: list[str]) -> list[str]:
-            """Args:
-                args: An argument list.
+        Args:
+            tmp_path: The fixture's scratch directory, which holds the
+                ``RUNNER_TEMP`` it provides.
+        """
+        result = run_action()
 
-            Returns:
-                It, minus the ``--format`` option and its value.
-            """
-            position = args.index("--format")
-            return args[:position] + args[position + 2 :]
-
-        assert without_format(display) == without_format(machine)
-        assert machine[machine.index("--format") + 1] == "json"
+        written = result.value_of("--json-output") or ""
+        assert written.startswith(str(tmp_path / "runner_temp"))
+        assert not list((tmp_path / "runner_temp").iterdir())
 
 
 class TestTheSummaryOnlyClaimsWhatRan:
