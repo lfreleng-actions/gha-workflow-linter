@@ -164,15 +164,19 @@ runs:
       env:
         ACTION_PATH: ${{ github.action_path }}
       run: |
+        # A 'uses:' caller gets the whole repository at the ref it names,
+        # pyproject.toml included, so this installs that ref's own CLI.
+        # The Action and the CLI are one release: the step passes flags,
+        # such as '--json-output', that only a matching CLI accepts. The
+        # uvx branch serves a copy of action.yaml without its source
+        # tree, and gets the latest release from PyPI.
         if [[ -f "$ACTION_PATH/pyproject.toml" ]]; then
-          # Install from local source when running from the action repository
-          echo "Installing gha-workflow-linter from local source..."
+          echo "Installing gha-workflow-linter from the Action's source..."
           cd "$ACTION_PATH"
           uv pip install --system -e .
           echo "USE_UVX=false" >> "$GITHUB_ENV"
         else
-          # When used as external action, we'll use uvx to run latest from PyPI
-          echo "Will use uvx to run latest gha-workflow-linter from PyPI..."
+          echo "No source tree; using the latest gha-workflow-linter from PyPI"
           echo "USE_UVX=true" >> "$GITHUB_ENV"
         fi
 
@@ -222,8 +226,8 @@ runs:
           args+=(--log-level "$INPUT_LOG_LEVEL")
         fi
 
-        # '--format' is not stored in 'args': each invocation below
-        # chooses its own, so the JSON run needs nothing filtered out.
+        # '--format' is not stored in 'args': the invocation below adds
+        # it, and '--json-output', itself.
 
         if [[ "$INPUT_FAIL_ON_ERROR" == "false" ]]; then
           args+=(--no-fail-on-error)
@@ -386,41 +390,32 @@ runs:
           args+=(--allow-list-org "$INPUT_ALLOW_LIST_ORG")
         fi
 
-        # Run the linter. Its status is kept, not acted on at once: under
-        # GitHub's 'bash -e' a failing invocation used to abort the step
-        # right here, so the outputs and the summary below -- which
+        # Run the linter, once. Its status is kept, not acted on at once:
+        # under GitHub's 'bash -e' a failing invocation used to abort the
+        # step right here, so the outputs and the summary below -- which
         # matter most when the linter fails -- were written only when
         # there was nothing to report. The step still exits with the
         # linter's status, at the very end.
         #
-        # '--format' is chosen per invocation rather than stored in
-        # 'args'. Deriving the JSON run by deleting it afterwards meant
-        # deleting every argument equal to 'text', which silently
-        # dropped any such path or exclude pattern.
-        status=0
-        if [[ "$INPUT_OUTPUT_FORMAT" == "json" ]]; then
-          json_output=$($cmd_prefix lint "${args[@]}" --format json \
-            --no-cache) || status=$?
-        else
-          display_format=()
-          if [[ -n "$INPUT_OUTPUT_FORMAT" ]]; then
-            display_format=(--format "$INPUT_OUTPUT_FORMAT")
-          fi
-          $cmd_prefix lint "${args[@]}" "${display_format[@]}" \
-            --no-cache || status=$?
+        # The outputs come from '--json-output', whatever 'output-format'
+        # shows the reader. Text mode used to run the linter a second
+        # time with '--format json' for them. Under a fixing mode that
+        # second run examined a tree the first had already repaired, so
+        # 'errors-found' and 'allow-list-fixed' read zero for exactly the
+        # findings the step had fixed, and the API budget was spent
+        # twice. The file is created empty, so a linter that dies before
+        # writing leaves no document rather than a stale one.
+        document_file=$(mktemp "${RUNNER_TEMP:-/tmp}/gwl-document.XXXXXX")
+        trap 'rm -f "$document_file"' EXIT
 
-          # A second run, for the machine-readable outputs, which come
-          # from nowhere else. If the first run passed, this one's status
-          # stands: a transient failure here must not leave the step
-          # green with outputs that describe nothing. If the first run
-          # failed, its status is the one a reader saw, and stays.
-          json_status=0
-          json_output=$($cmd_prefix lint "${args[@]}" --format json \
-            --no-cache 2>/dev/null) || json_status=$?
-          if [[ "$status" -eq 0 ]]; then
-            status="$json_status"
-          fi
+        display_format=()
+        if [[ -n "$INPUT_OUTPUT_FORMAT" ]]; then
+          display_format=(--format "$INPUT_OUTPUT_FORMAT")
         fi
+        status=0
+        $cmd_prefix lint "${args[@]}" "${display_format[@]}" \
+          --json-output "$document_file" --no-cache || status=$?
+        json_output=$(cat "$document_file" 2>/dev/null || true)
 
         # Without a document there is no answer, and it must not be read
         # as a clean one: an empty object yields zero errors and zero

@@ -863,11 +863,13 @@ class TestRunLinter:
         mock_progress_instance.add_task.return_value = "task_id"
 
         with patch(
-            "gha_workflow_linter.cli.output_json_results"
-        ) as mock_json_output:
+            "gha_workflow_linter.cli._DocumentSink.publish"
+        ) as mock_publish:
             result = run_linter(self.config, options)
 
-            mock_json_output.assert_called_once()
+            mock_publish.assert_called_once()
+            (document,) = mock_publish.call_args.args
+            assert "validation_summary" in document
             assert result == 0
 
 

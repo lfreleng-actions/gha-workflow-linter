@@ -1106,6 +1106,44 @@ The tool writes the document to standard output on its own. Log records,
 warnings and progress commentary all go to standard error, so a parser
 can consume the output directly.
 
+To keep the text report for a reader and still hand a program the
+document, name a file with `--json-output`. One run then produces both,
+whatever `--format` prints:
+
+```bash
+gha-workflow-linter lint --action-calls fix --json-output /tmp/results.json
+```
+
+The file receives the same document `--format json` would print, on
+every path that prints one: a normal run, a scan with nothing to check,
+a refused configuration and a `--multi-repo` sweep. The tool writes it
+once, after the run has read everything it examines, and replaces the
+file rather than writing into it. The document cannot alter
+the run's inputs, and a link named as the output becomes a plain file
+instead of carrying the write through to the file it points at.
+
+The file must live outside the linted repository: the repository
+enclosing the scanned path, or the scanned path itself when no
+repository encloses it, as for a sweep's container. That keeps the
+document off workflows, `.git` in every form, and in-tree configuration.
+The Git metadata a worktree or submodule keeps elsewhere, named by its
+`.git` file, is out of bounds too, for every repository a sweep visits,
+as is any `GIT_DIR` or `GIT_COMMON_DIR` the environment sets.
+Anywhere else, the tool also refuses a name ending in an extension the
+scan reads (`scan_extensions`, and YAML always), a name an
+`allow_list.extra_globs` pattern could match, the `--config` file, the
+validation cache, a directory, and a path whose directory is missing or
+unwritable. It checks these against the loaded configuration,
+before any network call. A run refused before the configuration loads,
+such as for `--verbose` with `--quiet`, leaves the file alone.
+
+A run that fails before publishing leaves any earlier file in place, so
+check the exit status before trusting what the file holds.
+
+Running the tool twice, once per format, does not give the same answer
+under `fix` or `update`: the first run repairs the tree, and the second
+then reports none of what it repaired.
+
 ```json
 {
   "rate_limited": false,
@@ -1235,6 +1273,11 @@ file given with `config-file` still decides it.
 
 <!-- markdownlint-enable MD013 -->
 
+The Action runs the linter once, with `--json-output`, and reads every
+output from that run's document, and the outputs describe the run the
+log shows, including the findings a fixing mode repaired. With
+`output-format: json` the log shows the document itself.
+
 ## CLI Options
 
 ```text
@@ -1252,6 +1295,7 @@ Options:
   -q, --quiet                Suppress all output except errors
   --log-level LEVEL          Set logging level
   -f, --format FORMAT        Output format (text, json)
+  --json-output FILE         Also write the JSON document to FILE
   --fail-on-error            Exit with error code if failures found
   --no-fail-on-error         Don't exit with error code
   --parallel                 Enable parallel processing
