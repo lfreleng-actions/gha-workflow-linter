@@ -52,6 +52,11 @@ pytestmark = pytest.mark.skipif(
     reason="the Action's script needs bash and jq",
 )
 
+#: The step summary's claim of success. Asserted against by marker
+#: rather than by the word "valid", which also appears inside the
+#: "validation errors" of honest failure messages.
+SUCCESS = "✅"
+
 #: A clean result from a run in which every check executed.
 CLEAN = {
     "rate_limited": False,
@@ -68,11 +73,17 @@ import json, os, sys
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
 args = sys.argv[1:]
+status = int(os.environ.get("STUB_EXIT", "0"))
 if "--format" in args and args[args.index("--format") + 1] == "json":
-    with open(os.environ["STUB_DOCUMENT"], encoding="utf-8") as document:
-        sys.stdout.write(document.read())
+    if "STUB_JSON_RAW" in os.environ:
+        sys.stdout.write(os.environ["STUB_JSON_RAW"])
+    else:
+        with open(os.environ["STUB_DOCUMENT"], encoding="utf-8") as document:
+            sys.stdout.write(document.read())
+    status = int(os.environ.get("STUB_JSON_EXIT", status))
 else:
     print("linter text output")
+sys.exit(status)
 """
 
 
@@ -98,6 +109,7 @@ class Run:
         stdout: What the script wrote, including workflow commands.
         invocations: Argument lists the linter received, in order.
         summary: What was written to the step summary.
+        outputs: Step outputs, by name.
     """
 
     def __init__(
@@ -106,6 +118,7 @@ class Run:
         stdout: str,
         invocations: list[list[str]],
         summary: str,
+        outputs: dict[str, str],
     ) -> None:
         """Record a run.
 
@@ -114,11 +127,13 @@ class Run:
             stdout: What the script wrote.
             invocations: Argument lists the linter received.
             summary: The step summary contents.
+            outputs: Step outputs written to ``GITHUB_OUTPUT``.
         """
         self.returncode = returncode
         self.stdout = stdout
         self.invocations = invocations
         self.summary = summary
+        self.outputs = outputs
 
     @property
     def args(self) -> list[str]:
@@ -156,6 +171,33 @@ class Run:
         ]
 
 
+def _parse_outputs(text: str) -> dict[str, str]:
+    """Parse ``GITHUB_OUTPUT`` in both of its forms.
+
+    Args:
+        text: The file's contents: ``name=value`` lines, and
+            ``name<<DELIM`` blocks ended by a line reading ``DELIM``.
+
+    Returns:
+        Output values by name.
+    """
+    outputs: dict[str, str] = {}
+    lines = iter(text.splitlines())
+    for line in lines:
+        if "<<" in line:
+            name, delimiter = line.split("<<", 1)
+            block = []
+            for inner in lines:
+                if inner == delimiter:
+                    break
+                block.append(inner)
+            outputs[name] = "\n".join(block)
+        elif "=" in line:
+            name, value = line.split("=", 1)
+            outputs[name] = value
+    return outputs
+
+
 @pytest.fixture
 def run_action(tmp_path: Path) -> Any:
     """Provide a function that runs the script with chosen inputs.
@@ -179,6 +221,9 @@ def run_action(tmp_path: Path) -> Any:
     def run(
         inputs: dict[str, str] | None = None,
         document: dict[str, Any] | None = None,
+        exit_status: int = 0,
+        json_exit: int | None = None,
+        json_raw: str | None = None,
     ) -> Run:
         """Execute the script.
 
@@ -186,6 +231,12 @@ def run_action(tmp_path: Path) -> Any:
             inputs: Values keyed by Action input name. Unnamed inputs get
                 their declared default, else empty -- what GitHub passes.
             document: What the stub returns for ``--format json``.
+            exit_status: What every stub invocation exits with.
+            json_exit: Overrides the exit status of ``--format json``
+                invocations alone, so the two text-mode runs can differ.
+            json_raw: Raw text to return for ``--format json`` in place
+                of ``document``, such as nothing, or something that is
+                not JSON.
 
         Returns:
             What the run produced.
@@ -210,7 +261,12 @@ def run_action(tmp_path: Path) -> Any:
             "GITHUB_STEP_SUMMARY": str(summary),
             "STUB_LOG": str(log),
             "STUB_DOCUMENT": str(answer),
+            "STUB_EXIT": str(exit_status),
         }
+        if json_exit is not None:
+            env["STUB_JSON_EXIT"] = str(json_exit)
+        if json_raw is not None:
+            env["STUB_JSON_RAW"] = json_raw
         for name, spec in ACTION["inputs"].items():
             value = given.get(name, spec.get("default"))
             env["INPUT_" + name.upper().replace("-", "_")] = (
@@ -235,6 +291,7 @@ def run_action(tmp_path: Path) -> Any:
             completed.stdout,
             invocations,
             summary.read_text(encoding="utf-8"),
+            _parse_outputs(output.read_text(encoding="utf-8")),
         )
 
     return run
@@ -310,6 +367,99 @@ class TestModeInputsReachTheLinter:
         assert result.returncode == 2
         assert result.invocations == []
         assert "::error" in result.stdout
+
+
+class TestCallerDataCannotIssueWorkflowCommands:
+    """An input value must never become a workflow command.
+
+    GitHub reads every stdout line beginning ``::`` as a command. An
+    input echoed verbatim can therefore carry a newline and a command of
+    its own, forging an annotation. zizmor does not catch this: its
+    template-injection audit concerns ``${{ }}`` in ``run:``, and here
+    the value arrives safely through the environment and is only
+    dangerous once echoed.
+    """
+
+    PAYLOAD = "bad\n::warning title=Injected::payload"
+
+    def test_an_invalid_value_cannot_inject_a_command(
+        self, run_action: Any
+    ) -> None:
+        result = run_action({"allow-list": self.PAYLOAD})
+
+        assert result.returncode == 2
+        forged = [
+            line
+            for line in result.stdout.splitlines()
+            if "Injected" in line and line.startswith("::warning")
+        ]
+        assert not forged, f"injected command survived: {forged}"
+
+    def test_escaping_preserves_what_the_value_said(
+        self, run_action: Any
+    ) -> None:
+        """``%`` is escaped first, so a newline's escape survives intact.
+
+        This is fidelity, not security. The runner splits stdout into
+        commands on *raw* newlines before decoding, so no raw newline
+        reaching stdout is the whole of the security property, and both
+        orders achieve it. Escaping ``%`` last, though, turns the
+        ``%0A`` written for a newline into ``%250A``, which GitHub
+        renders as the literal text ``%0A`` -- the reader sees a value
+        that was never given.
+        """
+        result = run_action({"allow-list": "a\nb"})
+
+        (error,) = [
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith("::error")
+        ]
+        assert "a%0Ab" in error
+        assert "%250A" not in error
+
+    def test_the_refusal_still_says_what_was_wrong(
+        self, run_action: Any
+    ) -> None:
+        """Escaping must not cost the reader the actual value."""
+        result = run_action({"allow-list": "sometimes"})
+
+        (error,) = [
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith("::error")
+        ]
+        assert "sometimes" in error
+        assert "off, report or update" in error
+
+    def test_every_command_is_a_single_line(self, run_action: Any) -> None:
+        """No output line may start a command it did not intend to.
+
+        Across every deprecation path, each ``::`` line must be one this
+        script meant to write -- a warning or the one error -- so a
+        future message that echoes caller data trips this too.
+        """
+        for inputs in (
+            {"auto-fix": "false", "update-actions": "true"},
+            {"allow-list": "false", "update-allow-list": "true"},
+            {"action-calls": "report", "auto-fix": "false"},
+            {"allow-list": self.PAYLOAD},
+        ):
+            commands = [
+                line
+                for line in run_action(inputs).stdout.splitlines()
+                if line.startswith("::")
+            ]
+            assert all(
+                line.startswith(
+                    (
+                        "::warning title=Deprecated input::",
+                        "::error title=Invalid input::",
+                        "::error title=No results::",
+                    )
+                )
+                for line in commands
+            ), f"unexpected workflow command from {inputs}: {commands}"
 
 
 class TestDeprecatedInputsMeanWhatTheCliSays:
@@ -388,6 +538,166 @@ class TestDeprecatedInputsMeanWhatTheCliSays:
         assert any("ignored" in warning for warning in result.warnings)
 
 
+class TestAFailingRunStillReports:
+    """The linter failing is when the outputs matter most.
+
+    Under GitHub's ``bash -e``, a failing lint invocation used to abort
+    the step on the spot, so ``errors-found`` and the step summary were
+    only ever written when there was nothing to report. The linter's
+    status must still be the step's -- so the job fails -- but only
+    after the outputs are recorded.
+    """
+
+    DEFECTS = {
+        **CLEAN,
+        "validation_summary": {"total_errors": 2},
+    }
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize("status", [1, 5])
+    def test_outputs_and_summary_are_written(
+        self, run_action: Any, output_format: str, status: int
+    ) -> None:
+        """Defects exit 1; outdated calls under verification exit 5.
+
+        Args:
+            output_format: The Action's 'output-format' input.
+            status: What the linter exits with.
+        """
+        result = run_action(
+            {"output-format": output_format},
+            self.DEFECTS,
+            exit_status=status,
+        )
+
+        assert result.returncode == status
+        assert result.outputs["errors-found"] == "2"
+        assert result.outputs["total-calls"] == "7"
+        assert "Found 2 validation errors" in result.summary
+
+    def test_the_scan_summary_is_the_real_document(
+        self, run_action: Any
+    ) -> None:
+        """A failing JSON run must not append a fallback to its output.
+
+        ``$(linter || echo '{}')`` captures the linter's document *and*
+        the fallback when the linter fails, producing two JSON values
+        that no consumer of 'scan-summary' can parse.
+        """
+        result = run_action(document=self.DEFECTS, exit_status=1)
+
+        assert json.loads(result.outputs["scan-summary"]) == self.DEFECTS
+
+    def test_success_still_exits_zero(self, run_action: Any) -> None:
+        assert run_action().returncode == 0
+
+
+class TestOutputsNeverComeFromNothing:
+    """No success is claimed without a document to base it on.
+
+    In text mode the second, JSON run is the only source of the
+    machine-readable outputs. Its status used to be ignored, so a
+    transient failure there left the outputs empty and the step green,
+    and the summary then read an empty object as a clean result: "All 0
+    action calls are valid".
+    """
+
+    def test_a_failed_json_run_fails_the_step(self, run_action: Any) -> None:
+        """The display run passed; the outputs could not be produced."""
+        result = run_action(json_exit=1, json_raw="")
+
+        assert result.returncode != 0
+        assert SUCCESS not in result.summary
+        assert "::error" in result.stdout
+
+    def test_its_status_is_kept_when_the_display_run_passed(
+        self, run_action: Any
+    ) -> None:
+        """The two runs disagreed; the failure must not be the one lost."""
+        assert run_action(json_exit=5).returncode == 5
+
+    def test_the_display_status_wins_when_both_failed(
+        self, run_action: Any
+    ) -> None:
+        """The first run is the one a reader saw fail."""
+        assert run_action(exit_status=1, json_exit=5).returncode == 1
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "",
+            "not json",
+            "[]",
+            "{}",
+            "{}\n{}",
+            '{"scan_summary": {"total_calls": 1}}',
+        ],
+        ids=[
+            "empty",
+            "malformed",
+            "array",
+            "empty-object",
+            "two-objects",
+            "no-validation-summary",
+        ],
+    )
+    def test_an_unusable_document_is_not_a_clean_result(
+        self, run_action: Any, output_format: str, raw: str
+    ) -> None:
+        """Anything but one linter document means no answer.
+
+        ``{}`` is an object, and passed a type check, yet it yields zero
+        errors from zero calls -- "all valid". ``{}`` twice is a stream
+        of two values that each passed, and would have been published as
+        an unparsable 'scan-summary'. So a document must be exactly one
+        object, carrying the summaries the outputs are read from.
+
+        Args:
+            output_format: The Action's 'output-format' input.
+            raw: What the JSON run printed, with a zero status.
+        """
+        result = run_action({"output-format": output_format}, json_raw=raw)
+
+        assert result.returncode != 0
+        assert SUCCESS not in result.summary
+        assert result.outputs["errors-found"] == "0"
+        # Whatever is published must be one value a consumer can parse.
+        assert json.loads(result.outputs["scan-summary"]) == {}
+
+
+class TestTheJsonRunMirrorsTheDisplayRun:
+    """Text mode runs twice; the second must ask the same question.
+
+    Its arguments were once derived by deleting every argument equal to
+    ``text`` from the first, meant to strip ``--format text``. That also
+    deleted any path or exclude pattern that happened to be ``text``,
+    shifting everything after it.
+    """
+
+    def test_an_argument_spelled_text_survives(self, run_action: Any) -> None:
+        display, machine = run_action({"exclude": "text"}).invocations
+
+        assert "text" in machine[machine.index("--exclude") + 1 :]
+        assert machine.count("--exclude") == display.count("--exclude")
+
+    def test_only_the_format_differs(self, run_action: Any) -> None:
+        display, machine = run_action({"exclude": "a,b"}).invocations
+
+        def without_format(args: list[str]) -> list[str]:
+            """Args:
+                args: An argument list.
+
+            Returns:
+                It, minus the ``--format`` option and its value.
+            """
+            position = args.index("--format")
+            return args[:position] + args[position + 2 :]
+
+        assert without_format(display) == without_format(machine)
+        assert machine[machine.index("--format") + 1] == "json"
+
+
 class TestTheSummaryOnlyClaimsWhatRan:
     """The step summary is read by people who never open the log."""
 
@@ -403,7 +713,7 @@ class TestTheSummaryOnlyClaimsWhatRan:
 
         summary = run_action({"action-calls": "off"}, document).summary
 
-        assert "valid" not in summary
+        assert SUCCESS not in summary
         assert "did not run" in summary
 
     def test_a_throttled_run_is_not_reported_valid(
@@ -415,8 +725,56 @@ class TestTheSummaryOnlyClaimsWhatRan:
 
         summary = run_action(document=document).summary
 
-        assert "valid" not in summary
+        assert SUCCESS not in summary
         assert "rate-limited" in summary
+
+    @pytest.mark.parametrize("status", [1, 3, 4, 5])
+    def test_a_failing_step_never_claims_success(
+        self, run_action: Any, status: int
+    ) -> None:
+        """Zero validation errors is not a pass when the step fails.
+
+        Outdated calls under ``verify-action-calls`` exit 5, and stale or
+        unresolved allow-list pins exit 3 and 4, all with
+        ``total_errors`` at 0: those findings live elsewhere in the
+        document, or nowhere in it. A fixer that rewrote files exits 1,
+        also with no validation errors left. The summary is keyed on the
+        status rather than on one count, so every such status is covered
+        without this file restating the exit-code table.
+
+        Args:
+            status: A failing exit status with no validation errors.
+        """
+        summary = run_action(exit_status=status).summary
+
+        assert SUCCESS not in summary
+        assert f"exit status {status}" in summary
+
+    def test_a_setup_failure_is_reported_as_a_failure(
+        self, run_action: Any
+    ) -> None:
+        """Not as a check that quietly did not run.
+
+        A refused invocation emits a real document whose checks all
+        report ``ran: false``. Consulting that before the status told
+        the reader a check had been skipped, above a job that had failed.
+        """
+        document = {
+            "rate_limited": False,
+            "checks": {
+                "action-calls": {"mode": None, "ran": False},
+                "allow-list": {"mode": None, "ran": False},
+            },
+            "error": "Configuration error: unsupported mode",
+            "scan_summary": {},
+            "validation_summary": {},
+        }
+
+        summary = run_action(document=document, exit_status=1).summary
+
+        assert SUCCESS not in summary
+        assert "exit status 1" in summary
+        assert "did not run" not in summary
 
     def test_an_older_tool_is_summarised_as_before(
         self, run_action: Any

@@ -1206,7 +1206,7 @@ file given with `config-file` still decides it.
 | `require-pinned-sha`  | Require actions pinned to commit SHAs                         | No       | `true`  |
 | `skip-actions`        | Skip scanning action.yaml/action.yml files                    | No       | `false` |
 | `action-calls`        | Action-call check mode: `off`, `report`, `fix` or `update`    | No       |         |
-| `verify-action-calls` | Fail when an action call has a newer release                  | No       | `false` |
+| `verify-action-calls` | Fail on outdated action calls; not effective with `report`    | No       | `false` |
 | `auto-fix`            | Deprecated: use `action-calls`                                | No       | `true`  |
 | `update-actions`      | Deprecated: use `action-calls: update`                        | No       | `false` |
 | `allow-prerelease`    | Allow prerelease versions for latest                          | No       | `false` |

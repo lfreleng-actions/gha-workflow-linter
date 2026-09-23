@@ -62,8 +62,11 @@ inputs:
   verify-action-calls:
     description: >
       Fail the run, with exit status 5, when an action call has a newer
-      release available. Independent of 'action-calls': that says what
-      the check does, this says how its findings score.
+      release available. Effective with 'action-calls: fix' or 'update'.
+      With 'report' it cannot fail on outdated calls: staleness is
+      detected by the component that writes repairs, which 'report'
+      disables. Defect findings still fail the run in every mode that
+      runs the check.
     required: false
     default: "false"
   auto-fix:
@@ -219,9 +222,8 @@ runs:
           args+=(--log-level "$INPUT_LOG_LEVEL")
         fi
 
-        if [[ -n "$INPUT_OUTPUT_FORMAT" ]]; then
-          args+=(--format "$INPUT_OUTPUT_FORMAT")
-        fi
+        # '--format' is not stored in 'args': each invocation below
+        # chooses its own, so the JSON run needs nothing filtered out.
 
         if [[ "$INPUT_FAIL_ON_ERROR" == "false" ]]; then
           args+=(--no-fail-on-error)
@@ -267,6 +269,19 @@ runs:
           # arguments to keep lines short, and "$1" would drop all but
           # the first -- including the part saying what to use instead.
           echo "::warning title=Deprecated input::$*"
+        }
+
+        # Escape caller data before it enters a workflow command. GitHub
+        # reads every stdout line starting '::' as a command, so an input
+        # echoed verbatim can carry a newline and a command of its own.
+        # This is @actions/core's escapeData: '%' first, so the escapes it
+        # introduces are not themselves re-escaped, then CR and LF.
+        command_data() {
+          local value="$1"
+          value="${value//%/%25}"
+          value="${value//$'\r'/%0D}"
+          value="${value//$'\n'/%0A}"
+          printf '%s' "$value"
         }
 
         action_calls="$INPUT_ACTION_CALLS"
@@ -355,7 +370,7 @@ runs:
             ;;
           *)
             echo "::error title=Invalid input::'allow-list' must be" \
-              "off, report or update, not '$allow_list'"
+              "off, report or update, not '$(command_data "$allow_list")'"
             exit 2
             ;;
         esac
@@ -371,53 +386,87 @@ runs:
           args+=(--allow-list-org "$INPUT_ALLOW_LIST_ORG")
         fi
 
-        # Run gha-workflow-linter and capture output
+        # Run the linter. Its status is kept, not acted on at once: under
+        # GitHub's 'bash -e' a failing invocation used to abort the step
+        # right here, so the outputs and the summary below -- which
+        # matter most when the linter fails -- were written only when
+        # there was nothing to report. The step still exits with the
+        # linter's status, at the very end.
+        #
+        # '--format' is chosen per invocation rather than stored in
+        # 'args'. Deriving the JSON run by deleting it afterwards meant
+        # deleting every argument equal to 'text', which silently
+        # dropped any such path or exclude pattern.
+        status=0
         if [[ "$INPUT_OUTPUT_FORMAT" == "json" ]]; then
-          output=$($cmd_prefix lint "${args[@]}" --no-cache)
-          echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$output" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          # Extract error count from JSON
-          errors_found=$(echo "$output" | \
-            jq -r '.validation_summary.total_errors // 0')
-          total_calls=$(echo "$output" | \
-            jq -r '.scan_summary.total_calls // 0')
+          json_output=$($cmd_prefix lint "${args[@]}" --format json \
+            --no-cache) || status=$?
         else
-          # For text output, run twice, once for display and again for JSON
-          $cmd_prefix lint "${args[@]}" --no-cache
-          exit_code=$?
+          display_format=()
+          if [[ -n "$INPUT_OUTPUT_FORMAT" ]]; then
+            display_format=(--format "$INPUT_OUTPUT_FORMAT")
+          fi
+          $cmd_prefix lint "${args[@]}" "${display_format[@]}" \
+            --no-cache || status=$?
 
-          # Get JSON data for outputs - rebuild args with --format json
-          json_args=("${args[0]}")  # Keep the path
-          json_args+=(--format json)
-
-          # Add all other args except format-related ones
-          for arg in "${args[@]:1}"; do
-            if [[ "$arg" != "--format" && "$arg" != "text" ]]; then
-              json_args+=("$arg")
-            fi
-          done
-
-          json_output=$($cmd_prefix lint "${json_args[@]}" --no-cache \
-            2>/dev/null || echo '{}')
-
-          errors_found=$(echo "$json_output" | \
-            jq -r '.validation_summary.total_errors // 0' \
-              2>/dev/null || echo "0")
-          total_calls=$(echo "$json_output" | \
-            jq -r '.scan_summary.total_calls // 0' 2>/dev/null || echo "0")
-
-          echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$json_output" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          # A second run, for the machine-readable outputs, which come
+          # from nowhere else. If the first run passed, this one's status
+          # stands: a transient failure here must not leave the step
+          # green with outputs that describe nothing. If the first run
+          # failed, its status is the one a reader saw, and stays.
+          json_status=0
+          json_output=$($cmd_prefix lint "${args[@]}" --format json \
+            --no-cache 2>/dev/null) || json_status=$?
+          if [[ "$status" -eq 0 ]]; then
+            status="$json_status"
+          fi
         fi
+
+        # Without a document there is no answer, and it must not be read
+        # as a clean one: an empty object yields zero errors and zero
+        # calls, which the summary would call "all valid". So a document
+        # is exactly one object carrying the two summaries the outputs
+        # are read from. '-s' slurps the whole stream, so '{}' printed
+        # twice is seen as two values -- a filter applied per value
+        # passed each, and published a 'scan-summary' nothing can parse.
+        # Anything else is reported, the outputs are written empty, and
+        # a step that would otherwise pass fails.
+        #
+        # The former '$(linter || echo {})' also appended the fallback to
+        # a real document whenever the linter failed, yielding two JSON
+        # values that no consumer of 'scan-summary' could parse; the
+        # fallback now replaces the output rather than extending it.
+        have_document=true
+        if ! echo "$json_output" | jq -e -s '
+            length == 1
+            and (.[0] | type == "object")
+            and (.[0].scan_summary | type == "object")
+            and (.[0].validation_summary | type == "object")
+          ' >/dev/null 2>&1; then
+          have_document=false
+          json_output='{}'
+          echo "::error title=No results::The linter produced no usable" \
+            "machine-readable results, so the step outputs are empty"
+          if [[ "$status" -eq 0 ]]; then
+            status=1
+          fi
+        fi
+
+        echo "scan-summary<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$json_output" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+        errors_found=$(echo "$json_output" | \
+          jq -r '.validation_summary.total_errors // 0' \
+            2>/dev/null || echo "0")
+        total_calls=$(echo "$json_output" | \
+          jq -r '.scan_summary.total_calls // 0' 2>/dev/null || echo "0")
 
         # Allow-list counters come from the same JSON summary. Absent
         # keys (the check disabled, or an older tool) default to 0.
-        allow_list_stale=$(echo "${json_output:-$output}" | \
+        allow_list_stale=$(echo "$json_output" | \
           jq -r '.allow_list.summary.stale // 0' 2>/dev/null || echo "0")
-        allow_list_fixed=$(echo "${json_output:-$output}" | \
+        allow_list_fixed=$(echo "$json_output" | \
           jq -r '.allow_list.summary.fixed // 0' 2>/dev/null || echo "0")
 
         echo "errors-found=$errors_found" >> "$GITHUB_OUTPUT"
@@ -431,7 +480,7 @@ runs:
         # would describe an examination that never happened. The keys
         # default so that an older tool without them is summarised as
         # it always was.
-        summary_json="${json_output:-$output}"
+        summary_json="$json_output"
         rate_limited=$(echo "$summary_json" | \
           jq -r '.rate_limited // false' 2>/dev/null || echo "false")
         action_calls_ran=$(echo "$summary_json" | \
@@ -439,19 +488,41 @@ runs:
                  else .checks["action-calls"].ran end' \
             2>/dev/null || echo "true")
 
-        if [[ "$rate_limited" == "true" ]]; then
+        # Ordered by importance. A failed step outranks a skipped check:
+        # a refused invocation reports every check as unrun, and saying
+        # so above a red job reads as a benign skip. Only a rate limit
+        # comes first, because it explains the failure it causes.
+        if [[ "$have_document" != "true" ]]; then
+          echo "❌ The linter produced no usable results; see the log" \
+            >> "$GITHUB_STEP_SUMMARY"
+        elif [[ "$rate_limited" == "true" ]]; then
           echo "⚠️ GitHub API rate-limited; enabled checks did not run" \
+            >> "$GITHUB_STEP_SUMMARY"
+        elif [[ "$errors_found" -gt 0 ]]; then
+          echo "❌ Found $errors_found validation errors out of $total_calls" \
+          >> "$GITHUB_STEP_SUMMARY"
+        elif [[ "$status" -ne 0 ]]; then
+          # Failed with no validation errors: outdated calls under
+          # verification, stale or unresolved allow-list pins, files the
+          # fixer rewrote, or a refused invocation. Those findings are
+          # counted elsewhere in the document, or not at all, so success
+          # is ruled out by the status itself. It is reported by number
+          # rather than described, so this script holds no second copy
+          # of the exit-code table to drift from the linter's.
+          echo "❌ Linter failed with exit status $status and no" \
+            "validation errors; see the log for the findings" \
             >> "$GITHUB_STEP_SUMMARY"
         elif [[ "$action_calls_ran" != "true" ]]; then
           echo "⚠️ Action-call checking did not run; no action calls" \
             "were checked" >> "$GITHUB_STEP_SUMMARY"
-        elif [[ "$errors_found" -eq 0 ]]; then
+        else
           echo "✅ All $total_calls action calls are valid!" \
             >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo "❌ Found $errors_found validation errors out of $total_calls" \
-          >> "$GITHUB_STEP_SUMMARY"
         fi
+
+        # The linter's status, recorded above, is the step's -- so a
+        # failing run still fails the job, now that it has reported.
+        exit "$status"
 
 branding:
   icon: "shield"

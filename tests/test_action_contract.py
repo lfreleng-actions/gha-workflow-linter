@@ -71,10 +71,12 @@ NOT_EXPOSED: dict[str, str] = {
     "_help": "not an operational option",
 }
 
-#: Flags appended to the argument arrays, or given on the ``lint``
-#: invocation itself. Scoped to those two forms on purpose: the script
-#: also runs ``uvx --from ...``, and ``--from`` is not a linter option.
-_ARGS_APPEND = re.compile(r"(?:json_)?args\+=\(([^)]*)\)")
+#: Flags placed in an argument array, or given on the ``lint``
+#: invocation itself. Scoped to those forms on purpose: the script also
+#: runs ``uvx --from ...``, and ``--from`` is not a linter option. The
+#: script is matched after joining ``\``-continued lines, since a long
+#: invocation is wrapped across several.
+_ARRAY_LITERAL = re.compile(r"\b\w+\+?=\(([^)]*)\)")
 _LINT_INVOCATION = re.compile(r"\$cmd_prefix lint ([^\n]*)")
 _FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 
@@ -100,8 +102,8 @@ def _emitted_flags() -> set[str]:
     Returns:
         Flag spellings such as ``--no-parallel``.
     """
-    script = _run_step()["run"]
-    fragments = [m.group(1) for m in _ARGS_APPEND.finditer(script)]
+    script = _run_step()["run"].replace("\\\n", " ")
+    fragments = [m.group(1) for m in _ARRAY_LITERAL.finditer(script)]
     fragments += [m.group(1) for m in _LINT_INVOCATION.finditer(script)]
     return {flag for text in fragments for flag in _FLAG.findall(text)}
 
