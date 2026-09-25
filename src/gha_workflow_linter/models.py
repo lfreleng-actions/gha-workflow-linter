@@ -749,6 +749,12 @@ class CLIOptions(BaseModel):
     verbose: bool = Field(default=False, description="Verbose output")
     quiet: bool = Field(default=False, description="Quiet mode")
     output_format: str = Field(default="text", description="Output format")
+    json_output: Path | None = Field(
+        default=None,
+        description=(
+            "File to write the JSON document to, whatever --format prints"
+        ),
+    )
     fail_on_error: bool = Field(
         default=True, description="Exit with error on failures"
     )
