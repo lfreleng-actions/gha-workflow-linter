@@ -168,6 +168,11 @@ runs:
           # Install from local source when running from the action repository
           echo "Installing gha-workflow-linter from local source..."
           cd "$ACTION_PATH"
+          # The runner's copy of an action has no .git, so hatch-vcs
+          # cannot read a version; supply one rather than fail the build.
+          if ! git -C "$ACTION_PATH" rev-parse --git-dir >/dev/null 2>&1; then
+            export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+action"
+          fi
           uv pip install --system -e .
           echo "USE_UVX=false" >> "$GITHUB_ENV"
         else
