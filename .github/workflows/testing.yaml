@@ -39,12 +39,6 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
       - name: 'Checkout sample repository'
         # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -54,7 +48,7 @@ jobs:
           persist-credentials: false
 
       - name: "Running local action: ${{ github.repository }}"
-        uses: ./
+        uses: $/
         with:
           path: 'actions-template'
         env:
