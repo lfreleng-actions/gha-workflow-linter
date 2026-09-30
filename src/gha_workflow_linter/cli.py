@@ -3070,8 +3070,9 @@ def _allow_list_paths(
 
     paths: list[Path] = list(scanner.find_workflow_files(options.path))
     seen = set(paths)
+    ignored = scanner.ignored_paths(options.path)
     for pattern in config.allow_list.extra_globs:
-        for path in sorted(_glob_files(options.path, pattern)):
+        for path in ignored.keep(sorted(_glob_files(options.path, pattern))):
             if path not in seen:
                 seen.add(path)
                 paths.append(path)

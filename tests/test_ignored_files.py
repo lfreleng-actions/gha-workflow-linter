@@ -139,7 +139,6 @@ def scanner() -> WorkflowScanner:
 class TestDiscoveryLeavesOutIgnoredFiles:
     """The two tree walks consult git's ignore rules."""
 
-    @pytest.mark.xfail(strict=True, reason="issue #378")
     def test_ignored_workflows_and_actions_are_not_discovered(
         self, tmp_path: Path, scanner: WorkflowScanner
     ) -> None:
@@ -188,7 +187,6 @@ class TestDiscoveryLeavesOutIgnoredFiles:
 
         assert ".github/workflows/CI.yml" in _found(scanner, root)
 
-    @pytest.mark.xfail(strict=True, reason="issue #378")
     def test_a_subdirectory_scan_applies_the_repository_rules(
         self, tmp_path: Path, scanner: WorkflowScanner
     ) -> None:
@@ -217,6 +215,48 @@ class TestDiscoveryLeavesOutIgnoredFiles:
         """
         root = _repository(tmp_path / "repo")
         package = root / "node_modules" / "pkg"
+
+        assert _found(scanner, package) == {".github/workflows/ci.yml"}
+
+    def test_an_ignored_root_does_not_rely_on_git_failing(
+        self,
+        tmp_path: Path,
+        scanner: WorkflowScanner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The root check, not a git error, keeps a named directory whole.
+
+        Asked to list ignored files from inside an ignored directory, git
+        2.55 fails with "directory entry not superset of prefix", and the
+        unfiltered fallback happens to give the right answer. This stands
+        in for a git that answers instead, reporting the files ignored:
+        without the explicit root check, the scan would then find nothing.
+        """
+        root = _repository(tmp_path / "repo")
+        package = root / "node_modules" / "pkg"
+        guarded = subprocess.run
+
+        def answering_git(*args: Any, **kwargs: Any) -> Any:
+            """List every file as ignored when asked from the package.
+
+            Args:
+                args: Positional arguments as ``subprocess.run`` takes them.
+                kwargs: Keyword arguments, passed through.
+
+            Returns:
+                The stand-in listing, or the real result.
+            """
+            cmd = args[0] if args else kwargs.get("args", [])
+            if (
+                isinstance(cmd, list)
+                and "ls-files" in cmd
+                and str(package) in cmd
+            ):
+                listing = b".github/workflows/ci.yml\0"
+                return subprocess.CompletedProcess(cmd, 0, listing, b"")
+            return guarded(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", answering_git)
 
         assert _found(scanner, package) == {".github/workflows/ci.yml"}
 
@@ -275,7 +315,6 @@ class TestDiscoveryLeavesOutIgnoredFiles:
 class TestTheOwningRepositoryAnswers:
     """Git is asked about the scanned repository, whatever it inherits."""
 
-    @pytest.mark.xfail(strict=True, reason="issue #378")
     def test_an_inherited_git_dir_does_not_leak_another_repositorys_rules(
         self,
         tmp_path: Path,
@@ -305,7 +344,6 @@ class TestTheOwningRepositoryAnswers:
 class TestPatternSelectionLeavesOutIgnoredFiles:
     """Globs select like discovery; literal paths are the caller's word."""
 
-    @pytest.mark.xfail(strict=True, reason="issue #378")
     def test_a_files_glob_does_not_reach_into_ignored_directories(
         self, tmp_path: Path, scanner: WorkflowScanner
     ) -> None:
@@ -331,7 +369,6 @@ class TestPatternSelectionLeavesOutIgnoredFiles:
 
         assert [p.relative_to(root).as_posix() for p in found] == [target]
 
-    @pytest.mark.xfail(strict=True, reason="issue #378")
     def test_allow_list_extra_globs_leave_out_ignored_files(
         self, tmp_path: Path, scanner: WorkflowScanner
     ) -> None:
@@ -395,7 +432,6 @@ def run_real_git(
 class TestIgnoredFilesAreNeverRewritten:
     """The issue's headline, through the command a hook runs."""
 
-    @pytest.mark.xfail(strict=True, reason="issue #378")
     def test_lint_fixes_ours_and_leaves_the_dependency_alone(
         self,
         tmp_path: Path,

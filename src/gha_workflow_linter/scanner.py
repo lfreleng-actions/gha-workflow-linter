@@ -19,6 +19,19 @@ if TYPE_CHECKING:
 import yaml
 
 from .action_call_scanner import ActionCallPatterns
+from .git_ignored import IgnoredPaths
+
+
+def _is_glob(pattern: str) -> bool:
+    """Report whether a ``--files`` pattern is a glob rather than a path.
+
+    Args:
+        pattern: A pattern as the caller passed it.
+
+    Returns:
+        True when the pattern holds a wildcard.
+    """
+    return "*" in pattern or "?" in pattern
 
 
 class _ComposeResult(NamedTuple):
@@ -51,6 +64,29 @@ class WorkflowScanner:
         # Memoises "is this directory a repository root?" for the life of
         # the scanner; a deep tree asks about the same ancestors often.
         self._repository_roots: dict[Path, bool] = {}
+        # Git's ignored set per scan root, asked for once per scanner, so
+        # discovery and every caller reading the same root agree.
+        self._ignored: dict[Path, IgnoredPaths] = {}
+
+    def ignored_paths(self, root_path: Path) -> IgnoredPaths:
+        """Git's ignored set beneath ``root_path``, asked for once.
+
+        Discovery leaves these out: a gitignored ``node_modules/`` holds
+        third-party workflows that are not the repository's to lint or
+        rewrite (issue #378). Callers that glob for files the scan will
+        read, such as ``allow_list.extra_globs``, use the same answer.
+
+        Args:
+            root_path: Scan root.
+
+        Returns:
+            The ignored set, inactive when git gave no answer.
+        """
+        ignored = self._ignored.get(root_path)
+        if ignored is None:
+            ignored = IgnoredPaths(root_path, self.config.git.timeout_seconds)
+            self._ignored[root_path] = ignored
+        return ignored
 
     def find_workflow_files(
         self,
@@ -70,6 +106,7 @@ class WorkflowScanner:
             Path objects for workflow files and action definition files
         """
         self.logger.debug(f"Scanning for workflows and actions in: {root_path}")
+        ignored = self.ignored_paths(root_path)
 
         # Look for .github/workflows directories
         workflow_dirs = self._find_workflow_directories(root_path)
@@ -81,7 +118,7 @@ class WorkflowScanner:
 
             for ext in self.config.scan_extensions:
                 pattern = f"*{ext}"
-                workflow_files = list(workflow_dir.glob(pattern))
+                workflow_files = ignored.keep(workflow_dir.glob(pattern))
 
                 for workflow_file in workflow_files:
                     if self._should_exclude_file(workflow_file):
@@ -100,7 +137,7 @@ class WorkflowScanner:
 
         # Look for action.yaml/action.yml files (unless skip_actions is enabled)
         if not self.config.skip_actions:
-            action_files = self._find_action_files(root_path)
+            action_files = ignored.keep(self._find_action_files(root_path))
             for action_file in action_files:
                 if self._should_exclude_file(action_file):
                     self.logger.debug(f"Excluding file: {action_file}")
@@ -508,19 +545,29 @@ class WorkflowScanner:
     def _resolve_file_pattern(
         self, root_path: Path, pattern: str
     ) -> list[Path]:
-        """Resolve a single file pattern to workflow/action file paths."""
+        """Resolve a single file pattern to workflow/action file paths.
+
+        A literal path is the caller's word and is honoured as named, even
+        inside a gitignored directory. A glob selects as discovery does,
+        so it leaves out what git ignores: its recursive fallback would
+        otherwise reach into ``node_modules/`` (issue #378).
+        """
         pattern_path = Path(pattern)
+        if not _is_glob(pattern):
+            if pattern_path.is_absolute():
+                return self._resolve_absolute_pattern(pattern, pattern_path)
+            return self._resolve_relative_file(root_path, pattern)
         if pattern_path.is_absolute():
-            return self._resolve_absolute_pattern(pattern, pattern_path)
-        if "*" in pattern or "?" in pattern:
-            return self._resolve_glob_pattern(root_path, pattern)
-        return self._resolve_relative_file(root_path, pattern)
+            matches = self._resolve_absolute_pattern(pattern, pattern_path)
+        else:
+            matches = self._resolve_glob_pattern(root_path, pattern)
+        return self.ignored_paths(root_path).keep(matches)
 
     def _resolve_absolute_pattern(
         self, pattern: str, pattern_path: Path
     ) -> list[Path]:
         """Resolve an absolute path or absolute glob pattern."""
-        if "*" in pattern or "?" in pattern:
+        if _is_glob(pattern):
             parent = pattern_path.parent
             if not parent.exists():
                 return []
