@@ -170,13 +170,13 @@ class TestRepositoryRootDetectionIsCached:
     def test_repeated_queries_stat_once(self, tmp_path: Path) -> None:
         _mark_repository(tmp_path, as_file=False)
         scanner = WorkflowScanner(Config())
-        target = tmp_path / "a" / "b"
-        target.mkdir(parents=True)
+        (tmp_path / "a" / "b").mkdir(parents=True)
 
-        scanner._crosses_repository_boundary(target, tmp_path)
+        list(scanner._walk(tmp_path))
         cached = dict(scanner._repository_roots)
-        scanner._crosses_repository_boundary(target, tmp_path)
+        list(scanner._walk(tmp_path))
 
+        assert cached
         assert scanner._repository_roots == cached
 
     def test_unreadable_directory_is_not_a_boundary(
