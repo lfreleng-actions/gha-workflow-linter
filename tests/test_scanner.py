@@ -628,7 +628,7 @@ jobs:
 
         try:
             # Use absolute path
-            resolved = self.scanner._resolve_specific_files(
+            resolved = self.scanner.resolve_specific_files(
                 temp_dir, [str(workflow_file.resolve())]
             )
 
@@ -660,7 +660,7 @@ jobs:
 
         try:
             # Use relative path
-            resolved = self.scanner._resolve_specific_files(
+            resolved = self.scanner.resolve_specific_files(
                 temp_dir, [".github/workflows/test.yml"]
             )
 
@@ -693,7 +693,7 @@ jobs:
 
         try:
             # Use wildcard pattern
-            resolved = self.scanner._resolve_specific_files(temp_dir, ["*.yml"])
+            resolved = self.scanner.resolve_specific_files(temp_dir, ["*.yml"])
 
             assert len(resolved) == 2
             file_names = {f.name for f in resolved}
