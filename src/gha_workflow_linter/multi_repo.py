@@ -4,7 +4,7 @@
 """Discovery of the repositories a multi-repository run should visit.
 
 Scanning stops at repository boundaries (see
-:meth:`gha_workflow_linter.scanner.WorkflowScanner._crosses_repository_boundary`),
+:meth:`gha_workflow_linter.scanner.WorkflowScanner._walk`),
 so pointing the linter at a directory that merely *contains* repositories
 finds nothing: every child is a boundary. That is the correct behaviour
 for a single run, and this module is the sanctioned way to cover many --
