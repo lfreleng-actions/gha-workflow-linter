@@ -90,6 +90,8 @@ from .utils import has_test_comment
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 
+    from .git_ignored import IgnoreScope
+
 
 def _get_relative_path(file_path: Path, base_path: Path) -> Path:
     """
@@ -2052,17 +2054,27 @@ def _gathered(source: Callable[[], Iterable[Path]]) -> set[Path]:
     return found
 
 
-def _glob_files(repository: Path, pattern: str) -> Iterator[Path]:
+def _glob_files(
+    repository: Path, pattern: str, scope: IgnoreScope | None = None
+) -> Iterator[Path]:
     """List the files an ``allow_list.extra_globs`` pattern reads.
 
     Args:
         repository: The repository the pattern is relative to.
         pattern: The pattern.
+        scope: When given, ignored directories are not entered. Their
+            files would be left out afterwards; without it every match
+            is listed, as vetting needs.
 
     Yields:
         Each matching file, as the allow-list stage globs it.
     """
-    yield from (path for path in repository.glob(pattern) if path.is_file())
+    matches = (
+        repository.glob(pattern)
+        if scope is None
+        else scope.glob(repository, pattern)
+    )
+    yield from (path for path in matches if path.is_file())
 
 
 def _dependabot_files(repository: Path) -> list[Path]:
@@ -3070,8 +3082,10 @@ def _allow_list_paths(
 
     paths: list[Path] = list(scanner.find_workflow_files(options.path))
     seen = set(paths)
+    ignored = scanner.ignored_paths(options.path)
     for pattern in config.allow_list.extra_globs:
-        for path in sorted(_glob_files(options.path, pattern)):
+        matches = _glob_files(options.path, pattern, ignored)
+        for path in ignored.keep(sorted(matches)):
             if path not in seen:
                 seen.add(path)
                 paths.append(path)
