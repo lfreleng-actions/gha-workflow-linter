@@ -88,6 +88,7 @@ def _said(result: Any) -> str:
 class TestTheFileDescribesThisRun:
     """Whatever ``--format`` prints, the file holds the run's document."""
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_text_mode_writes_the_document_beside_the_text(
         self, temp_dir: Path
     ) -> None:
@@ -122,6 +123,7 @@ class TestTheFileDescribesThisRun:
         assert "nonexistent/action" in result.stdout
         assert '"validation_summary"' not in result.stdout
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_json_mode_prints_and_writes_the_same_document(
         self, temp_dir: Path
     ) -> None:

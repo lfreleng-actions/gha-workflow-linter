@@ -1112,6 +1112,7 @@ validation_method: git
             # The fixer reported no changes, so the workflow is intact.
             assert workflow_file.read_text() == workflow_with_mixed_references
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_error_count_summary_with_pinned_sha_not_required(
         self,
         temp_dir: Path,
@@ -1237,6 +1238,7 @@ jobs:
       - uses: actions/setup-python@v4.7.0
 """
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_auto_fix_disabled(self, temp_dir: Path) -> None:
         """Test that auto-fix respects the auto_fix=false setting."""
         workflow_content = """name: Test
@@ -1557,6 +1559,7 @@ jobs:
             assert fixer is not None
             assert hasattr(fixer, "fix_validation_errors")
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_cli_with_explicit_auto_fix_flags(self, temp_dir: Path) -> None:
         """Test CLI with explicit auto-fix related flags - simplified."""
         # Use a valid SHA-pinned action to avoid validation errors
@@ -1904,6 +1907,7 @@ jobs:
             or "parsing" in result.stderr.lower()
         )
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_auto_fix_exit_codes(self, temp_dir: Path) -> None:
         """Test that auto-fix produces correct exit codes."""
         # Test with a valid SHA-pinned workflow

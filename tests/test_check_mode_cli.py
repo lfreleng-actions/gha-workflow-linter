@@ -185,35 +185,24 @@ class TestAModeSettlesTheWholeBehaviour:
                 config, CLIOptions(allow_list_mode=CheckMode.FIX)
             )
 
-    def test_report_does_not_yet_detect_staleness(
+    def test_report_detects_staleness_without_writing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Records a known gap at its cause, so the fix has to flip it.
+        """In ``report`` the calls reach detection, and no rewrite runs.
 
-        Currency detection lives inside the fixer, and ``report``
-        disables the fixer because it must not write. Two gates enforce
-        that, and either one alone would be enough:
-
-            should_run_auto_fix = (...) and (
-                validation.validation_errors or config.auto_fix
-            )
-            all_calls = validation.workflow_calls if config.auto_fix else {}
-
-        So in ``report`` mode a clean repository never constructs the
-        fixer at all, and one with defects constructs it but offers it
-        no calls to examine. Either way nothing can be found stale, so
-        ``--action-calls report --verify-action-calls`` cannot fail on
-        outdated calls.
-
-        When detection is split from remediation, the calls will reach
-        it in ``report`` too, this assertion will fail, and it should be
-        replaced by one asserting staleness *is* reported.
+        Currency detection used to live inside the fixer, and ``report``
+        disabled the fixer because it must not write, so
+        ``--action-calls report --verify-action-calls`` could not fail on
+        outdated calls (#388). Detection is now its own entry point:
+        every call reaches it, and the fixer's rewriting path is offered
+        none.
 
         Args:
             tmp_path: Scratch directory, used as the scan root.
             monkeypatch: Installs the recording double.
         """
-        handed_over: list[dict[Path, dict[int, ActionCall]]] = []
+        examined: list[dict[Path, dict[int, ActionCall]]] = []
+        offered_for_rewrite: list[dict[Path, dict[int, ActionCall]]] = []
 
         class RecordingFixer:
             """Stands in for AutoFixer, recording what it is given."""
@@ -260,8 +249,25 @@ class TestAModeSettlesTheWholeBehaviour:
                 Returns:
                     An empty outcome.
                 """
-                handed_over.append(all_calls)
+                offered_for_rewrite.append(all_calls)
                 return {}, {"actions_moved": 0, "calls_updated": 0}, {}
+
+            async def find_outdated(
+                self,
+                errors: object,
+                all_calls: dict[Path, dict[int, ActionCall]],
+            ) -> dict[str, list[dict[str, str]]]:
+                """Record the calls examined for staleness.
+
+                Args:
+                    errors: Validation errors, ignored.
+                    all_calls: The calls to examine.
+
+                Returns:
+                    One outdated call, as detection would report it.
+                """
+                examined.append(all_calls)
+                return {"w.yaml": [{"line": "7"}]}
 
         monkeypatch.setattr(cli, "AutoFixer", RecordingFixer)
 
@@ -282,7 +288,7 @@ class TestAModeSettlesTheWholeBehaviour:
         )
         workflow_calls = {tmp_path / "w.yaml": {7: call}}
 
-        cli._run_auto_fix_stage(
+        outcome = cli._run_auto_fix_stage(
             config,
             CLIOptions(path=tmp_path, verify_actions=True),
             ValidationCache(config.cache),
@@ -294,10 +300,10 @@ class TestAModeSettlesTheWholeBehaviour:
             ),
         )
 
-        # A real, examinable call exists, and the fixer never sees it:
-        # in report mode with no defects it is not even constructed.
-        # That is precisely why report cannot report staleness.
-        assert handed_over == []
+        assert examined == [workflow_calls]
+        assert all(calls == {} for calls in offered_for_rewrite)
+        assert outcome.stale_actions_summary == {"w.yaml": [{"line": "7"}]}
+        assert outcome.fixed_files == {}
 
     def test_no_mode_leaves_the_legacy_settings_alone(self) -> None:
         config = Config(auto_fix=False)

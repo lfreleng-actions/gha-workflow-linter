@@ -62,11 +62,10 @@ inputs:
   verify-action-calls:
     description: >
       Fail the run, with exit status 5, when an action call has a newer
-      release available. Effective with 'action-calls: fix' or 'update'.
-      With 'report' it cannot fail on outdated calls: staleness is
-      detected by the component that writes repairs, which 'report'
-      disables. Defect findings still fail the run in every mode that
-      runs the check.
+      release available. Effective in every mode that runs the check,
+      'report' included, so pins can be audited without writing.
+      Defect findings still fail the run in every mode that runs the
+      check.
     required: false
     default: "false"
   auto-fix:

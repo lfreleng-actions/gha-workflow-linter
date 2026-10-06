@@ -151,7 +151,6 @@ def _lint(root: Path, *args: str) -> Any:
 class TestReportFindsOutdatedCalls:
     """The issue's acceptance criteria, through the real command."""
 
-    @pytest.mark.xfail(strict=True, reason="#388: report skips detection")
     def test_verify_fails_on_an_outdated_call_without_writing(
         self, tmp_path: Path, newest: dict[str, str]
     ) -> None:
@@ -166,7 +165,6 @@ class TestReportFindsOutdatedCalls:
         assert "outdated" in result.output
         assert workflow.read_text() == WORKFLOW
 
-    @pytest.mark.xfail(strict=True, reason="#388: report skips detection")
     def test_report_lists_it_and_stays_advisory(
         self, tmp_path: Path, newest: dict[str, str]
     ) -> None:
@@ -179,7 +177,6 @@ class TestReportFindsOutdatedCalls:
         assert "Found 1 outdated action call" in result.output
         assert workflow.read_text() == WORKFLOW
 
-    @pytest.mark.xfail(strict=True, reason="#388: report skips detection")
     def test_json_output_fails_the_same_way(
         self, tmp_path: Path, newest: dict[str, str]
     ) -> None:
@@ -277,7 +274,6 @@ class TestDetectionMatchesFixMode:
     """``report`` finds exactly what ``fix`` would report, no more."""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(strict=True, reason="#388: no detection entry point")
     async def test_the_same_calls_are_outdated(
         self, tmp_path: Path, newest: dict[str, str]
     ) -> None:
@@ -328,9 +324,7 @@ class TestDetectionMatchesFixMode:
                     from_fix,
                 ) = await fixer.fix_validation_errors(errors, calls)
         async with AutoFixer(config, base_path=tmp_path) as fixer:
-            from_report = await fixer.find_outdated(  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
-                errors, calls
-            )
+            from_report = await fixer.find_outdated(errors, calls)
 
         assert from_report == from_fix
         assert [entry["line"] for entry in from_report["ci.yml"]] == [1]
@@ -339,7 +333,6 @@ class TestDetectionMatchesFixMode:
 class TestAnUnansweredQuestionIsNotAPass:
     """``--verify-action-calls`` asks a question in ``report`` too."""
 
-    @pytest.mark.xfail(strict=True, reason="#388: report asks nothing")
     def test_a_throttled_report_run_says_it_could_not_look(
         self, tmp_path: Path
     ) -> None:
@@ -364,7 +357,6 @@ class TestAnUnansweredQuestionIsNotAPass:
             CLIOptions(path=tmp_path, verify_actions=True), config
         )
 
-    @pytest.mark.xfail(strict=True, reason="#388: a failed check passes")
     def test_a_detection_stage_that_failed_fails_a_verifying_run(
         self, tmp_path: Path
     ) -> None:

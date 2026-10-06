@@ -245,22 +245,21 @@ the run.
 ```bash
 # Repair what the linter can, and fail if anything remains outdated
 gha-workflow-linter lint --action-calls fix --verify-action-calls
+
+# Audit pins without touching the working tree
+gha-workflow-linter lint --action-calls report --verify-action-calls
 ```
 
 The two axes stay orthogonal on purpose. `--action-calls fix` answers
 *change my files*; `--verify-action-calls` answers *fail my build*.
-Neither implies the other, and you want both together. Defect
+Neither implies the other, and you want both together. Every mode that
+runs the check detects outdated calls, so `--verify-action-calls` fails
+on them in `report` as in `fix` and `update`; `report` reads release
+information from GitHub to do so, as the other modes do. Defect
 findings — a reference that is wrong now — always count towards the
 exit code in **every mode that runs the check**. `off` sits outside
 that statement rather than contradicting it: a check that detects
 nothing has nothing to count.
-
-> **Known limitation.** `--action-calls report --verify-action-calls`
-> does not yet fail on outdated calls. The component that detects
-> staleness is the same one that writes repairs, so `report` — which
-> must not write — skips detection as well. Use
-> `--action-calls fix --verify-action-calls` until that split lands.
-> Defect findings still fail the run in `report`, as always.
 
 #### Superseded flags
 

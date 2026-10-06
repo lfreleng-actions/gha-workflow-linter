@@ -195,6 +195,95 @@ class AutoFixer(_VersionResolutionMixin):
                 )
             return {}, {"actions_moved": 0, "calls_updated": 0}, {}
 
+        (
+            fixes_by_file,
+            skipped_by_file,
+            stale_actions_summary,
+        ) = await self._plan(
+            errors, all_action_calls, check_for_updates=check_for_updates
+        )
+
+        # Apply fixes to files
+        applied_fixes: dict[Path, list[dict[str, str]]] = {}
+        for file_path, line_fixes in fixes_by_file.items():
+            try:
+                changes = await self._apply_fixes_to_file(file_path, line_fixes)
+                applied_fixes[file_path] = changes
+            except Exception as e:
+                self.write_failures.append(file_path)
+                self.logger.error(f"Failed to apply fixes to {file_path}: {e}")
+
+        # Add skipped items to the output
+        for file_path, skipped_lines in skipped_by_file.items():
+            if file_path not in applied_fixes:
+                applied_fixes[file_path] = []
+            for line_num, old_line in skipped_lines.items():
+                applied_fixes[file_path].append(
+                    {
+                        "old_line": old_line,
+                        "new_line": old_line,
+                        "line_number": str(line_num),
+                        "skipped": "true",
+                    }
+                )
+
+        redirect_stats = {
+            "actions_moved": len(self._redirects_found),
+            "calls_updated": self._redirect_updates,
+        }
+
+        return applied_fixes, redirect_stats, stale_actions_summary
+
+    async def find_outdated(
+        self,
+        errors: list[ValidationError],
+        all_action_calls: dict[Path, dict[int, ActionCall]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Report the outdated action calls ``fix`` would report, writing nothing.
+
+        Runs exactly the plan :meth:`fix_validation_errors` runs without
+        advancing versions, and keeps only its outdated summary, so the
+        two can never disagree about what is outdated. A defect the fixer
+        would repair rather than report -- an invalid reference or
+        repository, or an unpinned call where pinning is required -- is
+        left out, as are calls marked as tests unless ``fix_test_calls``
+        is set. Nothing is written, whatever ``auto_fix`` says.
+
+        Args:
+            errors: Validation errors found for the calls.
+            all_action_calls: The calls to examine, by file and line.
+
+        Returns:
+            Outdated calls, keyed by path relative to ``base_path``.
+        """
+        _fixes, _skipped, outdated = await self._plan(
+            errors, all_action_calls, check_for_updates=False
+        )
+        return outdated
+
+    async def _plan(
+        self,
+        errors: list[ValidationError],
+        all_action_calls: dict[Path, dict[int, ActionCall]],
+        *,
+        check_for_updates: bool,
+    ) -> tuple[
+        dict[Path, dict[int, tuple[str, str]]],
+        dict[Path, dict[int, str]],
+        dict[str, list[dict[str, Any]]],
+    ]:
+        """Decide every rewrite and outdated call, writing nothing.
+
+        Args:
+            errors: Validation errors found for the calls.
+            all_action_calls: The calls to examine, by file and line.
+            check_for_updates: Whether outdated calls become rewrites
+                rather than findings.
+
+        Returns:
+            Planned rewrites by file and line, calls skipped as tests,
+            and the outdated summary keyed by relative path.
+        """
         fixes_by_file: dict[Path, dict[int, tuple[str, str]]] = {}
         skipped_by_file: dict[Path, dict[int, str]] = {}
         stale_actions_summary: dict[str, list[dict[str, Any]]] = {}
@@ -305,36 +394,7 @@ class AutoFixer(_VersionResolutionMixin):
 
             stale_actions_summary = stale_summary
 
-        # Apply fixes to files
-        applied_fixes: dict[Path, list[dict[str, str]]] = {}
-        for file_path, line_fixes in fixes_by_file.items():
-            try:
-                changes = await self._apply_fixes_to_file(file_path, line_fixes)
-                applied_fixes[file_path] = changes
-            except Exception as e:
-                self.write_failures.append(file_path)
-                self.logger.error(f"Failed to apply fixes to {file_path}: {e}")
-
-        # Add skipped items to the output
-        for file_path, skipped_lines in skipped_by_file.items():
-            if file_path not in applied_fixes:
-                applied_fixes[file_path] = []
-            for line_num, old_line in skipped_lines.items():
-                applied_fixes[file_path].append(
-                    {
-                        "old_line": old_line,
-                        "new_line": old_line,
-                        "line_number": str(line_num),
-                        "skipped": "true",
-                    }
-                )
-
-        redirect_stats = {
-            "actions_moved": len(self._redirects_found),
-            "calls_updated": self._redirect_updates,
-        }
-
-        return applied_fixes, redirect_stats, stale_actions_summary
+        return fixes_by_file, skipped_by_file, stale_actions_summary
 
     def _collect_skipped_testing_items(
         self, errors: list[ValidationError]
