@@ -707,6 +707,41 @@ def no_repository_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def no_outdated_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer ``report`` mode's staleness detection without asking GitHub.
+
+    ``report`` looks up the newest release of every action it finds
+    (#388), as ``fix`` always has. A test that runs the command in
+    ``report`` for some other reason, with validation stubbed, would
+    otherwise reach github.com through those lookups. This answers that
+    nothing is outdated, which is what ``report`` used to find, so such
+    a test keeps asserting what it was written to assert.
+
+    Args:
+        monkeypatch: Used to replace detection.
+    """
+
+    async def nothing_outdated(
+        _self: object, _errors: object, _calls: object
+    ) -> dict[str, list[dict[str, object]]]:
+        """Report no outdated call.
+
+        Args:
+            _self: The fixer, unused.
+            _errors: Validation errors, unused.
+            _calls: The calls to examine, unused.
+
+        Returns:
+            An empty summary.
+        """
+        return {}
+
+    monkeypatch.setattr(
+        action_call_fix.AutoFixer, "find_outdated", nothing_outdated
+    )
+
+
+@pytest.fixture
 def real_client_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Restore the startup refresh for a test that is about it.
 

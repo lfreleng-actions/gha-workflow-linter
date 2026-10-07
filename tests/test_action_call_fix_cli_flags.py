@@ -15,6 +15,7 @@ from tests.conftest import strip_ansi
 class TestAutoFixCLIFlags:
     """Test CLI flags for auto-fix configuration - functional tests only."""
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_no_auto_fix_flag_disables_auto_fix(
         self,
         temp_dir: Path,

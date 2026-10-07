@@ -41,6 +41,8 @@ from typer.testing import CliRunner
 
 from gha_workflow_linter import exit_codes
 from gha_workflow_linter.action_call_check import ActionCallValidator
+from gha_workflow_linter.action_call_fix import AutoFixer
+from gha_workflow_linter.check_modes import CheckMode
 from gha_workflow_linter.cli import (
     RunOutcome,
     _apply_cli_overrides,
@@ -609,25 +611,37 @@ class TestRateLimitedExitCode:
             == exit_codes.SUCCESS
         )
 
-    def test_verifying_actions_needs_the_fixer_too(
+    def test_verifying_actions_asks_whenever_the_check_runs(
         self, tmp_path: Path
     ) -> None:
-        """``--verify-actions`` is answered by the fixer's detection.
+        """``--verify-actions`` is answered by detection, in every mode.
 
-        With auto-fix off nothing detects an outdated call, so the flag
-        can produce no finding and asks the API nothing.
+        ``report`` detects outdated calls too (#388), so a throttled
+        ``report --verify-actions`` run cannot claim the pins are
+        current. Only ``off``, which runs no check, asks nothing.
 
         Args:
             tmp_path: Repository root.
         """
-        config = Config()
-        config.auto_fix = False
-
         assert (
             _exit_code(
-                _options(tmp_path, verify_actions=True),
+                _options(
+                    tmp_path,
+                    verify_actions=True,
+                    action_calls_mode=CheckMode.REPORT,
+                ),
                 rate_limited=True,
-                config=config,
+            )
+            == exit_codes.RATE_LIMITED
+        )
+        assert (
+            _exit_code(
+                _options(
+                    tmp_path,
+                    verify_actions=True,
+                    action_calls_mode=CheckMode.OFF,
+                ),
+                rate_limited=True,
             )
             == exit_codes.SUCCESS
         )
@@ -1236,6 +1250,10 @@ class TestCommandHandoff:
             mock.patch.object(
                 ActionCallValidator, "validate_action_calls", return_value=[]
             ),
+            # Neither stage is what this asserts, and both reach the API
+            # on a healthy run: detection resolves versions, in report
+            # mode too, and the allow-list check resolves its host.
+            mock.patch.object(AutoFixer, "find_outdated", return_value={}),
         ):
             result = CliRunner().invoke(
                 app,
@@ -1246,9 +1264,6 @@ class TestCommandHandoff:
                     "json",
                     "--validation-method",
                     "github-api",
-                    # Neither stage is what this asserts, and both reach
-                    # the API on a healthy run: the fixer resolves
-                    # versions, the allow-list check resolves its host.
                     "--no-auto-fix",
                     "--no-allow-list",
                     "--github-token",

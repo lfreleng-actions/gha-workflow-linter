@@ -2533,6 +2533,10 @@ def _run_auto_fix_stage(
 ) -> _AutoFixOutcome:
     """Run the auto-fixer and report the resulting changes.
 
+    In ``report`` it rewrites nothing but still detects outdated calls,
+    so ``--verify-action-calls`` has findings to fail on in every mode
+    that runs the check (#388).
+
     Auto-fix failures are logged and swallowed so the linter can still
     report validation results.
     """
@@ -2555,8 +2559,12 @@ def _run_auto_fix_stage(
     # - If auto_fix is enabled, fix validation errors and check for outdated
     #   versions.
     # - If update_actions is also enabled, update to latest versions.
-    should_run_auto_fix = (config.auto_fix or not config.fix_test_calls) and (
-        validation.validation_errors or config.auto_fix
+    # - In 'report' it still detects outdated calls, writing nothing, so
+    #   --verify-action-calls has findings to fail on in every mode.
+    detects_only = not config.auto_fix and bool(validation.workflow_calls)
+    should_run_auto_fix = detects_only or (
+        (config.auto_fix or not config.fix_test_calls)
+        and (validation.validation_errors or config.auto_fix)
     )
     if not should_run_auto_fix:
         return _AutoFixOutcome(
@@ -2581,12 +2589,34 @@ def _run_auto_fix_stage(
                 # check. check_for_updates=True only when update_actions is
                 # enabled (update to latest versions); False means: fix
                 # validation errors, report outdated versions.
-                all_calls = validation.workflow_calls if config.auto_fix else {}
-                check_for_updates = config.update_actions
+                if not config.auto_fix:
+                    # The legacy call, made exactly when it always was:
+                    # with auto_fix off it writes nothing and only collects
+                    # calls skipped as tests. Detection is a separate,
+                    # read-only pass over every call.
+                    skipped: dict[Path, list[dict[str, str]]] = {}
+                    redirects = {"actions_moved": 0, "calls_updated": 0}
+                    if (
+                        not config.fix_test_calls
+                        and validation.validation_errors
+                    ):
+                        (
+                            skipped,
+                            redirects,
+                            _,
+                        ) = await auto_fixer.fix_validation_errors(
+                            validation.validation_errors,
+                            {},
+                            check_for_updates=config.update_actions,
+                        )
+                    outdated = await auto_fixer.find_outdated(
+                        validation.validation_errors, validation.workflow_calls
+                    )
+                    return skipped, redirects, outdated, []
                 result = await auto_fixer.fix_validation_errors(
                     validation.validation_errors,
-                    all_calls,
-                    check_for_updates=check_for_updates,
+                    validation.workflow_calls,
+                    check_for_updates=config.update_actions,
                 )
                 # Read inside the context: a rewrite that failed leaves
                 # no trace in the returned tuple.
@@ -3112,9 +3142,9 @@ def _demanded_an_answer(options: CLIOptions, config: Config) -> bool:
     throttle must not fail work that would not have run anyway: with
     ``--no-allow-list`` the allow-list stage never runs, so
     ``--verify-allow-list`` beside it asks nothing of the API and is
-    inert whether or not GitHub is throttling. The action-call settings
-    depend on the fixer the same way, since it is what detects an
-    outdated call and what rewrites one.
+    inert whether or not GitHub is throttling. ``--verify-actions`` is
+    answered by the action-call check's detection, which runs in every
+    mode but ``off``; ``--update-actions`` only by its fixer.
 
     Args:
         options: Resolved CLI options.
@@ -3124,11 +3154,13 @@ def _demanded_an_answer(options: CLIOptions, config: Config) -> bool:
         ``True`` when reporting success would claim work the run did not
         do, or an answer it never obtained.
     """
-    wanted_from_fixer = options.verify_actions or config.update_actions
+    wanted_from_action_calls = (
+        config.action_calls_mode.runs and options.verify_actions
+    ) or (config.auto_fix and config.update_actions)
     wanted_from_allow_list = (
         config.allow_list.verify or config.allow_list.update
     )
-    return (config.auto_fix and wanted_from_fixer) or (
+    return wanted_from_action_calls or (
         config.allow_list.enabled and wanted_from_allow_list
     )
 
@@ -3179,13 +3211,16 @@ def _determine_exit_code(
         codes.append(exit_codes.DEFECTS_FOUND)
 
     # A stage that failed outright leaves even less behind. It only
-    # fails the run when updating was explicitly requested, though:
-    # auto-fix runs by default, and a stage that could not reach the
-    # network must not stop a developer committing, exactly as the
+    # fails the run when the caller asked a question the stage alone
+    # answers: auto-fix runs by default, and a stage that could not reach
+    # the network must not stop a developer committing, exactly as the
     # allow-list check degrades in advisory mode. Asking for
-    # --update-actions is asking for work to be done, so silently doing
-    # none of it is a different matter.
-    if autofix.stage_error and config.update_actions:
+    # --update-actions is asking for work to be done, and asking for
+    # --verify-actions is asking whether the pins are current; a stage
+    # that crashed did neither, so reporting success would claim both.
+    if autofix.stage_error and (
+        config.update_actions or options.verify_actions
+    ):
         codes.append(exit_codes.DEFECTS_FOUND)
 
     # Files modified on disk are reported as a failure so a CI job or a

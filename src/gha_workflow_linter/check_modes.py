@@ -58,16 +58,10 @@ and no mode downgrades them; see :mod:`gha_workflow_linter.exit_codes`.
 ``off`` is outside that statement rather than a counter-example to it --
 a check that detects nothing has nothing to count.
 
-.. note::
-
-   The two axes are not yet fully independent in one direction.
-   Currency *detection* currently lives inside the fixer, which
-   ``report`` disables because it must not write -- so
-   ``--action-calls report --verify-action-calls`` reports no outdated
-   calls and cannot fail on them. ``fix`` and ``update`` detect and
-   enforce correctly. Separating detection from remediation is the
-   change that closes this, and it is deliberately not folded in here:
-   it alters what an existing ``--no-auto-fix`` run reports.
+The two axes are independent in both directions. Currency *detection*
+runs in every mode but ``off``, separately from remediation: ``report``
+finds exactly the outdated calls ``fix`` would report, without writing,
+so ``--action-calls report --verify-action-calls`` fails on them.
 
 A check need not offer every rung. :class:`CheckSpec` declares which it
 supports, so an unsupported one is refused at parse time with a reason

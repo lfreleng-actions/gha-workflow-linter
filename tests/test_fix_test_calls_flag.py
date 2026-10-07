@@ -483,6 +483,7 @@ jobs:
             # Should execute without error
             assert result.exit_code in [0, 1]
 
+    @pytest.mark.usefixtures("no_outdated_calls")
     def test_no_fix_test_calls_without_auto_fix(
         self,
         runner: CliRunner,
