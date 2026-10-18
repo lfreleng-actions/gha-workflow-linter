@@ -53,18 +53,14 @@ fi
 success "uv found: $(command -v uv)"
 
 # Install development dependencies
-info "Installing gha-workflow-linter in development mode..."
-uv pip install -e ".[dev]"
+info "Creating .venv with gha-workflow-linter and its dev extras..."
+uv sync --extra dev
 success "Development dependencies installed"
 
-# Install pre-commit
-info "Installing pre-commit hooks..."
-if ! command -v pre-commit &> /dev/null; then
-    uv pip install pre-commit
-fi
-
-pre-commit install
-success "Pre-commit hooks installed"
+# Install git hooks
+info "Installing git hooks with prek..."
+uv run prek install
+success "Git hooks installed"
 
 # Set up GitHub token if not present
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
@@ -82,30 +78,25 @@ fi
 
 # Test the installation
 info "Testing gha-workflow-linter installation..."
-if command -v gha-workflow-linter &> /dev/null; then
-    # Test CLI command
-    python -m gha_workflow_linter.cli --help > /dev/null
-    success "gha-workflow-linter CLI working"
-else
-    warning "gha-workflow-linter command not in PATH, use: python -m gha_workflow_linter.cli"
-fi
+uv run gha-workflow-linter --help > /dev/null
+success "gha-workflow-linter CLI working"
 
 # Run self-linting test with local development version
 info "Running self-linting test with local development version..."
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    python -m gha_workflow_linter.cli . --quiet
+    uv run gha-workflow-linter lint . --quiet
     success "Self-linting test passed (local version)"
 else
     warning "Skipping self-linting test (no GitHub token)"
 fi
 
-# Test pre-commit
-info "Testing pre-commit setup..."
-pre-commit run --all-files > /dev/null 2>&1 || {
-    warning "Some pre-commit checks failed (this is normal on first run)"
-    info "Run 'pre-commit run --all-files' to see details"
+# Test the hooks
+info "Testing git hooks..."
+uv run prek run --all-files > /dev/null 2>&1 || {
+    warning "Some hooks failed"
+    info "Run 'uv run prek run --all-files' to see details"
 }
-success "Pre-commit setup complete (uses published version for consistency)"
+success "Git hooks setup complete"
 
 echo ""
 success "Development environment setup complete!"
@@ -113,8 +104,8 @@ echo ""
 echo "Next steps:"
 echo "1. Set GITHUB_TOKEN environment variable (if not done)"
 echo "2. Run tests: uv run pytest"
-echo "3. Run linting: pre-commit run --all-files (uses published version)"
-echo "4. Test local CLI: python -m gha_workflow_linter.cli --help"
-echo "5. Test local changes: python -m gha_workflow_linter.cli . --quiet"
+echo "3. Run linting: uv run prek run --all-files"
+echo "4. Test local CLI: uv run gha-workflow-linter --help"
+echo "5. Test local changes: uv run gha-workflow-linter lint . --quiet"
 echo ""
 echo "Happy coding! 🚀"

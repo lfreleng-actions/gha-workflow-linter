@@ -1437,7 +1437,7 @@ ruff check .
 mypy src/gha_workflow_linter
 
 # Pre-commit hooks
-pre-commit run --all-files
+prek run --all-files
 ```
 
 ### Building and Publishing
@@ -1522,8 +1522,8 @@ For contributors, use the development setup script. It needs
 ./scripts/setup-dev.sh
 
 # This sets up:
-# - Development dependencies
-# - Pre-commit hooks (including gha-workflow-linter)
+# - A .venv with the development dependencies (uv sync --extra dev)
+# - Git hooks through prek (including gha-workflow-linter)
 # - GitHub authentication (GitHub CLI recommended)
 # - Self-linting test
 ```
