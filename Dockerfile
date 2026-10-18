@@ -31,11 +31,16 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install uv package manager
-RUN pip install --no-cache-dir uv==0.5.11
+# Install uv package manager (ghcr.io/astral-sh/uv:0.13.1)
+COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /uvx /bin/
+
+# The build context carries no .git, so hatch-vcs cannot derive the
+# version; release builds pass the real one with --build-arg VERSION=
+ARG VERSION=0.0.0
 
 # Install gha-workflow-linter
-RUN uv pip install --system --no-cache .
+RUN SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION}" \
+    uv pip install --system --no-cache .
 
 # Switch to non-root user
 USER linter

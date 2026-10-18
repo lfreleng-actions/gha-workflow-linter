@@ -1376,6 +1376,13 @@ docker run --rm -v "$(pwd):/workspace" \
   gha-workflow-linter lint /workspace
 ```
 
+The build context excludes `.git`, so a local image reports version
+`0.0.0`. To stamp a real version, pass it as a build argument:
+
+```bash
+docker build --build-arg VERSION=1.2.3 -t gha-workflow-linter .
+```
+
 ## Error Types
 
 <!-- markdownlint-disable MD013 -->
