@@ -1513,7 +1513,9 @@ repos:
 
 ### Development Setup
 
-For contributors, use the development setup script:
+For contributors, use the development setup script. It needs
+[uv](https://docs.astral.sh/uv/getting-started/installation/) on your
+`PATH` and exits with an error if `uv` is missing:
 
 ```bash
 # Install development environment with self-linting

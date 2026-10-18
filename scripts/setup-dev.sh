@@ -45,15 +45,12 @@ if ! python3 -c "import sys; exit(0 if sys.version_info >= (3, 9) else 1)" 2>/de
 fi
 success "Python version check passed: $python_version"
 
-# Install uv if not present
+# Require uv rather than installing it: piping a remote installer
+# into a shell runs unverified code, and installer paths change.
 if ! command -v uv &> /dev/null; then
-    info "Installing uv package manager..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.cargo/bin:$PATH"
-    success "uv installed successfully"
-else
-    success "uv already installed"
+    error "uv not found on PATH; install it first: https://docs.astral.sh/uv/getting-started/installation/"
 fi
+success "uv found: $(command -v uv)"
 
 # Install development dependencies
 info "Installing gha-workflow-linter in development mode..."
