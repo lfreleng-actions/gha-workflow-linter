@@ -110,6 +110,163 @@ class TestDetectionLocations:
         assert [pin.key_path[3] for pin in pins] == ["0", "1", "2", "3", "4"]
 
 
+class TestEnvLocation:
+    """Location 4: a coordinate held in an ``env:`` variable."""
+
+    def test_workflow_and_job_env_pins(self, scanner: AllowListScanner) -> None:
+        """Both ``env:`` levels are walked, in document order."""
+        pins = scan(scanner, "env_variables.yaml")
+
+        assert key_paths(pins) == [
+            "env.HARDEN_RUNNER_ALLOWLIST",
+            "jobs.build.env.allow_list",
+        ]
+        assert [pin.spec.ref for pin in pins] == [SHA_V0_5_1, SHA_V0_1_1]
+
+    def test_workflow_env_pin_anchor(self, scanner: AllowListScanner) -> None:
+        """The pin carries its line, quoting and version comment."""
+        pin = scan(scanner, "env_variables.yaml")[0]
+
+        assert pin.line_number == 16
+        assert pin.column == 27
+        assert pin.quote_style is QuoteStyle.SINGLE
+        assert pin.comment_position is CommentPosition.YAML
+        assert pin.version_comment == "v0.5.1"
+        assert pin.auto_fixable is True
+
+    def test_yamllint_directive_does_not_suppress(
+        self, scanner: AllowListScanner
+    ) -> None:
+        """A ``yamllint`` comment on the line above is not a directive."""
+        pins = scan(scanner, "env_variables.yaml")
+
+        assert all(pin.directives == frozenset() for pin in pins)
+
+    def test_unrecognised_env_keys_are_not_pins(
+        self, scanner: AllowListScanner
+    ) -> None:
+        """A spec-shaped value under an unrelated key is left alone."""
+        paths = key_paths(scan(scanner, "env_variables.yaml"))
+
+        assert "env.BUILD_ORG" not in paths
+        assert "env.PYTHON_AUDIT_CONFIG" not in paths
+
+    def test_env_consumer_expression_is_skipped(
+        self, scanner: AllowListScanner
+    ) -> None:
+        """``config: ${{ env.X }}`` is still not a pin."""
+        paths = key_paths(scan(scanner, "env_variables.yaml"))
+
+        assert "jobs.build.steps.0.with.config" not in paths
+
+    def test_env_names_conventional_filename(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """The filename qualifies a pin under any key name."""
+        path = tmp_path / "env-filename.yaml"
+        path.write_text(
+            "---\n"
+            "env:\n"
+            "  AUDIT_CONFIG: 'lfreleng-actions//.github/python-audit/"
+            f"lfreleng-actions/allow_list.txt@{SHA_V0_12_2}'\n",
+            encoding="utf-8",
+        )
+
+        assert key_paths(scanner.scan_file(path)) == ["env.AUDIT_CONFIG"]
+
+    def test_env_without_a_mapping_is_harmless(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """An expression-valued or empty ``env:`` yields nothing."""
+        for text in (
+            "env: ${{ fromJSON(inputs.env) }}\n",
+            "env:\n",
+            "jobs:\n  build:\n    env: [a]\n",
+        ):
+            path = tmp_path / "env.yaml"
+            path.write_text(f"---\n{text}", encoding="utf-8")
+
+            assert scanner.scan_file(path) == []
+
+
+class TestAliases:
+    """One anchored scalar reached from two locations is one pin.
+
+    PyYAML composes an alias as the very node its anchor produced, so
+    the walk offers that node once per location. Two pins sharing a
+    line would make the fixer refuse the whole file.
+    """
+
+    def test_env_anchor_consumed_by_step_config(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """``&pin`` on an ``env`` variable, ``*pin`` under ``with.config``."""
+        path = tmp_path / "alias.yaml"
+        path.write_text(
+            "---\n"
+            "env:\n"
+            f"  HARDEN_RUNNER_ALLOWLIST: &pin '@{SHA_V0_5_1}'  # v0.5.1\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - uses: lfreleng-actions/harden-runner-block-action@x\n"
+            "        with:\n"
+            "          config: *pin\n",
+            encoding="utf-8",
+        )
+
+        pins = scanner.scan_file(path)
+
+        assert key_paths(pins) == ["env.HARDEN_RUNNER_ALLOWLIST"]
+        assert pins[0].line_number == 3
+
+    def test_anchored_env_mapping_shared_by_jobs(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """A whole ``env`` mapping anchored in one job and merged into another."""
+        path = tmp_path / "alias.yaml"
+        path.write_text(
+            "---\n"
+            "jobs:\n"
+            "  build:\n"
+            "    env: &shared\n"
+            f"      allow_list: '@{SHA_V0_5_1}'  # v0.5.1\n"
+            "  test:\n"
+            "    env: *shared\n",
+            encoding="utf-8",
+        )
+
+        pins = scanner.scan_file(path)
+
+        assert key_paths(pins) == ["jobs.build.env.allow_list"]
+
+    def test_unrecognised_alias_does_not_hide_the_pin(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """A node is seen only once it has produced a pin.
+
+        The anchor sits under a key the recogniser rejects and the
+        alias under one it accepts; the pin must still be found, under
+        the accepting key.
+        """
+        path = tmp_path / "alias.yaml"
+        path.write_text(
+            "---\n"
+            "env:\n"
+            f"  SOME_CONFIG: &pin '@{SHA_V0_5_1}'  # v0.5.1\n"
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      allow_list: *pin\n",
+            encoding="utf-8",
+        )
+
+        pins = scanner.scan_file(path)
+
+        assert key_paths(pins) == ["jobs.build.env.allow_list"]
+        assert pins[0].line_number == 3
+
+
 class TestYamlOneOneTriggerKey:
     """The bare ``on:`` key, which YAML 1.1 resolves to a boolean."""
 

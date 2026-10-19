@@ -221,7 +221,9 @@ side of the quote it falls on.
 ### Values we must *not* treat as pins
 
 - `config: ${{ inputs.harden_runner_allowlist }}` — a GitHub expression,
-  resolved at run time. Not a pin; skip silently.
+  resolved at run time. Not a pin; skip silently. Where the expression
+  reads an `env:` variable (`config: ${{ env.HARDEN_RUNNER_ALLOWLIST }}`)
+  the pin is the variable's value, which §5.1 detects as location 4.
 - `config: 'lfreleng-actions@main'` — a branch ref. Not stale by SHA
   comparison, but *unpinned*; reported under a separate finding kind.
 
@@ -294,7 +296,7 @@ dependency and gives us both precision *and* exact source positions.
 Stage 1 — **structural identification** (`allow_list_scanner.py`):
 
 Walk the composed node tree of each workflow / action file and collect
-candidate scalars from three known locations:
+candidate scalars from four known locations:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -303,6 +305,7 @@ candidate scalars from three known locations:
 | 1   | `jobs.<job>.steps[*].with.config` — the shared resolver's input is always named `config`   | `config: '@18d9c444…'`                                   |
 | 2   | `on.workflow_call.inputs.<name>.default` where the value parses as a valid spec            | `default: 'lfreleng-actions//…/allow_list.txt@bf6642f…'` |
 | 3   | `jobs.<job>.with.<name>` (reusable-workflow caller) where the value parses as a valid spec | `harden_runner_allowlist: '…@bf6642f…'`                  |
+| 4   | `env.<name>` and `jobs.<job>.env.<name>` where the value parses as a valid spec            | `HARDEN_RUNNER_ALLOWLIST: '…/allow_list.txt@8f4f0cf…'`   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -310,7 +313,7 @@ candidate scalars from three known locations:
 *syntax* — an input named `config`, or a scalar that parses as a valid
 config spec — never on which action happens to consume it. See §5.4.
 
-**Recogniser predicate** for locations 2 and 3 (where the key name is
+**Recogniser predicate** for locations 2, 3 and 4 (where the key name is
 arbitrary) — the scalar qualifies when it parses as a valid spec **and**
 either:
 

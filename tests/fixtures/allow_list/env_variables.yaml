@@ -1,0 +1,34 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Location 4: a coordinate held in an 'env:' variable and consumed by
+# expression. The workflow-level shape is copied from
+# 'build-test-release.yaml' in gerrit-clone-action and its siblings,
+# including the yamllint directive on the line above the pin.
+name: Build, test and release
+
+on:
+  push:
+
+env:
+  # yamllint disable-line rule:line-length
+  HARDEN_RUNNER_ALLOWLIST: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@8f4f0cf83e6a015957e83261ed379fd811fc060e'  # v0.5.1
+  # Parses as a spec (an org, taking every default) but names no
+  # allow-list file and sits under an unrecognised key: not a pin.
+  BUILD_ORG: 'lfreleng-actions'
+  # Spec-shaped and pinned, but neither names the allow-list file nor
+  # sits under a recognised key: not a pin.
+  PYTHON_AUDIT_CONFIG: '@18d9c4446bea555d0783e850f6d295f844fe8f67'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      allow_list: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          # Resolved at run time, so there is nothing here to pin.
+          config: ${{ env.HARDEN_RUNNER_ALLOWLIST }}

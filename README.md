@@ -494,11 +494,21 @@ egress allow-list using a custom `uses:`-style coordinate consumed by
 harden_runner_allowlist:
   type: string
   default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f6...'  # v0.12.2
+
+# Workflow or job env: variable, read by expression
+env:
+  HARDEN_RUNNER_ALLOWLIST: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@8f4f0cf8...'  # v0.5.1
 ```
 
 <!-- markdownlint-enable MD013 -->
 
-These are values of `config:` and `default:` keys, **not** `uses:`
+The linter finds `env:` pins at the workflow level and under
+`jobs.<job>.env` when the variable's value names `allow_list.txt` or its
+name matches `*allow_list*`, `*allowlist*` or `*allow-list*`. The
+`config: ${{ env.HARDEN_RUNNER_ALLOWLIST }}` that consumes such a
+variable is an expression, not a pin, and the linter skips it.
+
+These are values of `config:`, `default:` and `env:` keys, **not** `uses:`
 references, so Dependabot cannot see or bump them. They drift without
 warning, and a stale pin means a block-mode job lacks newly allow-listed
 endpoints, producing confusing `ECONNREFUSED` failures long after
