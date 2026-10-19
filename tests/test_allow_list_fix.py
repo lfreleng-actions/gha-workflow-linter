@@ -23,7 +23,7 @@ tag.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -59,8 +59,7 @@ from gha_workflow_linter.models import (
     Severity,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
+FIXTURES = Path(__file__).parent / "fixtures" / "allow_list"
 
 WORKFLOW_ORG = "lfreleng-actions"
 HOST_REPO = f"{WORKFLOW_ORG}/.github"
@@ -789,6 +788,43 @@ class TestWholeFiles:
         ).encode()
         assert first.read_bytes() == expected
         assert second.read_bytes() == expected
+
+
+class TestEnvVariablePins:
+    """Location 4: a pin held in an ``env:`` variable."""
+
+    @pytest.mark.xfail(strict=True, reason="env: is not walked yet")
+    def test_env_pins_are_rewritten_in_place(self, tmp_path: Path) -> None:
+        """Only the two pinned lines change, quoting and comment intact.
+
+        The fixture carries a ``yamllint disable-line`` directive above
+        the workflow-level pin, which must survive untouched.
+        """
+        source = FIXTURES / "env_variables.yaml"
+        path = tmp_path / "build-test-release.yaml"
+        path.write_bytes(source.read_bytes())
+        before = lines_of(path)
+
+        outcome = fix_file(path)
+
+        assert [fix.line_number for fix in outcome.applied] == [16, 28]
+        expected = list(before)
+        expected[15] = (
+            before[15]
+            .replace(OTHER_SHA, CURRENT_SHA)
+            .replace(OTHER_TAG, CURRENT_TAG)
+        )
+        expected[27] = (
+            before[27]
+            .replace(STALE_SHA, CURRENT_SHA)
+            .replace(STALE_TAG, CURRENT_TAG)
+        )
+        assert lines_of(path) == expected
+        assert expected[14] == "  # yamllint disable-line rule:line-length"
+        assert expected[15] == (
+            f"  HARDEN_RUNNER_ALLOWLIST: '{EXPLICIT}@{CURRENT_SHA}'"
+            f"  # {CURRENT_TAG}"
+        )
 
 
 class TestLineEndings:
