@@ -623,11 +623,27 @@ class AllowListScanner:
             self.logger.warning(f"Error reading file {file_path}: {error}")
             return []
 
+        # A YAML anchor shares one scalar node between every alias of
+        # it, and the walk offers that node once per location it
+        # appears in: an ``env`` variable written ``&pin`` and consumed
+        # as ``config: *pin`` arrives twice, with one source position.
+        # Two pins on one line make the fixer refuse the whole file, so
+        # a node yields a pin once. It counts as seen only once it has
+        # produced a pin, so an alias under an unrecognised key cannot
+        # hide the same node under a recognised one later in the walk.
         pins: list[AllowListPin] = []
+        seen: set[int] = set()
         for candidate in _collect_candidates(root):
+            if id(candidate.node) in seen:
+                self.logger.debug(
+                    f"Skipping {'.'.join(candidate.key_path)}: an alias "
+                    "of a pin already recorded"
+                )
+                continue
             pin = self._build_pin(candidate, file_path, lines)
             if pin is not None:
                 pins.append(pin)
+                seen.add(id(candidate.node))
 
         self.logger.debug(f"Found {len(pins)} allow-list pins in {file_path}")
         return pins

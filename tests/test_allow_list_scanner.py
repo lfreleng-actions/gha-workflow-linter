@@ -189,6 +189,84 @@ class TestEnvLocation:
             assert scanner.scan_file(path) == []
 
 
+class TestAliases:
+    """One anchored scalar reached from two locations is one pin.
+
+    PyYAML composes an alias as the very node its anchor produced, so
+    the walk offers that node once per location. Two pins sharing a
+    line would make the fixer refuse the whole file.
+    """
+
+    def test_env_anchor_consumed_by_step_config(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """``&pin`` on an ``env`` variable, ``*pin`` under ``with.config``."""
+        path = tmp_path / "alias.yaml"
+        path.write_text(
+            "---\n"
+            "env:\n"
+            f"  HARDEN_RUNNER_ALLOWLIST: &pin '@{SHA_V0_5_1}'  # v0.5.1\n"
+            "jobs:\n"
+            "  build:\n"
+            "    steps:\n"
+            "      - uses: lfreleng-actions/harden-runner-block-action@x\n"
+            "        with:\n"
+            "          config: *pin\n",
+            encoding="utf-8",
+        )
+
+        pins = scanner.scan_file(path)
+
+        assert key_paths(pins) == ["env.HARDEN_RUNNER_ALLOWLIST"]
+        assert pins[0].line_number == 3
+
+    def test_anchored_env_mapping_shared_by_jobs(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """A whole ``env`` mapping anchored in one job and merged into another."""
+        path = tmp_path / "alias.yaml"
+        path.write_text(
+            "---\n"
+            "jobs:\n"
+            "  build:\n"
+            "    env: &shared\n"
+            f"      allow_list: '@{SHA_V0_5_1}'  # v0.5.1\n"
+            "  test:\n"
+            "    env: *shared\n",
+            encoding="utf-8",
+        )
+
+        pins = scanner.scan_file(path)
+
+        assert key_paths(pins) == ["jobs.build.env.allow_list"]
+
+    def test_unrecognised_alias_does_not_hide_the_pin(
+        self, scanner: AllowListScanner, tmp_path: Path
+    ) -> None:
+        """A node is seen only once it has produced a pin.
+
+        The anchor sits under a key the recogniser rejects and the
+        alias under one it accepts; the pin must still be found, under
+        the accepting key.
+        """
+        path = tmp_path / "alias.yaml"
+        path.write_text(
+            "---\n"
+            "env:\n"
+            f"  SOME_CONFIG: &pin '@{SHA_V0_5_1}'  # v0.5.1\n"
+            "jobs:\n"
+            "  build:\n"
+            "    env:\n"
+            "      allow_list: *pin\n",
+            encoding="utf-8",
+        )
+
+        pins = scanner.scan_file(path)
+
+        assert key_paths(pins) == ["jobs.build.env.allow_list"]
+        assert pins[0].line_number == 3
+
+
 class TestYamlOneOneTriggerKey:
     """The bare ``on:`` key, which YAML 1.1 resolves to a boolean."""
 
