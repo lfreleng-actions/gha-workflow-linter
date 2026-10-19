@@ -54,7 +54,7 @@ uv pip install -e .
 ```bash
 git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
 cd gha-workflow-linter
-uv pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## Authentication
@@ -1406,7 +1406,7 @@ docker build --build-arg VERSION=1.2.3 -t gha-workflow-linter .
 ```bash
 git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
 cd gha-workflow-linter
-uv pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ### Running Tests
@@ -1428,16 +1428,16 @@ uv run pytest -m "not slow"
 
 ```bash
 # Format code
-ruff format .
+uv run ruff format .
 
 # Lint code
-ruff check .
+uv run ruff check .
 
 # Type checking
-mypy src/gha_workflow_linter
+uv run mypy src/gha_workflow_linter
 
 # Pre-commit hooks
-pre-commit run --all-files
+uv run prek run --all-files
 ```
 
 ### Building and Publishing
@@ -1513,15 +1513,17 @@ repos:
 
 ### Development Setup
 
-For contributors, use the development setup script:
+For contributors, use the development setup script. It needs
+[uv](https://docs.astral.sh/uv/getting-started/installation/) on your
+`PATH` and exits with an error if `uv` is missing:
 
 ```bash
 # Install development environment with self-linting
 ./scripts/setup-dev.sh
 
 # This sets up:
-# - Development dependencies
-# - Pre-commit hooks (including gha-workflow-linter)
+# - A .venv with the development dependencies (uv sync --extra dev)
+# - Git hooks through prek (including gha-workflow-linter)
 # - GitHub authentication (GitHub CLI recommended)
 # - Self-linting test
 ```
