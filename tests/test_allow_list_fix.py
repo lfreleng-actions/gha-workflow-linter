@@ -793,7 +793,6 @@ class TestWholeFiles:
 class TestEnvVariablePins:
     """Location 4: a pin held in an ``env:`` variable."""
 
-    @pytest.mark.xfail(strict=True, reason="env: is not walked yet")
     def test_env_pins_are_rewritten_in_place(self, tmp_path: Path) -> None:
         """Only the two pinned lines change, quoting and comment intact.
 

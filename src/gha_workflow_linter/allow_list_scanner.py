@@ -15,14 +15,17 @@ Detection runs in two stages, as set out in section 5.1 of
 
 **Stage 1, structural identification.** The composed YAML node tree from
 :meth:`~gha_workflow_linter.scanner.WorkflowScanner.compose_workflow_file`
-is walked, and candidate scalars are collected from three locations:
+is walked, and candidate scalars are collected from four locations:
 
 1. ``jobs.<job>.steps[*].with.config`` -- the shared resolver's input is
    always named ``config``, so this location is anchored by structure.
 2. ``on.workflow_call.inputs.<name>.default``.
 3. ``jobs.<job>.with.<name>`` -- a reusable-workflow caller.
+4. ``env.<name>`` and ``jobs.<job>.env.<name>`` -- a variable the
+   consuming step reads by expression, such as
+   ``config: ${{ env.HARDEN_RUNNER_ALLOWLIST }}``.
 
-Locations 2 and 3 carry an arbitrary key name, so a scalar found there
+Locations 2, 3 and 4 carry an arbitrary key name, so a scalar found there
 qualifies only when the recogniser predicate accepts it: it must parse
 under the grammar in :mod:`gha_workflow_linter.allow_list_spec` *and*
 either name the conventional allow-list filename explicitly or sit under
@@ -94,7 +97,7 @@ __all__ = [
 ]
 
 #: Key-name patterns recognised as allow-list coordinates where the key
-#: name is arbitrary (locations 2 and 3). Matched with :mod:`fnmatch`,
+#: name is arbitrary (locations 2, 3 and 4). Matched with :mod:`fnmatch`,
 #: case-insensitively. ``allow_list`` and ``allowlist`` are distinct
 #: spellings under glob matching, so both are listed.
 DEFAULT_KEY_PATTERNS: tuple[str, ...] = (
@@ -348,6 +351,31 @@ def _collect_job_inputs(
             )
 
 
+def _collect_env(
+    env_node: yaml.nodes.Node | None, prefix: tuple[str, ...]
+) -> Iterator[_Candidate]:
+    """Yield the variables of an ``env`` block (location 4).
+
+    Args:
+        env_node: The ``env`` node, or ``None``. An ``env`` written as
+            an expression or any other non-mapping yields nothing.
+        prefix: Key path of the block holding ``env``: empty at the
+            workflow level, ``("jobs", <job>)`` for a job.
+
+    Yields:
+        One candidate per scalar variable. Recognition happens later.
+    """
+    for key_node, value_node in _mapping_pairs(env_node):
+        if isinstance(value_node, yaml.nodes.ScalarNode):
+            name = _key_text(key_node)
+            yield _Candidate(
+                node=value_node,
+                key_path=(*prefix, "env", name),
+                key_name=name,
+                anchored=False,
+            )
+
+
 def _collect_jobs(jobs_node: yaml.nodes.Node | None) -> Iterator[_Candidate]:
     """Yield every candidate beneath the ``jobs`` block.
 
@@ -355,12 +383,19 @@ def _collect_jobs(jobs_node: yaml.nodes.Node | None) -> Iterator[_Candidate]:
         jobs_node: The document's ``jobs`` node, or ``None``.
 
     Yields:
-        Candidates from locations 1 and 3, job by job.
+        Candidates from locations 1, 3 and 4, job by job, in the order
+        each job writes its ``steps``, ``with`` and ``env`` keys.
     """
     for key_node, job_node in _mapping_pairs(jobs_node):
         job = _key_text(key_node)
-        yield from _collect_step_configs(_child(job_node, "steps"), job)
-        yield from _collect_job_inputs(_child(job_node, "with"), job)
+        for child_key, child_node in _mapping_pairs(job_node):
+            name = _key_text(child_key)
+            if name == "steps":
+                yield from _collect_step_configs(child_node, job)
+            elif name == "with":
+                yield from _collect_job_inputs(child_node, job)
+            elif name == "env":
+                yield from _collect_env(child_node, ("jobs", job))
 
 
 def _collect_input_defaults(
@@ -390,7 +425,7 @@ def _collect_input_defaults(
 
 
 def _collect_candidates(root: yaml.nodes.Node) -> list[_Candidate]:
-    """Walk a composed document for all three detection locations.
+    """Walk a composed document for all four detection locations.
 
     Args:
         root: Root node of the composed tree.
@@ -406,6 +441,8 @@ def _collect_candidates(root: yaml.nodes.Node) -> list[_Candidate]:
             )
         elif _key_text(key_node) == "jobs":
             candidates.extend(_collect_jobs(value_node))
+        elif _key_text(key_node) == "env":
+            candidates.extend(_collect_env(value_node, ()))
     return candidates
 
 
@@ -548,8 +585,8 @@ class AllowListScanner:
             config: Linter configuration.
             workflow_org: Org owning the workflow being scanned. It
                 supplies the host org when a coordinate omits it.
-            key_patterns: Key-name patterns recognised in locations 2
-                and 3. Defaults to :data:`DEFAULT_KEY_PATTERNS`.
+            key_patterns: Key-name patterns recognised in locations 2,
+                3 and 4. Defaults to :data:`DEFAULT_KEY_PATTERNS`.
             filename: Conventional allow-list filename, the other half
                 of the recogniser predicate.
         """

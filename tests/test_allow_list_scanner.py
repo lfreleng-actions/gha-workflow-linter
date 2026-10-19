@@ -113,7 +113,6 @@ class TestDetectionLocations:
 class TestEnvLocation:
     """Location 4: a coordinate held in an ``env:`` variable."""
 
-    @pytest.mark.xfail(strict=True, reason="env: is not walked yet")
     def test_workflow_and_job_env_pins(self, scanner: AllowListScanner) -> None:
         """Both ``env:`` levels are walked, in document order."""
         pins = scan(scanner, "env_variables.yaml")
@@ -124,7 +123,6 @@ class TestEnvLocation:
         ]
         assert [pin.spec.ref for pin in pins] == [SHA_V0_5_1, SHA_V0_1_1]
 
-    @pytest.mark.xfail(strict=True, reason="env: is not walked yet")
     def test_workflow_env_pin_anchor(self, scanner: AllowListScanner) -> None:
         """The pin carries its line, quoting and version comment."""
         pin = scan(scanner, "env_variables.yaml")[0]
@@ -161,7 +159,6 @@ class TestEnvLocation:
 
         assert "jobs.build.steps.0.with.config" not in paths
 
-    @pytest.mark.xfail(strict=True, reason="env: is not walked yet")
     def test_env_names_conventional_filename(
         self, scanner: AllowListScanner, tmp_path: Path
     ) -> None:
