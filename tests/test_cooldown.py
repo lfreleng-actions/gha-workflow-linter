@@ -11,6 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from typer.testing import CliRunner
 
 from gha_workflow_linter import cli
 from gha_workflow_linter.action_call_fix import (
@@ -401,6 +402,147 @@ class TestResolveCooldownDays:
         )
         assert result == 7
         assert printed == []
+
+
+_DEPENDABOT_SEVEN_DAYS = (
+    "version: 2\nupdates:\n  - package-ecosystem: github-actions\n"
+    "    directory: /\n    cooldown:\n      default-days: 7\n"
+)
+
+
+class TestAllowListCooldownIsSeparate:
+    """The allow-list check carries its own cooldown, defaulting to 0.
+
+    Dependabot's ``cooldown.default-days`` describes the ``uses:``
+    references Dependabot manages and says nothing about allow-list pins,
+    which it cannot see, so it feeds the action-call cooldown alone.
+    ``--cooldown`` likewise governs action calls only.
+    """
+
+    @staticmethod
+    def _settled(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str
+    ) -> Config:
+        """Run ``lint`` up to the linter itself and return its config.
+
+        Args:
+            tmp_path: Repository root, holding a seven-day Dependabot
+                cooldown.
+            monkeypatch: Fixture used to stub the network-facing steps.
+            *args: Extra command-line arguments.
+
+        Returns:
+            The configuration ``run_linter`` would have been handed.
+        """
+        github_dir = tmp_path / ".github"
+        github_dir.mkdir(exist_ok=True)
+        (github_dir / "dependabot.yml").write_text(
+            _DEPENDABOT_SEVEN_DAYS, encoding="utf-8"
+        )
+        seen: list[Config] = []
+
+        def fake_run(config: Config, *_: object, **__: object) -> int:
+            seen.append(config)
+            return 0
+
+        monkeypatch.setattr(cli, "_preflight_backend", lambda *_: False)
+        monkeypatch.setattr(cli, "run_linter", fake_run)
+        result = CliRunner().invoke(
+            cli.app, ["lint", str(tmp_path), "--quiet", *args]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert len(seen) == 1
+        return seen[0]
+
+    def test_dependabot_cooldown_reaches_action_calls_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A seven-day Dependabot window leaves allow-list pins at 0."""
+        config = self._settled(
+            tmp_path,
+            monkeypatch,
+            "--action-calls",
+            "update",
+            "--allow-list",
+            "update",
+        )
+
+        assert config.cooldown_days == 7
+        assert config.allow_list.cooldown_days == 0
+
+    def test_explicit_cooldown_does_not_reach_allow_list_pins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--cooldown`` means action calls, and nothing else."""
+        config = self._settled(tmp_path, monkeypatch, "--cooldown", "3")
+
+        assert config.cooldown_days == 3
+        assert config.allow_list.cooldown_days == 0
+
+    def test_allow_list_cooldown_flag_sets_the_allow_list_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--allow-list-cooldown 7`` restores the old allow-list window."""
+        config = self._settled(
+            tmp_path,
+            monkeypatch,
+            "--allow-list-cooldown",
+            "7",
+            "--cooldown",
+            "0",
+        )
+
+        assert config.cooldown_days == 0
+        assert config.allow_list.cooldown_days == 7
+
+    def test_configuration_file_sets_the_allow_list_cooldown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``allow_list.cooldown_days`` applies when no flag is given."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "allow_list:\n  cooldown_days: 5\n", encoding="utf-8"
+        )
+
+        config = self._settled(
+            tmp_path, monkeypatch, "--config", str(config_file)
+        )
+
+        assert config.cooldown_days == 7
+        assert config.allow_list.cooldown_days == 5
+
+    def test_the_flag_outranks_the_configuration_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The command line wins, as for every other setting."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "allow_list:\n  cooldown_days: 5\n", encoding="utf-8"
+        )
+
+        config = self._settled(
+            tmp_path,
+            monkeypatch,
+            "--config",
+            str(config_file),
+            "--allow-list-cooldown",
+            "1",
+        )
+
+        assert config.allow_list.cooldown_days == 1
+
+    def test_a_negative_allow_list_cooldown_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The window is a count of days, as for ``--cooldown``."""
+        result = CliRunner().invoke(
+            cli.app,
+            ["lint", str(tmp_path), "--allow-list-cooldown", "-1"],
+        )
+
+        assert result.exit_code == 2
+        assert "x>=0" in result.output
 
 
 class TestPersistentCacheUnderReleasePolicy:

@@ -566,6 +566,16 @@ class AllowListConfig(BaseModel):
             "Report suppressed pins as notices. Never affects the exit code"
         ),
     )
+    cooldown_days: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum number of days an allow-list host release must have "
+            "been available before a pin is stale against it (0 disables "
+            "the cooldown). Independent of the action-call cooldown, and "
+            "never read from the Dependabot configuration"
+        ),
+    )
     org: str = Field(
         default="",
         description=(
@@ -692,7 +702,7 @@ class Config(BaseModel):
         description=(
             "Minimum number of days an action release must have been "
             "available before it is eligible for an update (0 disables "
-            "the cooldown)"
+            "the cooldown). Allow-list pins use allow_list.cooldown_days"
         ),
     )
 
@@ -862,6 +872,15 @@ class CLIOptions(BaseModel):
     allow_list_org: str | None = Field(
         default=None,
         description="Workflow organisation for '@<sha>' shorthand resolution",
+    )
+    allow_list_cooldown: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Minimum days an allow-list host release must be available "
+            "before a pin is stale against it (falls back to the "
+            "configuration file, then 0)"
+        ),
     )
     multi_repo: bool = Field(
         default=False,

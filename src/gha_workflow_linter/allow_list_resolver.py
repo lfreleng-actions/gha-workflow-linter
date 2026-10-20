@@ -17,6 +17,13 @@ and cooldown enforcement are the shared, pure helpers in
 :mod:`gha_workflow_linter.latest_release`, so both backends give the same
 answer for the same repository.
 
+The cooldown here is ``allow_list.cooldown_days``, not the action-call
+``cooldown_days``. An action release is third-party code that will run
+on the runner; an allow-list release runs no code, passes review before
+it is tagged, and a stale pin is itself the failure mode. The
+allow-list cooldown therefore defaults to 0 and is never read from the
+Dependabot configuration, which describes ``uses:`` references only.
+
 Two behaviours are worth stating up front, because they are contracts the
 caller depends on rather than incidental implementation details:
 
@@ -90,11 +97,12 @@ class AllowListResolver:
 
         Returns:
             A :class:`~gha_workflow_linter.latest_release.ReleasePolicy`
-            carrying ``allow_prerelease`` and ``cooldown_days``.
+            carrying ``allow_prerelease`` and the allow-list
+            ``cooldown_days``.
         """
         return ReleasePolicy(
             allow_prerelease=self.config.allow_prerelease,
-            cooldown_days=self.config.cooldown_days,
+            cooldown_days=self.config.allow_list.cooldown_days,
         )
 
     @property
@@ -120,11 +128,15 @@ class AllowListResolver:
         honest: only default-policy answers are ever written, so a later
         run cannot read back a policy-shifted target.
 
+        Only the allow-list cooldown counts. The action-call cooldown
+        governs a different check, so a run quarantining action releases
+        still shares cached allow-list answers.
+
         Returns:
             ``True`` when the default policy applies, so a stored answer
             means the same thing to every reader.
         """
-        return self.config.cooldown_days <= 0 and not (
+        return self.config.allow_list.cooldown_days <= 0 and not (
             self.config.allow_prerelease
         )
 
@@ -425,10 +437,10 @@ class AllowListResolver:
             The latest release, or ``None`` when the remote could not be
             read, no clean version tag exists, or a cooldown is active.
         """
-        if self.config.cooldown_days > 0:
+        if self.config.allow_list.cooldown_days > 0:
             self.logger.debug(
-                "Cooldown active but release dates are unavailable via "
-                "Git for %s; reporting no latest release",
+                "Allow-list cooldown active but release dates are "
+                "unavailable via Git for %s; reporting no latest release",
                 repo_key,
             )
             return None

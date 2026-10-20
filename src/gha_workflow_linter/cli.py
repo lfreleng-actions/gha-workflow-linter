@@ -283,6 +283,7 @@ def _preprocess_args_for_default_command(
         "--json-output",
         "--files",
         "--allow-list-org",
+        "--allow-list-cooldown",
         "--repo-depth",
     }
 
@@ -496,6 +497,8 @@ def _apply_cli_overrides(
         config.allow_list.show_suppressed = True
     if options.allow_list_org is not None:
         config.allow_list.org = options.allow_list_org
+    if options.allow_list_cooldown is not None:
+        config.allow_list.cooldown_days = options.allow_list_cooldown
 
     # Settle and validate the modes before anything repository-dependent.
     # An unsupported rung is a usage error, and a usage error must not
@@ -517,6 +520,12 @@ def _resolve_cooldown(config: Config, options: CLIOptions) -> None:
     Precedence: the explicit ``--cooldown`` flag, then the repository's
     Dependabot configuration, then 0 (no cooldown / original
     behaviour).
+
+    This is the action-call cooldown alone. The allow-list cooldown is
+    settled from ``--allow-list-cooldown`` or the configuration file in
+    :func:`_apply_cli_overrides`: Dependabot's cooldown describes the
+    ``uses:`` references it manages and says nothing about allow-list
+    pins, which it cannot see.
 
     Kept out of :func:`_apply_cli_overrides` because it reads a file and
     can therefore fail. Everything that settles configuration from
@@ -1113,7 +1122,8 @@ def lint(
             "Minimum number of days an action release must have been "
             "available before updating to it. When unset, the value is "
             "read from the repository's .github/dependabot.yml cooldown "
-            "setting, falling back to 0 (no cooldown)."
+            "setting, falling back to 0 (no cooldown). Does not apply to "
+            "allow-list pins; see --allow-list-cooldown."
         ),
         min=0,
     ),
@@ -1187,6 +1197,17 @@ def lint(
             "Inferred from GITHUB_REPOSITORY_OWNER, then the 'upstream' git "
             "remote, then 'origin', when not given"
         ),
+    ),
+    allow_list_cooldown: int | None = typer.Option(
+        None,
+        "--allow-list-cooldown",
+        help=(
+            "Minimum number of days an allow-list host release must have "
+            "been available before a pin is stale against it. Independent "
+            "of --cooldown and never read from dependabot.yml; defaults "
+            "to the configuration file, then 0 (no cooldown)."
+        ),
+        min=0,
     ),
     multi_repo: bool = typer.Option(
         False,
@@ -1267,6 +1288,9 @@ def lint(
         # Only update to releases at least 7 days old (supply-chain cooldown)
         gha-workflow-linter lint --action-calls update --cooldown 7
 
+        # Hold allow-list pins back the same way (default: 0 days)
+        gha-workflow-linter lint --allow-list update --allow-list-cooldown 7
+
         # Scan specific files, with wildcards
         gha-workflow-linter lint --files ".github/workflows/*.yml"
     """
@@ -1335,6 +1359,7 @@ def lint(
             update_allow_list=update_allow_list,
             show_suppressed=show_suppressed,
             allow_list_org=allow_list_org,
+            allow_list_cooldown=allow_list_cooldown,
             multi_repo=multi_repo,
             repo_depth=repo_depth,
         )
@@ -1342,13 +1367,9 @@ def lint(
         settled_checks = _apply_cli_overrides(config, cli_options, workers)
         _resolve_cooldown(config, cli_options)
 
-        rate_limited = _preflight_backend(
+        exit_code = _preflight_and_run(
             config, cli_options, github_token, workers
         )
-
-        logger.debug(f"Scanning path: {path}")
-
-        exit_code = run_linter(config, cli_options, rate_limited=rate_limited)
 
     except typer.Exit:
         # Re-raise typer.Exit to avoid catching it as a general exception
@@ -2744,6 +2765,28 @@ def _preflight_backend(
     return _configure_validation_backend(config, options, github_token, workers)
 
 
+def _preflight_and_run(
+    config: Config,
+    options: CLIOptions,
+    github_token: str | None,
+    workers: int | None,
+) -> int:
+    """Pre-flight the backend, then run the linter over the settled setup.
+
+    Args:
+        config: Resolved configuration, with modes and cooldowns settled.
+        options: Resolved CLI options.
+        github_token: Token given on the command line, if any.
+        workers: Requested worker count, if any.
+
+    Returns:
+        The exit code :func:`run_linter` chose.
+    """
+    rate_limited = _preflight_backend(config, options, github_token, workers)
+    logging.getLogger(__name__).debug(f"Scanning path: {options.path}")
+    return run_linter(config, options, rate_limited=rate_limited)
+
+
 def _any_check_runs(config: Config) -> bool:
     """Whether any check will do work this run.
 
@@ -3714,11 +3757,13 @@ def _run_multi_repo(
 
     The cache is built once and shared, so twenty repositories pinning
     the same allow-list host cost one latest-release lookup rather than
-    twenty -- under the default release policy. A cooldown or prerelease
-    eligibility makes a cached answer policy-dependent, so both bypass
-    the cache and each repository resolves the host for itself.
+    twenty -- under the default release policy. An allow-list cooldown or
+    prerelease eligibility makes a cached answer policy-dependent, so both
+    bypass the cache and each repository resolves the host for itself.
     Configuration is copied per repository, because the workflow
-    organisation and the Dependabot cooldown are properties of each one.
+    organisation and the Dependabot (action-call) cooldown are properties
+    of each one. The allow-list cooldown is not, and keeps its configured
+    value throughout.
 
     In JSON output mode every repository's payload is collected into a
     single document rather than printed as it goes, so standard output
@@ -3948,9 +3993,11 @@ def _run_repository_in_sweep(
     if not silent:
         console.print(f"[bold cyan]── {label or repository.name}[/bold cyan]")
 
-    # Both the workflow organisation and the cooldown are properties of
-    # the repository being scanned, so each gets its own copy rather than
-    # inheriting whatever the previous one resolved.
+    # Both the workflow organisation and the action-call cooldown are
+    # properties of the repository being scanned, so each gets its own
+    # copy rather than inheriting whatever the previous one resolved.
+    # The allow-list cooldown is not: Dependabot never sees those pins,
+    # so the copy keeps the value the command line or configuration set.
     # Preparation sits inside the failure boundary alongside the run
     # itself. Resolving the cooldown reads this repository's
     # ``dependabot.yml``, and a malformed one raises past the narrow

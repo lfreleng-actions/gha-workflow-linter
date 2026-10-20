@@ -513,6 +513,33 @@ class TestPerRepositoryState:
 
         assert recorder.visits[0].config.cooldown_days == 2
 
+    def test_allow_list_cooldown_is_not_read_per_repository(
+        self, tmp_path: Path
+    ) -> None:
+        """Dependabot never sees allow-list pins, so it never sets theirs.
+
+        Each repository resolves its own action-call cooldown, while the
+        allow-list cooldown keeps the configured value everywhere.
+        """
+        repositories = make_container(tmp_path, "slow", "quick")
+        for repository, days in zip(repositories, (7, 3), strict=True):
+            write_dependabot_cooldown(repository, days)
+        template = make_config(tmp_path)
+        template.allow_list.cooldown_days = 2
+        recorder = RecordingRun()
+
+        with mock.patch.object(cli, "_run_one_repository", recorder):
+            _run_multi_repo(template, make_options(tmp_path))
+
+        cooldowns = {
+            visit.options.path.name: (
+                visit.config.cooldown_days,
+                visit.config.allow_list.cooldown_days,
+            )
+            for visit in recorder.visits
+        }
+        assert cooldowns == {"quick": (3, 2), "slow": (7, 2)}
+
 
 class TestSweepFailures:
     """What a failing repository costs the rest of the sweep."""

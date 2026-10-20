@@ -466,6 +466,11 @@ The linter picks the newest release that satisfies the cooldown window,
 so it still updates an action to an older-but-eligible release when the
 latest release remains inside the window.
 
+This cooldown governs action calls alone. Allow-list pins have their own
+cooldown, `--allow-list-cooldown`, which defaults to `0` and never reads
+the Dependabot configuration; see
+[Allow-List Pin Checking](#allow-list-pin-checking).
+
 > Note: the cooldown relies on a verifiable publication timestamp for
 > each candidate: the release publish date (GitHub API GraphQL/REST) or
 > an annotated tag's tagger date. Lightweight tags carry no creation
@@ -555,6 +560,35 @@ A pin counts as stale when the target is newer, and not otherwise.
 It leaves a repository already ahead of the cooldown-eligible release
 alone, so a cooldown never recommends a downgrade.
 
+#### Allow-list cooldown
+
+The target is the host repository's newest release from the moment its
+tag exists. Allow-list pins take no cooldown by default, whatever
+`--cooldown` or the repository's Dependabot `cooldown.default-days` says,
+because the risks differ from an action release:
+
+- an allow-list release changes which endpoints a job may reach and runs
+  no code of its own, and it grows far more often than it shrinks;
+- in `lfreleng-actions/.github`, every allow-list change passes review
+  and a block-mode probe workflow before anyone tags it;
+- a stale pin is itself the failure: a block-mode job that lacks a
+  newly allowed endpoint fails with `ECONNREFUSED` until the pin moves.
+
+Dependabot's cooldown describes the `uses:` references it manages and
+says nothing about these pins, which it cannot see. To hold allow-list
+pins back anyway, set the window explicitly:
+
+```bash
+# Quarantine action releases for 7 days, take allow-list releases at once
+gha-workflow-linter lint --action-calls update --cooldown 7 \
+  --allow-list update
+
+# Hold allow-list releases back for 7 days too
+gha-workflow-linter lint --allow-list update --allow-list-cooldown 7
+```
+
+The configuration file key is `allow_list.cooldown_days`.
+
 #### Suppressing a deliberate pin
 
 A repository may hold a pin at an older version on purpose. The linter
@@ -641,8 +675,8 @@ The sweep builds one cache and shares it, so repositories pinning the
 same allow-list host share a single latest-release lookup.
 Twenty repositories cost one query rather than twenty.
 
-That sharing stops under a non-default release policy. A cooldown
-targets an older release by design, and prerelease eligibility changes
+That sharing stops under a non-default release policy. An allow-list
+cooldown targets an older release by design, and prerelease eligibility changes
 which releases count as candidates; the cache records the target and
 the releases ranked behind it, but not which policy chose them, so a
 cached answer cannot say whether it means the same thing to the next
@@ -658,8 +692,10 @@ TTL. Trusting it there would report a current pin as stale and rewrite it
 backwards. A pin the cached entry can place still costs nothing.
 
 Each repository still gets its own workflow organisation and its own
-Dependabot cooldown, since both belong to the repository rather than to
-the sweep.
+Dependabot cooldown for action calls, since both belong to the repository
+rather than to the sweep. The allow-list cooldown is the same for every
+repository: the value from `--allow-list-cooldown` or the configuration
+file, `0` by default.
 
 #### Failures and exit codes
 
@@ -1277,7 +1313,8 @@ file given with `config-file` still decides it.
 | `allow-prerelease`    | Allow prerelease versions for latest                          | No       | `false` |
 | `two-space-comments`  | Use two spaces before inline comments                         | No       | `true`  |
 | `fix-test-calls`      | Fix actions with 'test' in comments                           | No       | `false` |
-| `cooldown`            | Days a release must have been public                          | No       |         |
+| `cooldown`            | Days an action release must have been public                  | No       |         |
+| `allow-list-cooldown` | Days an allow-list host release must have been public         | No       |         |
 | `validation-method`   | Validation method (github-api or git); auto-detected if unset | No       |         |
 | `allow-list`          | Allow-list check mode: `off`, `report` or `update`            | No       |         |
 | `verify-allow-list`   | Fail when stale allow-list pins remain                        | No       | `false` |
@@ -1335,6 +1372,9 @@ Options:
   --verify-action-calls      Fail when an action call has fallen behind
   --allow-list MODE          off|report|update (default: report)
   --verify-allow-list        Fail when an allow-list pin is stale
+  --allow-list-cooldown INTEGER
+                             Days an allow-list host release must be public
+                             before a pin is stale against it (default: 0)
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions
   --two-space-comments       Use two spaces before inline comments
@@ -1342,9 +1382,9 @@ Options:
   --skip-actions             Skip scanning action.yaml/action.yml files
   --no-skip-actions          Scan action.yaml/action.yml files (default)
   --fix-test-calls           Fix actions with 'test' in comments
-  --cooldown INTEGER         Days a release must be public before updating
-                             (defaults to the Dependabot cooldown setting,
-                             then 0)
+  --cooldown INTEGER         Days an action release must be public before
+                             updating (defaults to the Dependabot cooldown
+                             setting, then 0)
   --version                  Show version and exit
   --help                     Show this message and exit
 
