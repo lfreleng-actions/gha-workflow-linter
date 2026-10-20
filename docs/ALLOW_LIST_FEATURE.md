@@ -421,9 +421,37 @@ Preference order, mirroring the existing `action_call_versions` logic:
 2. Newest tag by `(_get_version_specificity, _parse_version)` descending.
 3. Give up → resolution failure (§6.4).
 
-`--cooldown` / `cooldown_days` is honoured, reusing
-`version_utils._select_version_with_cooldown`, so an allow-list bump
-obeys the same supply-chain quarantine as an action bump.
+The allow-list check has its **own** cooldown,
+`--allow-list-cooldown` / `allow_list.cooldown_days`, defaulting to `0`
+and selected through the same `version_utils._select_version_with_cooldown`
+helper. It is independent of the action-call `--cooldown` /
+`cooldown_days`, and the Dependabot `cooldown.default-days` lookup never
+feeds it.
+
+An earlier revision applied the action-call cooldown here too, so an
+allow-list bump obeyed the same supply-chain quarantine as an action
+bump. That was the wrong policy, and `lfreleng-actions/.github#292`
+reversed it:
+
+- An action release is third-party code that will execute on the
+  runner; a quarantine against a retracted or malicious release is
+  sound. An allow-list release runs no code: it grows far more often
+  than it shrinks, and an addition grants one endpoint and takes nothing
+  away.
+- Every allow-list change passes review and the block-mode probe
+  workflow in `lfreleng-actions/.github` before anyone tags it.
+- A stale pin is itself the failure mode. A block-mode job lacking a
+  newly allow-listed endpoint fails with `ECONNREFUSED`; under a shared
+  seven-day cooldown, `python-workflows` arm64 jobs failed for a week
+  waiting for `.github` v0.17.2 to age.
+- Dependabot's cooldown describes the `uses:` references Dependabot
+  manages. It says nothing about allow-list pins, which Dependabot
+  cannot see.
+
+`--cooldown` keeps its meaning for action calls alone; an explicit value
+no longer reaches the allow-list check. A repository that wants the old
+behaviour sets `--allow-list-cooldown` (or `allow_list.cooldown_days`)
+to match.
 
 ### 6.2 Backends
 
@@ -458,7 +486,7 @@ This is a small, high-value change: `_get_remote_tags` already parses the
 token-free tag listing *and* annotated-tag peeling. The git backend
 cannot supply release dates, so — consistent with the existing
 `_get_latest_version_via_git` behaviour — it returns `None` when
-`cooldown_days > 0` rather than guessing.
+`allow_list.cooldown_days > 0` rather than guessing.
 
 ### 6.3 Determining the workflow org
 
@@ -1007,6 +1035,7 @@ of it must not report success.
 | `--update-allow-list`          | bool | off     | Rewrite stale pins in place (never suppressed ones)                  |
 | `--show-suppressed`            | bool | off     | Report suppressed pins as notices; never affects the exit code       |
 | `--allow-list-org TEXT`        | str  | auto    | Override the workflow org used for shorthand `@<sha>` resolution     |
+| `--allow-list-cooldown INT`    | int  | `0`     | Days a host release must age before pins are stale against it (§6.1) |
 | `--multi-repo` / `-M`          | bool | off     | Treat `PATH` as a parent of repositories (§11)                       |
 | `--repo-depth INT`             | int  | `1`     | How deep under `PATH` to look for repositories                       |
 | `--verify-actions`             | bool | off     | Promote outdated action calls to errors; exit `5` (§8.7)             |
@@ -1244,15 +1273,21 @@ Semantics:
   open as an optimisation if a sweep ever proves connection-bound.
 
   Note also that cache sharing is suspended under a non-default release
-  policy: a cooldown or prerelease eligibility makes a cached target
-  policy-dependent, and the cache records no policy, so each repository
-  resolves for itself rather than inheriting another's answer. A single
-  host is likewise re-resolved when a pin names a commit the cached
-  entry cannot place, since an entry written before that release existed
-  would report a current pin as stale and rewrite it backwards.
-- **Per-repository state**: workflow org (§6.3) and Dependabot cooldown
-  (`dependabot.resolve_cooldown`) are resolved per repository, because
-  both are repository properties.
+  policy: an allow-list cooldown or prerelease eligibility makes a
+  cached target policy-dependent, and the cache records no policy, so
+  each repository resolves for itself rather than inheriting another's
+  answer. A single host is likewise re-resolved when a pin names a
+  commit the cached entry cannot place, since an entry written before
+  that release existed would report a current pin as stale and rewrite
+  it backwards.
+- **Per-repository state**: workflow org (§6.3) and the action-call
+  Dependabot cooldown (`dependabot.resolve_cooldown`) are resolved per
+  repository, because both are repository properties. The allow-list
+  cooldown (§6.1) is not: it keeps the value from
+  `--allow-list-cooldown` or the configuration file, `0` by default, in
+  every repository of the sweep, so under the default the cache stays
+  shared whatever cooldown each repository applies to its action
+  calls.
 - A failure in one repository is recorded and the run continues; the
   aggregate exit code is the maximum by the precedence in §8.
 - Output gains a per-repository grouping header plus a final aggregate
@@ -1404,6 +1439,11 @@ allow_list:
   # Report suppressed pins as notices. Equivalent to --show-suppressed.
   # Never affects the exit code.
   show_suppressed: false
+
+  # Days a host release must have been public before pins are stale
+  # against it. Equivalent to --allow-list-cooldown. Independent of the
+  # top-level cooldown_days and never read from dependabot.yml (§6.1).
+  cooldown_days: 0
 ```
 
 The suppression directive token itself is **not** configurable.

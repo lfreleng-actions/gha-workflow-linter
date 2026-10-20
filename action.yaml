@@ -93,8 +93,15 @@ inputs:
     default: "false"
   cooldown:
     description: >
-      Minimum days a release must have been available before updating to
-      it. Read from .github/dependabot.yml when unset.
+      Minimum days an action release must have been available before
+      updating to it. Read from .github/dependabot.yml when unset. Does
+      not apply to allow-list pins; see 'allow-list-cooldown'.
+    required: false
+  allow-list-cooldown:
+    description: >
+      Minimum days an allow-list host release must have been available
+      before a pin is stale against it. Never read from
+      .github/dependabot.yml; the linter defaults it to 0 when unset.
     required: false
   validation-method:
     description: "Validation method (github-api, git, or auto-detect)"
@@ -206,6 +213,7 @@ runs:
         INPUT_TWO_SPACE_COMMENTS: ${{ inputs.two-space-comments }}
         INPUT_FIX_TEST_CALLS: ${{ inputs.fix-test-calls }}
         INPUT_COOLDOWN: ${{ inputs.cooldown }}
+        INPUT_ALLOW_LIST_COOLDOWN: ${{ inputs.allow-list-cooldown }}
         INPUT_VALIDATION_METHOD: ${{ inputs.validation-method }}
         INPUT_ALLOW_LIST: ${{ inputs.allow-list }}
         INPUT_VERIFY_ALLOW_LIST: ${{ inputs.verify-allow-list }}
@@ -333,6 +341,10 @@ runs:
 
         if [[ -n "$INPUT_COOLDOWN" ]]; then
           args+=(--cooldown "$INPUT_COOLDOWN")
+        fi
+
+        if [[ -n "$INPUT_ALLOW_LIST_COOLDOWN" ]]; then
+          args+=(--allow-list-cooldown "$INPUT_ALLOW_LIST_COOLDOWN")
         fi
 
         if [[ -n "$INPUT_VALIDATION_METHOD" ]]; then

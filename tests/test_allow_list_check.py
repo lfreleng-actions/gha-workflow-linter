@@ -53,6 +53,7 @@ from gha_workflow_linter.exceptions import ConfigurationError
 from gha_workflow_linter.latest_release import LatestRelease
 from gha_workflow_linter.models import (
     SUPPRESSIBLE_ALLOW_LIST_KINDS,
+    AllowListConfig,
     AllowListFindingKind,
     CacheConfig,
     Category,
@@ -435,7 +436,7 @@ class TestCachedTargetDirection:
     ) -> None:
         """The cached v0.7.0 target is re-resolved, map and all."""
         config = Config(
-            cooldown_days=7,
+            allow_list=AllowListConfig(cooldown_days=7),
             cache=CacheConfig(enabled=True, cache_dir=tmp_path),
         )
         cache = ValidationCache(config.cache)
@@ -472,7 +473,7 @@ class TestCachedTargetDirection:
         unnecessary and the cache is used exactly as before.
         """
         config = Config(
-            cooldown_days=0,
+            allow_list=AllowListConfig(cooldown_days=0),
             cache=CacheConfig(enabled=True, cache_dir=tmp_path),
         )
         cache = ValidationCache(config.cache)
@@ -527,7 +528,7 @@ class TestPolicyScopedCaching:
     ) -> None:
         """A stored answer must mean the same to every reader."""
         config = Config(
-            cooldown_days=cooldown_days,
+            allow_list=AllowListConfig(cooldown_days=cooldown_days),
             allow_prerelease=allow_prerelease,
             cache=CacheConfig(enabled=False, cache_dir=tmp_path),
         )

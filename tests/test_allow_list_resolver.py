@@ -38,6 +38,7 @@ from gha_workflow_linter.latest_release import (
     select_latest_release,
 )
 from gha_workflow_linter.models import (
+    AllowListConfig,
     CacheConfig,
     Config,
     GitHubAPIConfig,
@@ -672,7 +673,11 @@ async def test_cooldown_falls_back_to_an_older_warm_release(
 ) -> None:
     """A release still inside the cooldown yields to an older eligible one."""
     payload = _host_payload(_iso_days_ago(1), _iso_days_ago(30))
-    resolver = _api_resolver(monkeypatch, {HOST_REPO: payload}, cooldown_days=7)
+    resolver = _api_resolver(
+        monkeypatch,
+        {HOST_REPO: payload},
+        allow_list=AllowListConfig(cooldown_days=7),
+    )
 
     release = (await resolver.resolve([HOST_REPO]))[HOST_REPO]
 
@@ -688,7 +693,9 @@ async def test_cooldown_excluding_everything_resolves_to_none(
     """When no release is warm enough the repository has no answer."""
     payload = _host_payload(_iso_days_ago(1), _iso_days_ago(2))
     resolver = _api_resolver(
-        monkeypatch, {HOST_REPO: payload}, cooldown_days=30
+        monkeypatch,
+        {HOST_REPO: payload},
+        allow_list=AllowListConfig(cooldown_days=30),
     )
 
     assert (await resolver.resolve([HOST_REPO]))[HOST_REPO] is None
@@ -705,7 +712,10 @@ async def test_git_backend_declines_under_an_active_cooldown(
     """
     calls: list[str] = []
     resolver = _git_resolver(
-        monkeypatch, {HOST_REPO: LS_REMOTE_OUTPUT}, calls, cooldown_days=7
+        monkeypatch,
+        {HOST_REPO: LS_REMOTE_OUTPUT},
+        calls,
+        allow_list=AllowListConfig(cooldown_days=7),
     )
 
     assert (await resolver.resolve([HOST_REPO]))[HOST_REPO] is None
@@ -718,13 +728,83 @@ async def test_git_backend_resolves_when_no_cooldown_applies(
 ) -> None:
     """The same Git fixture resolves cleanly once the cooldown is off."""
     resolver = _git_resolver(
-        monkeypatch, {HOST_REPO: LS_REMOTE_OUTPUT}, cooldown_days=0
+        monkeypatch,
+        {HOST_REPO: LS_REMOTE_OUTPUT},
+        allow_list=AllowListConfig(cooldown_days=0),
     )
 
     release = (await resolver.resolve([HOST_REPO]))[HOST_REPO]
 
     assert release is not None
     assert release.tag == TAG_NAME
+
+
+@pytest.mark.parametrize(
+    ("action_days", "allow_list_days"),
+    [(7, 0), (0, 7), (7, 3)],
+)
+def test_the_policy_follows_the_allow_list_cooldown_alone(
+    action_days: int, allow_list_days: int
+) -> None:
+    """The action-call cooldown governs action calls, not these pins."""
+    config = _config(
+        ValidationMethod.GITHUB_API,
+        cooldown_days=action_days,
+        allow_list=AllowListConfig(cooldown_days=allow_list_days),
+    )
+
+    assert _resolver(config).policy.cooldown_days == allow_list_days
+
+
+@pytest.mark.asyncio
+async def test_an_action_call_cooldown_leaves_the_newest_release_eligible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Dependabot-style action cooldown must not hold a pin back.
+
+    A release one day old is inside a seven-day action-call window, but
+    the allow-list cooldown defaults to 0, so it is still the target.
+    """
+    payload = _host_payload(_iso_days_ago(1), _iso_days_ago(30))
+    resolver = _api_resolver(monkeypatch, {HOST_REPO: payload}, cooldown_days=7)
+
+    release = (await resolver.resolve([HOST_REPO]))[HOST_REPO]
+
+    assert release is not None
+    assert release.tag == TAG_NAME
+    assert release.commit_sha == PEELED_COMMIT_SHA
+
+
+@pytest.mark.asyncio
+async def test_git_backend_ignores_an_action_call_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the allow-list cooldown makes the Git backend decline."""
+    resolver = _git_resolver(
+        monkeypatch, {HOST_REPO: LS_REMOTE_OUTPUT}, cooldown_days=7
+    )
+
+    release = (await resolver.resolve([HOST_REPO]))[HOST_REPO]
+
+    assert release is not None
+    assert release.tag == TAG_NAME
+
+
+@pytest.mark.parametrize(
+    ("action_days", "allow_list_days", "usable"),
+    [(0, 0, True), (7, 0, True), (0, 7, False), (7, 7, False)],
+)
+def test_cache_usable_depends_on_the_allow_list_cooldown_alone(
+    action_days: int, allow_list_days: int, usable: bool
+) -> None:
+    """A run quarantining action releases still shares allow-list answers."""
+    config = _config(
+        ValidationMethod.GITHUB_API,
+        cooldown_days=action_days,
+        allow_list=AllowListConfig(cooldown_days=allow_list_days),
+    )
+
+    assert _resolver(config).cache_usable is usable
 
 
 def test_undated_candidates_are_skipped_while_a_cooldown_is_active() -> None:
@@ -758,7 +838,9 @@ async def test_a_cooldown_target_still_places_the_newer_commits(
     v0.12.2 is ahead rather than stale, and only the map can say so.
     """
     resolver = _api_resolver(
-        monkeypatch, {HOST_REPO: _three_release_payload()}, cooldown_days=7
+        monkeypatch,
+        {HOST_REPO: _three_release_payload()},
+        allow_list=AllowListConfig(cooldown_days=7),
     )
 
     release = (await resolver.resolve([HOST_REPO]))[HOST_REPO]
@@ -777,7 +859,9 @@ async def test_the_newest_release_wins_when_no_cooldown_applies(
 ) -> None:
     """The same fixture without a cooldown behaves exactly as before."""
     resolver = _api_resolver(
-        monkeypatch, {HOST_REPO: _three_release_payload()}, cooldown_days=0
+        monkeypatch,
+        {HOST_REPO: _three_release_payload()},
+        allow_list=AllowListConfig(cooldown_days=0),
     )
 
     release = (await resolver.resolve([HOST_REPO]))[HOST_REPO]
@@ -848,7 +932,7 @@ async def test_a_cooldown_run_bypasses_the_cache(
         {HOST_REPO: _three_release_payload()},
         queries,
         tmp_path,
-        cooldown_days=7,
+        allow_list=AllowListConfig(cooldown_days=7),
     )
     resolver.cache.put_latest_version(
         HOST_REPO, COOLDOWN_TAG, COOLDOWN_COMMIT_SHA
@@ -872,7 +956,11 @@ async def test_a_cached_release_carries_no_commit_map(
     Without a cooldown the target *is* the newest release, so nothing can
     be ahead of it and the missing map costs nothing.
     """
-    config = _config(ValidationMethod.GITHUB_API, tmp_path, cooldown_days=0)
+    config = _config(
+        ValidationMethod.GITHUB_API,
+        tmp_path,
+        allow_list=AllowListConfig(cooldown_days=0),
+    )
     resolver = _resolver(config)
     resolver.cache.put_latest_version(HOST_REPO, TAG_NAME, PEELED_COMMIT_SHA)
 
