@@ -31,8 +31,8 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install uv package manager (ghcr.io/astral-sh/uv:0.13.1)
-COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /uvx /bin/
+# Install uv package manager (ghcr.io/astral-sh/uv:0.13.4)
+COPY --from=ghcr.io/astral-sh/uv:0.13.4@sha256:9f130421e930bfbdc563c00740466603f8723158e90297d07957c2294640262b /uv /uvx /bin/
 
 # The build context carries no .git, so hatch-vcs cannot derive the
 # version; release builds pass the real one with --build-arg VERSION=
