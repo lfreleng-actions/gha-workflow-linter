@@ -47,9 +47,141 @@ jobs:
           path: 'actions-template'
           persist-credentials: false
 
+      # setup-uv in the action must neither start an interpreter from the
+      # caller's workspace nor read its uv settings. Each planted
+      # interpreter records that it ran, and the uv.toml's
+      # required-version would fail the action.
+      - name: 'Plant interpreters and uv settings in the workspace'
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/planted-ran"
+          stub() {
+            # $0 and $* expand when the stub runs, not here.
+            # shellcheck disable=SC2016
+            printf '#!/bin/sh\necho "%s: $0 $*" >> "%s"\nexit 1\n' \
+              "$1" "$marker" > "$2"
+            chmod +x "$2"
+          }
+          mkdir -p .venv/bin planted
+          printf 'home = /usr/bin\nversion_info = 3.12.0\n' > .venv/pyvenv.cfg
+          stub venv .venv/bin/python3
+          stub venv .venv/bin/python
+          stub python-version planted/python3
+          echo "$GITHUB_WORKSPACE/planted/python3" > .python-version
+          printf '%s\n' 'cache-dir = "/nonexistent/planted-cache"' \
+            'required-version = "==0.0.1"' > uv.toml
+
       - name: "Running local action: ${{ github.repository }}"
+        id: lint
         uses: $/
         with:
           path: 'actions-template'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Check outputs and that no planted interpreter ran'
+        shell: bash
+        env:
+          TOTAL_CALLS: ${{ steps.lint.outputs.total-calls }}
+          ERRORS_FOUND: ${{ steps.lint.outputs.errors-found }}
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/planted-ran"
+          if [[ -e "$marker" ]]; then
+            echo "::error::A planted workspace interpreter ran:"
+            cat "$marker"
+            exit 1
+          fi
+          if ! [[ "$TOTAL_CALLS" =~ ^[0-9]+$ && "$TOTAL_CALLS" -gt 0 ]]; then
+            echo "::error::Unexpected total-calls output: '$TOTAL_CALLS'"
+            exit 1
+          fi
+          if ! [[ "$ERRORS_FOUND" =~ ^[0-9]+$ ]]; then
+            echo "::error::Unexpected errors-found output: '$ERRORS_FOUND'"
+            exit 1
+          fi
+          echo "total-calls=$TOTAL_CALLS errors-found=$ERRORS_FOUND"
+
+  ### The Action Checked Out Inside the Workspace ###
+  tests-checkout-local:
+    name: 'Test action checked out in the workspace'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
+        with:
+          egress-policy: audit
+
+      # 'uses: ./linter-action' runs the action from this subdirectory,
+      # so the workspace root, holding the files planted below, is one
+      # of its parent directories, as for a caller that vendors it.
+      - name: 'Checkout this action into the workspace'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: 'linter-action'
+          persist-credentials: false
+
+      - name: 'Checkout sample repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: 'lfreleng-actions/actions-template'
+          path: 'actions-template'
+          persist-credentials: false
+
+      # In the action's parent directory: a .venv and a .python-version
+      # whose interpreters record that they ran, and a uv.toml whose
+      # index-url cannot resolve, so an install that reads it fails.
+      - name: 'Plant interpreters and uv settings above the action'
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/planted-ran"
+          stub() {
+            # $0 and $* expand when the stub runs, not here.
+            # shellcheck disable=SC2016
+            printf '#!/bin/sh\necho "%s: $0 $*" >> "%s"\nexit 1\n' \
+              "$1" "$marker" > "$2"
+            chmod +x "$2"
+          }
+          mkdir -p .venv/bin planted
+          printf 'home = /usr/bin\nversion_info = 3.12.0\n' > .venv/pyvenv.cfg
+          stub venv .venv/bin/python3
+          stub venv .venv/bin/python
+          stub python-version planted/python3
+          echo "$GITHUB_WORKSPACE/planted/python3" > .python-version
+          echo 'index-url = "https://planted-index.invalid/simple"' > uv.toml
+
+      - name: "Running action from the workspace: ${{ github.repository }}"
+        id: lint
+        # The local path is the point of this job: '$/' would download the
+        # action outside the workspace, as the job above does.
+        uses: ./linter-action  # zizmor: ignore[self-repository]
+        with:
+          path: 'actions-template'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Check outputs and that nothing planted was used'
+        shell: bash
+        env:
+          TOTAL_CALLS: ${{ steps.lint.outputs.total-calls }}
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/planted-ran"
+          if [[ -e "$marker" ]]; then
+            echo "::error::A planted workspace interpreter ran:"
+            cat "$marker"
+            exit 1
+          fi
+          # The install reached the real index, so the run produced output
+          if ! [[ "$TOTAL_CALLS" =~ ^[0-9]+$ && "$TOTAL_CALLS" -gt 0 ]]; then
+            echo "::error::Unexpected total-calls output: '$TOTAL_CALLS'"
+            exit 1
+          fi
+          echo "total-calls=$TOTAL_CALLS"
