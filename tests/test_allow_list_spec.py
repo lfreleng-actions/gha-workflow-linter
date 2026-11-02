@@ -4,9 +4,8 @@
 """Tests for allow-list ``config`` coordinate parsing.
 
 The first half of this file is a port of the upstream conformance
-corpus: ``tests/test_resolve_config_source.py`` (the parsing sections,
-lines 1-180) in ``lfreleng-actions/harden-runner-block-action``, itself
-mirrored byte-for-byte into ``lfreleng-actions/python-audit-action``.
+corpus: the parsing sections of ``tests/test_resolve_config_source.py``
+in ``lfreleng-actions/harden-runner-block-action``.
 
 Those cases are the *specification* for the grammar, not merely tests of
 this module. Keep them in step with upstream: when the grammar changes

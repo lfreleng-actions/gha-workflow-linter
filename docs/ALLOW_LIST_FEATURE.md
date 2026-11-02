@@ -132,10 +132,9 @@ follow, and both are load-bearing for the rest of this design:
 
 ## 2. The reference format we must understand
 
-The grammar is defined by `resolve_config_source.py`, a file mirrored
-byte-for-byte between `harden-runner-block-action` and
-`python-audit-action`. We must **mirror its parsing semantics exactly**;
-divergence produces false positives on valid pins.
+The grammar is defined by the resolver in `harden-runner-block-action`,
+in `src/resolve_config_grammar.py`. We must **mirror its parsing
+semantics exactly**; divergence produces false positives on valid pins.
 
 ```text
 <config> ::= <source> [ "@" <ref> ] [ <ws>+ "#" <comment> ]
@@ -272,8 +271,9 @@ Relevant facts established by auditing the codebase:
    limited, unresolvable release → warn and skip. A developer offline on
    a train must still be able to commit.
 4. **Mirror the canonical grammar, do not reinvent it.** The spec parser
-   is a faithful port of `resolve_config_source.py` with a test suite
-   derived from that action's own cases.
+   is a faithful port of `harden-runner-block-action`'s
+   `src/resolve_config_grammar.py` with a test suite derived from that
+   action's own cases.
 5. **Reuse before adding.** Latest-release resolution, caching, token
    discovery, file discovery and line rewriting all have existing homes.
    Extend them rather than growing a parallel stack.
@@ -374,8 +374,9 @@ number of allow-lists side by side, one directory per consumer family:
 ```
 
 The families are **data**, not code. Every consumer shares one grammar,
-one resolver (`resolve_config_source.py`, mirrored byte-for-byte between
-the consuming actions), one host repository (`<org>/.github`) and one
+one resolver (owned by `harden-runner-block-action` and consumed by
+`python-audit-action` through its `resolve-config` sub-action), one host
+repository (`<org>/.github`) and one
 convention for the input name (`config`). The only per-consumer
 difference is a `--family` flag chosen by the action at run time, which
 selects a directory.
@@ -1348,18 +1349,18 @@ convention (`action_call_*`, `allow_list_*`):
 
 <!-- markdownlint-disable MD013 -->
 
-| Module                   | Responsibility                                                                                                                                                                                   | Depends on                                                |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `allow_list_spec.py`     | Pure parser/resolver for the config grammar. Port of `resolve_config_source.py` (parse/split/resolve only — no fetching, no sanitising). Also renders a spec back to source form.                | stdlib only                                               |
-| `directives.py`          | Suppression directive grammar (§7.4): preceding-line and inline forms, optional reason text, and which finding kinds each directive may suppress. Deliberately generic, not allow-list specific. | stdlib only                                               |
-| `allow_list_scanner.py`  | YAML-node-tree walk producing `AllowListPin` records with line/column anchors, plus the syntax-anchored recogniser predicate (no consumer registry).                                             | `allow_list_spec`, `yaml`, `scanner`                      |
-| `allow_list_resolver.py` | Latest-release → peeled commit SHA per host repo, across both backends, with caching and cooldown.                                                                                               | `github_api`, `action_call_git`, `cache`, `version_utils` |
-| `allow_list_check.py`    | Orchestrator: pins + resolution + suppression → `AllowListFinding` list; severity assignment; summary construction.                                                                              | the four above                                            |
-| `allow_list_fix.py`      | Surgical line rewriting for fixable findings.                                                                                                                                                    | `file_edit`, `allow_list_spec`                            |
-| `allow_list_report.py`   | Rich text and JSON rendering.                                                                                                                                                                    | `console`, `models`                                       |
-| `file_edit.py`           | Shared atomic line-replacement writer.                                                                                                                                                           | stdlib                                                    |
-| `exit_codes.py`          | Centralised exit-code constants and the defect/currency decision (§8).                                                                                                                           | stdlib                                                    |
-| `multi_repo.py`          | Repository discovery and per-repo run aggregation.                                                                                                                                               | `paths`                                                   |
+| Module                   | Responsibility                                                                                                                                                                                                        | Depends on                                                |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `allow_list_spec.py`     | Pure parser/resolver for the config grammar. Port of `harden-runner-block-action`'s `src/resolve_config_grammar.py` (parse/split/resolve only — no fetching, no sanitising). Also renders a spec back to source form. | stdlib only                                               |
+| `directives.py`          | Suppression directive grammar (§7.4): preceding-line and inline forms, optional reason text, and which finding kinds each directive may suppress. Deliberately generic, not allow-list specific.                      | stdlib only                                               |
+| `allow_list_scanner.py`  | YAML-node-tree walk producing `AllowListPin` records with line/column anchors, plus the syntax-anchored recogniser predicate (no consumer registry).                                                                  | `allow_list_spec`, `yaml`, `scanner`                      |
+| `allow_list_resolver.py` | Latest-release → peeled commit SHA per host repo, across both backends, with caching and cooldown.                                                                                                                    | `github_api`, `action_call_git`, `cache`, `version_utils` |
+| `allow_list_check.py`    | Orchestrator: pins + resolution + suppression → `AllowListFinding` list; severity assignment; summary construction.                                                                                                   | the four above                                            |
+| `allow_list_fix.py`      | Surgical line rewriting for fixable findings.                                                                                                                                                                         | `file_edit`, `allow_list_spec`                            |
+| `allow_list_report.py`   | Rich text and JSON rendering.                                                                                                                                                                                         | `console`, `models`                                       |
+| `file_edit.py`           | Shared atomic line-replacement writer.                                                                                                                                                                                | stdlib                                                    |
+| `exit_codes.py`          | Centralised exit-code constants and the defect/currency decision (§8).                                                                                                                                                | stdlib                                                    |
+| `multi_repo.py`          | Repository discovery and per-repo run aggregation.                                                                                                                                                                    | `paths`                                                   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1617,21 +1618,21 @@ runs, so the sweep keeps itself current.
 
 <!-- markdownlint-disable MD013 -->
 
-| Area                  | Coverage                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `allow_list_spec`     | Conformance corpus **ported from the mirrored `tests/test_resolve_config_source.py`** in `harden-runner-block-action` / `python-audit-action` (§19); plus the shorthand `@<sha>`; bare `//`; filename-only subpath; explicit path; comment splitting including the `foo#bar` non-comment case and the newline-rejection case; every `ResolveError` branch (double `@`, double `//`, empty ref, bad org/repo/ref/segment, `..` traversal) |
-| `consumer neutrality` | A `harden-runner` pin and a `python-audit` pin are judged stale on identical conditions; a scalar naming an unknown family is handled with no code change; an unrelated `config:` value that is not a valid spec is skipped, not mis-resolved                                                                                                                                                                                            |
-| `allow_list_scanner`  | Real fixtures copied from `.github`, `java-workflows` and this repo; the `on` → `True` YAML-1.1 key gotcha; `${{ }}` expression skip; multi-line scalar marked unfixable; single vs double vs unquoted scalars; a file with no pins; a file that fails YAML parsing                                                                                                                                                                      |
-| `allow_list_resolver` | Annotated-tag peel (must return the commit, not the tag object); prerelease and draft filtering; cooldown selection; cache hit path costs zero API calls; git backend returns `None` under an active cooldown; both backends agree on a shared fixture                                                                                                                                                                                   |
-| `directives`          | Both forms parse; preceding-line form rejected when separated by a blank line or intervening content; indentation irrelevant; version token stays first in `# v0.5.1 allow-list-pin-ok`; optional `-- reason` captured; unrecognised trailing tokens preserved and ignored; directive found in an in-scalar comment as well as a YAML comment; both forms present is idempotent, not an error                                            |
-| `allow_list_check`    | Severity assignment per kind; `--verify-allow-list` promotion; `COMMENT_MISMATCH` where the SHA is current but the comment is not; `UNRESOLVABLE`; resolution-failure fail-open in default mode and fail-hard under verify; **suppression covers `STALE`/`UNPINNED` and does NOT cover `COMMENT_MISMATCH`/`UNRESOLVABLE`/`INVALID_SPEC`**; `--show-suppressed` changes output but never the exit code                                    |
-| `allow_list_fix`      | Byte-for-byte diff assertions: only the ref and comment change; quote style preserved; spacing before `#` preserved; comment added where absent; CRLF file stays CRLF; final line without a trailing newline does not gain one; unfixable pins untouched; **a suppressed pin is never rewritten**; **directives and reason text survive a rewrite triggered by a non-suppressible kind**                                                 |
-| `annotated_tag_sha`   | A tag-object SHA is reported as `ANNOTATED_TAG_SHA`, not `INVALID_REFERENCE`; **both backends agree** (regression test for the confirmed git false pass, §8.2); the message names the peeled commit; auto-fixed under plain `--auto-fix` without `--update-actions`; a real commit SHA is untouched                                                                                                                                      |
-| `file_edit`           | Atomicity (no partial file on simulated write failure); line-ending preservation; disjoint-line assertion fires on a double claim                                                                                                                                                                                                                                                                                                        |
-| `exit_codes`          | Table-driven test of every combination in the §9.3 behaviour matrix, asserting the exact integer; **`lint`, `lint --quiet` and `lint --format json` return identical codes for the same fixture** (regression test for §8.6); a defect plus an outdated action exits `1`, not `0`                                                                                                                                                        |
-| `cli`                 | New flags parse; `--allow-list-org`/`--repo-depth` survive bare invocation without an explicit `lint` subcommand; `--auto-latest` still works and warns; the warning goes to stderr, never stdout; `--format json` output stays valid JSON with the deprecated flag set                                                                                                                                                                  |
-| `multi_repo`          | Discovery at depth 1 and 2; `.git` file (worktree) as well as `.git` directory; per-repo org resolution; one failing repo does not abort the run; the shared resolver is called once for N repos                                                                                                                                                                                                                                         |
-| Regression            | Existing suite passes unchanged **except** the exit-code tests affected by §8.6, which are updated deliberately and called out in the commit body; a `lint` run with no allow-list pins produces byte-identical output to today                                                                                                                                                                                                          |
+| Area                  | Coverage                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allow_list_spec`     | Conformance corpus **ported from `tests/test_resolve_config_source.py`** in `harden-runner-block-action` (§19); plus the shorthand `@<sha>`; bare `//`; filename-only subpath; explicit path; comment splitting including the `foo#bar` non-comment case and the newline-rejection case; every `ResolveError` branch (double `@`, double `//`, empty ref, bad org/repo/ref/segment, `..` traversal)   |
+| `consumer neutrality` | A `harden-runner` pin and a `python-audit` pin are judged stale on identical conditions; a scalar naming an unknown family is handled with no code change; an unrelated `config:` value that is not a valid spec is skipped, not mis-resolved                                                                                                                                                         |
+| `allow_list_scanner`  | Real fixtures copied from `.github`, `java-workflows` and this repo; the `on` → `True` YAML-1.1 key gotcha; `${{ }}` expression skip; multi-line scalar marked unfixable; single vs double vs unquoted scalars; a file with no pins; a file that fails YAML parsing                                                                                                                                   |
+| `allow_list_resolver` | Annotated-tag peel (must return the commit, not the tag object); prerelease and draft filtering; cooldown selection; cache hit path costs zero API calls; git backend returns `None` under an active cooldown; both backends agree on a shared fixture                                                                                                                                                |
+| `directives`          | Both forms parse; preceding-line form rejected when separated by a blank line or intervening content; indentation irrelevant; version token stays first in `# v0.5.1 allow-list-pin-ok`; optional `-- reason` captured; unrecognised trailing tokens preserved and ignored; directive found in an in-scalar comment as well as a YAML comment; both forms present is idempotent, not an error         |
+| `allow_list_check`    | Severity assignment per kind; `--verify-allow-list` promotion; `COMMENT_MISMATCH` where the SHA is current but the comment is not; `UNRESOLVABLE`; resolution-failure fail-open in default mode and fail-hard under verify; **suppression covers `STALE`/`UNPINNED` and does NOT cover `COMMENT_MISMATCH`/`UNRESOLVABLE`/`INVALID_SPEC`**; `--show-suppressed` changes output but never the exit code |
+| `allow_list_fix`      | Byte-for-byte diff assertions: only the ref and comment change; quote style preserved; spacing before `#` preserved; comment added where absent; CRLF file stays CRLF; final line without a trailing newline does not gain one; unfixable pins untouched; **a suppressed pin is never rewritten**; **directives and reason text survive a rewrite triggered by a non-suppressible kind**              |
+| `annotated_tag_sha`   | A tag-object SHA is reported as `ANNOTATED_TAG_SHA`, not `INVALID_REFERENCE`; **both backends agree** (regression test for the confirmed git false pass, §8.2); the message names the peeled commit; auto-fixed under plain `--auto-fix` without `--update-actions`; a real commit SHA is untouched                                                                                                   |
+| `file_edit`           | Atomicity (no partial file on simulated write failure); line-ending preservation; disjoint-line assertion fires on a double claim                                                                                                                                                                                                                                                                     |
+| `exit_codes`          | Table-driven test of every combination in the §9.3 behaviour matrix, asserting the exact integer; **`lint`, `lint --quiet` and `lint --format json` return identical codes for the same fixture** (regression test for §8.6); a defect plus an outdated action exits `1`, not `0`                                                                                                                     |
+| `cli`                 | New flags parse; `--allow-list-org`/`--repo-depth` survive bare invocation without an explicit `lint` subcommand; `--auto-latest` still works and warns; the warning goes to stderr, never stdout; `--format json` output stays valid JSON with the deprecated flag set                                                                                                                               |
+| `multi_repo`          | Discovery at depth 1 and 2; `.git` file (worktree) as well as `.git` directory; per-repo org resolution; one failing repo does not abort the run; the shared resolver is called once for N repos                                                                                                                                                                                                      |
+| Regression            | Existing suite passes unchanged **except** the exit-code tests affected by §8.6, which are updated deliberately and called out in the commit body; a `lint` run with no allow-list pins produces byte-identical output to today                                                                                                                                                                       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1751,30 +1752,28 @@ without them. Both return with whatever work produces them.
 
 ## 19. Risks, edge cases and open questions
 
-**Grammar drift.** `allow_list_spec.py` is a port of a file that is
-mirrored byte-for-byte between `harden-runner-block-action` and
-`python-audit-action`, enforced by a `sync-shared-resolver.yaml` workflow
-present in **both** repositories. Crucially, that sync covers not just
-`src/resolve_config_source.py` but also
-`tests/test_resolve_config_source.py` — there is an existing, mirrored
-test suite whose stated purpose is to "pin the shared `config` grammar".
+**Grammar drift.** `allow_list_spec.py` is a port of the resolver that
+`harden-runner-block-action` alone owns. Its grammar lives in
+`src/resolve_config_grammar.py`, with `src/resolve_config_source.py` as
+the entry point; `python-audit-action` keeps no copy and calls it
+through the `resolve-config` sub-action. Upstream also carries
+`tests/test_resolve_config_source.py`, a test suite whose stated
+purpose is to "pin the shared `config` grammar".
 
-That is a gift rather than a threat, provided we use it:
+That is a gift rather than a threat, provided we use it. **Derive our
+test suite from theirs:** port the parsing tests of
+`tests/test_resolve_config_source.py` as the conformance corpus for
+`allow_list_spec.py`. Cases we invent ourselves are guesses; those
+cases are the specification.
 
-1. **Derive our test suite from theirs.** Port
-   `tests/test_resolve_config_source.py` as the conformance corpus for
-   `allow_list_spec.py`. Cases we invent ourselves are guesses; those
-   cases are the specification.
-2. **Register as a third consumer.** Add `gha-workflow-linter` to the
-   banner in the mirrored file listing repositories that must be updated
-   in the same change, so the next paired PR carries a visible reminder.
-3. **Consider extending the sync check.** The cleanest long-term answer
-   is for `sync-shared-resolver.yaml` to also assert that our port agrees
-   with the upstream corpus, making divergence a CI failure rather than a
-   silent behavioural drift discovered through false findings.
-
-Without at least (1) and (2), a grammar change lands as a paired PR
-across two repositories while our port quietly diverges.
+Drift protection today has two parts. `harden-runner-block-action`'s
+`AGENTS.md` asks that any change to the `config` grammar raise an issue
+in this repository, and this repository's ported corpus pins the
+grammar the port must accept, so a grammar change ported into it fails
+here until the parser follows. Nothing compares the port with upstream
+automatically. A CI check that does so, making divergence a CI failure
+rather than a silent behavioural drift discovered through false
+findings, remains a possible future improvement.
 
 **False positives are expensive.** A linter that cries wolf on a valid
 pin will be switched off. The recogniser predicate (§5.1) is deliberately
