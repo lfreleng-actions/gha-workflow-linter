@@ -560,6 +560,32 @@ A pin counts as stale when the target is newer, and not otherwise.
 It leaves a repository already ahead of the cooldown-eligible release
 alone, so a cooldown never recommends a downgrade.
 
+Some references float on purpose. `harden-runner-block-action` accepts
+an unpinned same-organisation supplemental list when a paired flag in
+the same mapping opts in, and the linter honours that flag:
+
+<!-- markdownlint-disable MD013 -->
+
+| Reference key                          | Paired flag                           |
+| -------------------------------------- | ------------------------------------- |
+| `harden_runner_supplemental_allowlist` | `harden_runner_supplemental_unpinned` |
+| `supplemental_config`                  | `supplemental_unpinned`               |
+
+<!-- markdownlint-enable MD013 -->
+
+The flag sits beside the reference in a reusable-workflow call's
+`with:` block, or, for a `workflow_call` input, as the paired input's
+`default`. A literal `true` (unquoted, or the string `true` in any
+case) means a floating reference produces no finding, and
+`--allow-list update` leaves it alone. A flag written as an expression
+(`${{ … }}`) leaves the decision to the caller at run time, so the
+linter still reports the reference as unpinned but never rewrites it.
+A `false` or absent flag changes nothing. A reference shared through a
+YAML alias takes every use's flag into account: when the uses disagree,
+the linter reports the floating reference but never rewrites it, since
+the one value would pin a use that opts in. A reference under these
+keys that does name a commit SHA still counts as stale when it lags.
+
 #### Allow-list cooldown
 
 The target is the host repository's newest release from the moment its

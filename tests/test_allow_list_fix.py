@@ -41,6 +41,8 @@ from gha_workflow_linter.allow_list_fix import (
     REASON_NO_TARGET,
     REASON_SPEC_NOT_FOUND,
     REASON_SUPPRESSED,
+    REASON_UNPINNED_AT_RUN_TIME,
+    REASON_UNPINNED_SHARED,
     DuplicateFixError,
     apply_fixes,
 )
@@ -853,6 +855,137 @@ class TestEnvVariablePins:
             f"  HARDEN_RUNNER_ALLOWLIST: &pin '@{CURRENT_SHA}'  # {CURRENT_TAG}"
         )
         assert lines_of(path)[8] == "          config: *pin"
+
+
+def write_caller(tmp_path: Path, value: str, flag: str | None) -> Path:
+    """Write a reusable-workflow caller with a supplemental reference.
+
+    Args:
+        tmp_path: Directory to write into.
+        value: The reference, without quotes.
+        flag: Source text of the paired unpinned flag's value, or
+            ``None`` to omit the flag.
+
+    Returns:
+        The path written.
+    """
+    lines = [
+        "---",
+        "jobs:",
+        "  call:",
+        "    uses: ./.github/workflows/reusable.yaml",
+        "    with:",
+        f"      harden_runner_supplemental_allowlist: '{value}'",
+    ]
+    if flag is not None:
+        lines.append(f"      harden_runner_supplemental_unpinned: {flag}")
+    path = tmp_path / "caller.yaml"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+class TestUnpinnedOptIn:
+    """A floating reference its paired flag declares deliberate."""
+
+    @pytest.mark.parametrize("flag", ["true", "'true'"])
+    def test_literal_true_leaves_the_file_unchanged(
+        self, tmp_path: Path, flag: str
+    ) -> None:
+        """No finding, so ``update`` writes nothing."""
+        path = write_caller(tmp_path, "lfreleng-actions//", flag)
+        before = path.read_bytes()
+
+        findings = findings_for(path)
+        outcome = apply_fixes(findings)
+
+        assert findings == []
+        assert outcome.applied == []
+        assert path.read_bytes() == before
+
+    def test_self_test_block_is_unchanged(self, tmp_path: Path) -> None:
+        """The workflow repositories' self-test survives ``update``."""
+        source = FIXTURES / "supplemental_self_test.yaml"
+        path = tmp_path / "testing.yaml"
+        path.write_bytes(source.read_bytes())
+
+        outcome = fix_file(path)
+
+        assert outcome.applied == []
+        assert path.read_bytes() == source.read_bytes()
+
+    def test_expression_flag_is_reported_but_not_fixed(
+        self, tmp_path: Path
+    ) -> None:
+        """The caller decides at run time, so the ref is never pinned."""
+        path = write_caller(
+            tmp_path,
+            "lfreleng-actions//",
+            "${{ inputs.harden_runner_supplemental_unpinned }}",
+        )
+        before = path.read_bytes()
+
+        outcome = fix_file(path)
+
+        assert outcome.applied == []
+        assert reasons(outcome) == [REASON_UNPINNED_AT_RUN_TIME]
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("flag", ["false", None])
+    def test_false_or_absent_flag_is_pinned(
+        self, tmp_path: Path, flag: str | None
+    ) -> None:
+        """Without the opt-in, a floating ref is pinned as before."""
+        path = write_caller(tmp_path, "lfreleng-actions//", flag)
+
+        findings = findings_for(path)
+        outcome = apply_fixes(findings)
+
+        assert [finding.kind for finding in findings] == [
+            AllowListFindingKind.UNPINNED
+        ]
+        assert len(outcome.applied) == 1
+        assert lines_of(path)[5] == (
+            "      harden_runner_supplemental_allowlist: "
+            f"'lfreleng-actions//@{CURRENT_SHA}'  # {CURRENT_TAG}"
+        )
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            (
+                "supplemental_alias_unflagged_first.yaml",
+                [REASON_UNPINNED_SHARED],
+            ),
+            ("supplemental_alias_flagged_first.yaml", [REASON_UNPINNED_SHARED]),
+            ("supplemental_alias_agreeing.yaml", []),
+        ],
+    )
+    def test_aliased_reference_is_never_pinned(
+        self, tmp_path: Path, name: str, expected: list[str]
+    ) -> None:
+        """A scalar shared with a flagged use survives ``update``."""
+        source = FIXTURES / name
+        path = tmp_path / name
+        path.write_bytes(source.read_bytes())
+
+        outcome = fix_file(path)
+
+        assert outcome.applied == []
+        assert reasons(outcome) == expected
+        assert path.read_bytes() == source.read_bytes()
+
+    def test_stale_sha_with_the_flag_is_fixed(self, tmp_path: Path) -> None:
+        """A pinned supplemental list still moves forward."""
+        path = write_caller(tmp_path, f"lfreleng-actions//@{STALE_SHA}", "true")
+
+        findings = findings_for(path)
+        outcome = apply_fixes(findings)
+
+        assert [finding.kind for finding in findings] == [
+            AllowListFindingKind.STALE
+        ]
+        assert len(outcome.applied) == 1
+        assert f"lfreleng-actions//@{CURRENT_SHA}" in lines_of(path)[5]
 
 
 class TestLineEndings:

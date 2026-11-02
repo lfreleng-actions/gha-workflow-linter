@@ -1,0 +1,55 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# Each job pairs a supplemental allow-list reference with a different
+# value of its unpinned flag. Only a literal 'true' declares a floating
+# reference deliberate.
+name: Supplemental flags
+
+on:
+  workflow_call:
+    inputs:
+      harden_runner_supplemental_allowlist:
+        type: string
+        default: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned:
+        type: boolean
+        default: true
+
+jobs:
+  boolean:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: true
+
+  quoted:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: 'TRUE'
+
+  expression:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned }}
+
+  disabled:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: false
+
+  absent:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+
+  unpaired:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: true

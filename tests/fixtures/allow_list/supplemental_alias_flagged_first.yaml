@@ -1,0 +1,25 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# A floating reference shared through a YAML alias. The caller that
+# opts in via the paired flag comes first in the walk; a caller without
+# the flag reuses the scalar later and still needs its finding.
+name: Alias, flagged first
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  self-test:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: &supplemental 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: true
+
+  plain:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: *supplemental

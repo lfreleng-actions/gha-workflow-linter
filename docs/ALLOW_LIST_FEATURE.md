@@ -581,6 +581,44 @@ sub-detail of `STALE`. As issue #296 notes, "the comment can lie" — a pin
 whose SHA is current but whose comment claims an old version misleads
 every subsequent human reviewer.
 
+#### Intentionally unpinned references
+
+`harden-runner-block-action` accepts a floating same-organisation
+supplemental list when a paired flag opts in, and the workflow
+repositories' self-tests use it on purpose. The scanner therefore reads
+the paired flag from the **same mapping** as the reference: the same
+`with:` block for a reusable-workflow call (location 3), or the paired
+input's `default` for a `workflow_call` input (location 2). The pairing
+is an explicit table, `UNPINNED_FLAG_PAIRS`, never a glob, and it does
+not widen what the scanner collects:
+
+<!-- markdownlint-disable MD013 -->
+
+| Reference key                          | Paired flag                           |
+| -------------------------------------- | ------------------------------------- |
+| `harden_runner_supplemental_allowlist` | `harden_runner_supplemental_unpinned` |
+| `supplemental_config`                  | `supplemental_unpinned`               |
+
+<!-- markdownlint-enable MD013 -->
+
+The flag's value decides the outcome for a reference that is not a SHA:
+
+- **Literal `true`** (a YAML boolean, or the string `true` in any case):
+  no finding, so `--update-allow-list` leaves the line alone.
+- **An expression** (`${{ … }}`): `UNPINNED` as usual, but never
+  auto-fixed, because the caller decides at run time.
+- **`false` or absent:** `UNPINNED`, auto-fixed as for any other pin.
+
+A scalar shared through YAML aliases yields one pin, whose opt-in
+merges every recognised use's flag, in any order. Uses that agree keep
+their common value; uses that disagree give `MIXED`: `UNPINNED`, since
+not every use opts in, but never auto-fixed, since rewriting the
+shared scalar would pin a use that does.
+
+A reference under these keys that *does* carry a SHA stays subject to
+`STALE` and `COMMENT_MISMATCH`: a pinned supplemental list should still
+move forward.
+
 ### 7.3 Data model
 
 ```python
@@ -600,6 +638,7 @@ class AllowListPin:
     suppressed_by: SuppressionSource | None
     spec: ResolvedSpec        # host_org, repo, ref, candidates, path_explicit
     auto_fixable: bool
+    unpinned_opt_in: UnpinnedOptIn  # NONE | LITERAL | EXPRESSION | MIXED
 
 
 @dataclass(frozen=True)
