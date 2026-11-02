@@ -14,7 +14,10 @@ Three rules decide the kind, and they are exhaustive for this phase
 (design section 7.2):
 
 * The ref is not a 40-character hexadecimal SHA -- a branch, a tag, or
-  the implicit ``HEAD`` -- so the pin floats: ``UNPINNED``.
+  the implicit ``HEAD`` -- so the pin floats: ``UNPINNED``. A pin whose
+  paired flag is literally ``true`` floats on purpose and produces no
+  finding; see
+  :data:`~gha_workflow_linter.allow_list_scanner.UNPINNED_FLAG_PAIRS`.
 * The ref is a SHA the host repository has moved *beyond*: ``STALE``.
 * The ref *is* the latest release's commit, but the version comment
   names a different version: ``COMMENT_MISMATCH``. A comment that lies
@@ -76,7 +79,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from .allow_list_resolver import AllowListResolver
-from .allow_list_scanner import AllowListScanner
+from .allow_list_scanner import AllowListScanner, UnpinnedOptIn
 from .allow_list_spec import ORG_RE
 from .directives import Directive
 from .exceptions import ConfigurationError
@@ -525,10 +528,13 @@ def _finding_kind(
     Returns:
         The finding kind, or ``None`` when the pin is current -- either
         because it names the target commit and its comment agrees, or
-        because it names a release at or ahead of the target.
+        because it names a release at or ahead of the target -- or when
+        its paired flag declares a floating ref deliberate.
     """
     ref = pin.spec.ref
     if not _SHA_RE.match(ref):
+        if pin.unpinned_opt_in is UnpinnedOptIn.LITERAL:
+            return None
         return AllowListFindingKind.UNPINNED
     if ref.lower() != latest.commit_sha.lower():
         if _pin_is_at_or_ahead(ref, latest):
@@ -594,10 +600,21 @@ def _message(
     """
     host = host_key(pin)
     if kind is AllowListFindingKind.UNPINNED:
-        return (
+        message = (
             f"Allow-list pin references '{pin.spec.ref}' rather than a "
             f"commit SHA; {host} is at {latest.tag}"
         )
+        if pin.unpinned_opt_in is UnpinnedOptIn.EXPRESSION:
+            message += (
+                "; its unpinned flag is decided at run time, so it is "
+                "not rewritten"
+            )
+        elif pin.unpinned_opt_in is UnpinnedOptIn.MIXED:
+            message += (
+                "; a YAML alias shares it with a use whose unpinned flag "
+                "differs, so it is not rewritten"
+            )
+        return message
     if kind is AllowListFindingKind.COMMENT_MISMATCH:
         return (
             f"Version comment says '{pin.version_comment}' but the "

@@ -1,0 +1,24 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The self-test shape from lfreleng-actions/go-workflows
+# .github/workflows/testing.yaml (and its sibling workflow
+# repositories). It exercises harden-runner-block-action's same-org
+# unpinned supplemental list, so the floating reference is deliberate
+# and declared so by the paired flag in the same 'with:' block.
+name: Testing
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  self-test:
+    uses: ./.github/workflows/reusable-go-build.yaml
+    permissions:
+      contents: read
+    with:
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: true

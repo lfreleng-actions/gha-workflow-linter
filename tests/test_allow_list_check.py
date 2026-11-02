@@ -806,6 +806,105 @@ class TestSuppressionMatrix:
         assert [finding.suppressed for finding in findings] == [True, False]
 
 
+def classify_fixture(path: Path) -> dict[str, AllowListFinding]:
+    """Scan and classify one file against the current release.
+
+    Args:
+        path: File to scan.
+
+    Returns:
+        Each finding keyed by its pin's dotted key path.
+    """
+    pins = AllowListScanner(Config(), WORKFLOW_ORG).scan_file(path)
+    findings = classify_pins(pins, {HOST_REPO: LATEST}, verify=False)
+    return {".".join(finding.pin.key_path): finding for finding in findings}
+
+
+class TestUnpinnedOptIn:
+    """A paired flag can declare a floating reference deliberate."""
+
+    SUPPLEMENTAL = "harden_runner_supplemental_allowlist"
+
+    def test_literal_true_produces_no_finding(self) -> None:
+        """``true``, ``'TRUE'`` and a ``true`` input default all opt in."""
+        findings = classify_fixture(FIXTURES / "supplemental_unpinned.yaml")
+
+        for key in (
+            f"on.workflow_call.inputs.{self.SUPPLEMENTAL}.default",
+            f"jobs.boolean.with.{self.SUPPLEMENTAL}",
+            f"jobs.quoted.with.{self.SUPPLEMENTAL}",
+        ):
+            assert key not in findings
+
+    def test_expression_flag_is_still_reported(self) -> None:
+        """The caller decides at run time, so the finding stands."""
+        findings = classify_fixture(FIXTURES / "supplemental_unpinned.yaml")
+
+        finding = findings[f"jobs.expression.with.{self.SUPPLEMENTAL}"]
+        assert finding.kind is AllowListFindingKind.UNPINNED
+        assert "decided at run time" in finding.message
+
+    def test_false_absent_or_unpaired_flag_is_unpinned(self) -> None:
+        """Without a literal ``true`` beside it, a floating ref is reported."""
+        findings = classify_fixture(FIXTURES / "supplemental_unpinned.yaml")
+
+        for key in (
+            f"jobs.disabled.with.{self.SUPPLEMENTAL}",
+            f"jobs.absent.with.{self.SUPPLEMENTAL}",
+            "jobs.unpaired.with.harden_runner_allowlist",
+        ):
+            assert findings[key].kind is AllowListFindingKind.UNPINNED
+
+    def test_self_test_block_produces_no_finding(self) -> None:
+        """The workflow repositories' self-test is left alone."""
+        path = FIXTURES / "supplemental_self_test.yaml"
+
+        assert classify_fixture(path) == {}
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "supplemental_alias_unflagged_first.yaml",
+            "supplemental_alias_flagged_first.yaml",
+        ],
+    )
+    def test_alias_with_an_unflagged_use_is_reported(self, name: str) -> None:
+        """An unflagged use keeps its finding, whichever use comes first."""
+        findings = list(classify_fixture(FIXTURES / name).values())
+
+        assert [finding.kind for finding in findings] == [
+            AllowListFindingKind.UNPINNED
+        ]
+        assert "alias" in findings[0].message
+
+    def test_alias_with_every_use_flagged_is_not_reported(self) -> None:
+        """When every use opts in, the shared scalar produces no finding."""
+        path = FIXTURES / "supplemental_alias_agreeing.yaml"
+
+        assert classify_fixture(path) == {}
+
+    def test_stale_sha_with_the_flag_is_still_stale(
+        self, tmp_path: Path
+    ) -> None:
+        """The flag excuses a floating ref, never an old pinned one."""
+        path = tmp_path / "pinned.yaml"
+        path.write_text(
+            "---\n"
+            "jobs:\n"
+            "  call:\n"
+            "    uses: ./.github/workflows/reusable.yaml\n"
+            "    with:\n"
+            f"      {self.SUPPLEMENTAL}: 'lfreleng-actions//@{STALE_SHA}'\n"
+            "      harden_runner_supplemental_unpinned: true\n",
+            encoding="utf-8",
+        )
+
+        findings = classify_fixture(path)
+
+        finding = findings[f"jobs.call.with.{self.SUPPLEMENTAL}"]
+        assert finding.kind is AllowListFindingKind.STALE
+
+
 class TestResolutionFailure:
     """Fail-soft behaviour of design section 6.4."""
 

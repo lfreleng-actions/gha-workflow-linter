@@ -38,9 +38,11 @@ House style applies to exactly one thing: a comment that does not exist
 yet. New content has no author intent to preserve, so it is added with
 the project's default two-space separation.
 
-Four conditions stop a rewrite before it starts, each recorded in
+Six conditions stop a rewrite before it starts, each recorded in
 :attr:`FixOutcome.skipped` with its reason: a suppressed finding (checked
-first, and never rewritten), a multi-line scalar, a finding with no
+first, and never rewritten), a floating pin whose paired unpinned flag
+is an expression, a floating pin shared through YAML aliases by uses
+whose paired flags differ, a multi-line scalar, a finding with no
 target commit, and a line whose text no longer matches what the scanner
 recorded.
 
@@ -57,10 +59,11 @@ import dataclasses
 import logging
 from typing import TYPE_CHECKING
 
-from .allow_list_scanner import CommentPosition, QuoteStyle
+from .allow_list_scanner import CommentPosition, QuoteStyle, UnpinnedOptIn
 from .allow_list_spec import SpecError, render_spec, split_comment
 from .directives import parse_trailing_comment, render_comment
 from .file_edit import replace_lines
+from .models import AllowListFindingKind
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -78,6 +81,8 @@ __all__ = [
     "REASON_NO_TARGET",
     "REASON_SPEC_NOT_FOUND",
     "REASON_SUPPRESSED",
+    "REASON_UNPINNED_AT_RUN_TIME",
+    "REASON_UNPINNED_SHARED",
     "AppliedFix",
     "DuplicateFixError",
     "FixOutcome",
@@ -95,6 +100,18 @@ COMMENT_SEPARATOR = "  "
 #: before every other condition, so a suppressed pin is never rewritten
 #: even when it is also unfixable for some other reason.
 REASON_SUPPRESSED = "an allow-list-pin-ok directive covers this finding"
+
+#: Recorded for a floating pin whose paired unpinned flag is a GitHub
+#: expression: the caller decides at run time whether the ref may float,
+#: so pinning it here would override that decision.
+REASON_UNPINNED_AT_RUN_TIME = "the paired unpinned flag is decided at run time"
+
+#: Recorded for a floating pin whose scalar YAML aliases share between
+#: uses whose paired unpinned flags differ: rewriting the one scalar
+#: would pin a use that declares its ref deliberately floating.
+REASON_UNPINNED_SHARED = (
+    "an alias shares the value with a use whose unpinned flag differs"
+)
 
 #: Recorded for a scalar spanning several lines. The scanner reports
 #: those with ``auto_fixable=False`` and they are never rewritten.
@@ -358,6 +375,16 @@ def _rewrite_line(finding: AllowListFinding) -> str:
     pin = finding.pin
     if finding.suppressed:
         raise _Unfixable(REASON_SUPPRESSED)
+    if (
+        finding.kind is AllowListFindingKind.UNPINNED
+        and pin.unpinned_opt_in is UnpinnedOptIn.EXPRESSION
+    ):
+        raise _Unfixable(REASON_UNPINNED_AT_RUN_TIME)
+    if (
+        finding.kind is AllowListFindingKind.UNPINNED
+        and pin.unpinned_opt_in is UnpinnedOptIn.MIXED
+    ):
+        raise _Unfixable(REASON_UNPINNED_SHARED)
     if not pin.auto_fixable:
         raise _Unfixable(REASON_MULTILINE)
     if finding.target_sha is None:

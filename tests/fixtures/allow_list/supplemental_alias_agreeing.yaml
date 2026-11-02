@@ -1,0 +1,25 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# A floating reference shared through a YAML alias by two callers that
+# both opt in via the paired flag, so neither use produces a finding.
+name: Alias, both flagged
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  first:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: &supplemental 'lfreleng-actions//'
+      harden_runner_supplemental_unpinned: true
+
+  second:
+    uses: ./.github/workflows/reusable.yaml
+    with:
+      harden_runner_supplemental_allowlist: *supplemental
+      harden_runner_supplemental_unpinned: 'true'

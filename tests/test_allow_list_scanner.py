@@ -19,10 +19,12 @@ import yaml
 
 from gha_workflow_linter.allow_list_scanner import (
     DEFAULT_KEY_PATTERNS,
+    UNPINNED_FLAG_PAIRS,
     AllowListPin,
     AllowListScanner,
     CommentPosition,
     QuoteStyle,
+    UnpinnedOptIn,
 )
 from gha_workflow_linter.directives import Directive, SuppressionSource
 from gha_workflow_linter.models import Config
@@ -848,6 +850,92 @@ class TestFailureModes:
         )
 
         assert scanner.scan_file(path) == []
+
+
+def opt_ins(pins: list[AllowListPin]) -> dict[str, str]:
+    """Map each pin's dotted key path to its unpinned opt-in.
+
+    Args:
+        pins: Pins to summarise.
+
+    Returns:
+        Dotted key path to the opt-in's value, in document order.
+    """
+    return {".".join(pin.key_path): pin.unpinned_opt_in.value for pin in pins}
+
+
+class TestUnpinnedOptIn:
+    """The paired flag that declares a floating reference deliberate."""
+
+    def test_flag_values_in_a_caller_with_block(
+        self, scanner: AllowListScanner
+    ) -> None:
+        """Location 3: the flag sits beside the reference in ``with:``."""
+        pins = scan(scanner, "supplemental_unpinned.yaml")
+        supplemental = "harden_runner_supplemental_allowlist"
+
+        assert opt_ins(pins) == {
+            f"on.workflow_call.inputs.{supplemental}.default": "literal",
+            f"jobs.boolean.with.{supplemental}": "literal",
+            f"jobs.quoted.with.{supplemental}": "literal",
+            f"jobs.expression.with.{supplemental}": "expression",
+            f"jobs.disabled.with.{supplemental}": "none",
+            f"jobs.absent.with.{supplemental}": "none",
+            "jobs.unpaired.with.harden_runner_allowlist": "none",
+        }
+
+    def test_input_default_flag_false(self, tmp_path: Path) -> None:
+        """Location 2: a ``false`` default for the flag opts nothing in."""
+        path = tmp_path / "defaults.yaml"
+        path.write_text(
+            "---\n"
+            "on:\n"
+            "  workflow_call:\n"
+            "    inputs:\n"
+            "      harden_runner_supplemental_allowlist:\n"
+            "        default: 'lfreleng-actions//'\n"
+            "      harden_runner_supplemental_unpinned:\n"
+            "        default: false\n",
+            encoding="utf-8",
+        )
+
+        pins = AllowListScanner(Config(), WORKFLOW_ORG).scan_file(path)
+
+        assert [pin.unpinned_opt_in for pin in pins] == [UnpinnedOptIn.NONE]
+
+    def test_self_test_block_opts_in(self, scanner: AllowListScanner) -> None:
+        """The workflow repositories' self-test is still detected."""
+        pins = scan(scanner, "supplemental_self_test.yaml")
+
+        assert len(pins) == 1
+        assert pins[0].spec.ref == "HEAD"
+        assert pins[0].unpinned_opt_in is UnpinnedOptIn.LITERAL
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("supplemental_alias_unflagged_first.yaml", UnpinnedOptIn.MIXED),
+            ("supplemental_alias_flagged_first.yaml", UnpinnedOptIn.MIXED),
+            ("supplemental_alias_agreeing.yaml", UnpinnedOptIn.LITERAL),
+        ],
+    )
+    def test_aliased_uses_merge_their_flags(
+        self, scanner: AllowListScanner, name: str, expected: UnpinnedOptIn
+    ) -> None:
+        """Every use of a shared scalar counts, whatever the order."""
+        pins = scan(scanner, name)
+
+        assert len(pins) == 1
+        assert pins[0].unpinned_opt_in is expected
+
+    def test_pairing_is_an_explicit_table(self) -> None:
+        """Only the documented reference keys have a paired flag."""
+        assert UNPINNED_FLAG_PAIRS == {
+            "harden_runner_supplemental_allowlist": (
+                "harden_runner_supplemental_unpinned"
+            ),
+            "supplemental_config": "supplemental_unpinned",
+        }
 
 
 class TestScanFiles:

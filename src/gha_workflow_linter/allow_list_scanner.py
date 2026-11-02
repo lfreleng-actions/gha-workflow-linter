@@ -37,6 +37,12 @@ version comment, quoting style and suppression directives are recovered
 from it. Every pin therefore carries an exact anchor -- 1-based line,
 0-based column -- that a later fixer can rewrite without re-parsing.
 
+A floating ref can be deliberate. Where a reference key appears in
+:data:`UNPINNED_FLAG_PAIRS`, the scanner also reads the paired flag from
+the same mapping and records on the pin, as
+:attr:`AllowListPin.unpinned_opt_in`, whether that flag opts in. It
+never widens what is collected; it only annotates what already was.
+
 There is deliberately **no per-consumer registry** (section 5.4). Every
 allow-list consumer shares one grammar, one resolver and one host
 repository, and staleness never depends on the consumer family, so
@@ -63,7 +69,7 @@ Note:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import fnmatch
 import logging
@@ -90,10 +96,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_KEY_PATTERNS",
+    "UNPINNED_FLAG_PAIRS",
     "AllowListPin",
     "AllowListScanner",
     "CommentPosition",
     "QuoteStyle",
+    "UnpinnedOptIn",
 ]
 
 #: Key-name patterns recognised as allow-list coordinates where the key
@@ -105,6 +113,19 @@ DEFAULT_KEY_PATTERNS: tuple[str, ...] = (
     "*allowlist*",
     "*allow-list*",
 )
+
+#: Reference keys whose consumer accepts a deliberately floating ref,
+#: mapped to the flag that opts in to it. The flag must sit in the same
+#: mapping as the reference: the same ``with:`` block, or for a
+#: ``workflow_call`` input, the paired input's ``default``. This is an
+#: explicit table rather than a pattern, so an unrelated key can never
+#: switch pinning off by accident.
+UNPINNED_FLAG_PAIRS: dict[str, str] = {
+    "harden_runner_supplemental_allowlist": (
+        "harden_runner_supplemental_unpinned"
+    ),
+    "supplemental_config": "supplemental_unpinned",
+}
 
 #: Marker introducing a GitHub expression. A value holding one is
 #: resolved at run time and is not a pin.
@@ -136,6 +157,29 @@ class CommentPosition(str, Enum):
     IN_SCALAR = "in_scalar"
 
 
+class UnpinnedOptIn(str, Enum):
+    """How a pin's paired flag declares a floating ref deliberate.
+
+    Attributes:
+        NONE: No paired flag, or one that is not ``true``. A floating
+            ref is reported and pinned as usual.
+        LITERAL: The flag is literally ``true``, so a floating ref is
+            intended and produces no finding.
+        EXPRESSION: The flag is a GitHub expression, so the caller
+            decides at run time. A floating ref is reported but never
+            rewritten.
+        MIXED: YAML aliases share the scalar between uses whose flags
+            disagree. A floating ref is reported, since not every use
+            opts in, but never rewritten, since the shared scalar would
+            pin a use that does.
+    """
+
+    NONE = "none"
+    LITERAL = "literal"
+    EXPRESSION = "expression"
+    MIXED = "mixed"
+
+
 @dataclass(frozen=True)
 class AllowListPin:
     """A detected allow-list coordinate in a workflow file.
@@ -165,6 +209,8 @@ class AllowListPin:
         spec: The coordinate resolved into lookup components.
         auto_fixable: ``False`` for a scalar spanning several lines,
             which is recorded and reported but never rewritten.
+        unpinned_opt_in: What the paired flag in
+            :data:`UNPINNED_FLAG_PAIRS` says about a floating ref.
     """
 
     file_path: Path
@@ -181,6 +227,7 @@ class AllowListPin:
     suppression_reason: str | None
     spec: ResolvedSpec
     auto_fixable: bool
+    unpinned_opt_in: UnpinnedOptIn = UnpinnedOptIn.NONE
 
 
 @dataclass(frozen=True)
@@ -194,12 +241,14 @@ class _Candidate:
         anchored: True when the location itself identifies the input
             (``with.config`` on a step), so the recogniser predicate for
             arbitrary key names does not apply.
+        unpinned_opt_in: What the paired flag, if any, declares.
     """
 
     node: yaml.nodes.ScalarNode
     key_path: tuple[str, ...]
     key_name: str
     anchored: bool
+    unpinned_opt_in: UnpinnedOptIn = UnpinnedOptIn.NONE
 
 
 @dataclass(frozen=True)
@@ -277,6 +326,43 @@ def _child(node: yaml.nodes.Node | None, key: str) -> yaml.nodes.Node | None:
     return None
 
 
+def _flag_opt_in(node: yaml.nodes.Node | None) -> UnpinnedOptIn:
+    """Classify the value of a paired unpinned flag.
+
+    Args:
+        node: The flag's value node, or ``None`` when it is absent.
+
+    Returns:
+        :attr:`UnpinnedOptIn.LITERAL` for ``true`` in any case, quoted
+        or not; :attr:`UnpinnedOptIn.EXPRESSION` for a GitHub
+        expression; :attr:`UnpinnedOptIn.NONE` for anything else.
+    """
+    if not isinstance(node, yaml.nodes.ScalarNode):
+        return UnpinnedOptIn.NONE
+    text = str(node.value).strip()
+    if _EXPRESSION_MARKER in text:
+        return UnpinnedOptIn.EXPRESSION
+    if text.lower() == "true":
+        return UnpinnedOptIn.LITERAL
+    return UnpinnedOptIn.NONE
+
+
+def _merge_opt_ins(opt_ins: Sequence[UnpinnedOptIn]) -> UnpinnedOptIn:
+    """Combine the opt-ins of every use of one shared scalar.
+
+    Args:
+        opt_ins: The opt-in of each recognised use, at least one.
+
+    Returns:
+        The common opt-in when every use agrees, otherwise
+        :attr:`UnpinnedOptIn.MIXED`.
+    """
+    distinct = set(opt_ins)
+    if len(distinct) == 1:
+        return distinct.pop()
+    return UnpinnedOptIn.MIXED
+
+
 def _is_trigger_key(node: yaml.nodes.ScalarNode) -> bool:
     """Report whether a top-level key is the workflow trigger block.
 
@@ -343,11 +429,17 @@ def _collect_job_inputs(
     for key_node, value_node in _mapping_pairs(with_node):
         if isinstance(value_node, yaml.nodes.ScalarNode):
             name = _key_text(key_node)
+            flag = UNPINNED_FLAG_PAIRS.get(name)
             yield _Candidate(
                 node=value_node,
                 key_path=("jobs", job, "with", name),
                 key_name=name,
                 anchored=False,
+                unpinned_opt_in=(
+                    _flag_opt_in(_child(with_node, flag))
+                    if flag is not None
+                    else UnpinnedOptIn.NONE
+                ),
             )
 
 
@@ -416,11 +508,17 @@ def _collect_input_defaults(
         default = _child(input_node, "default")
         if isinstance(default, yaml.nodes.ScalarNode):
             name = _key_text(key_node)
+            flag = UNPINNED_FLAG_PAIRS.get(name)
             yield _Candidate(
                 node=default,
                 key_path=(on_key, "workflow_call", "inputs", name, "default"),
                 key_name=name,
                 anchored=False,
+                unpinned_opt_in=(
+                    _flag_opt_in(_child(_child(inputs, flag), "default"))
+                    if flag is not None
+                    else UnpinnedOptIn.NONE
+                ),
             )
 
 
@@ -631,10 +729,16 @@ class AllowListScanner:
         # a node yields a pin once. It counts as seen only once it has
         # produced a pin, so an alias under an unrecognised key cannot
         # hide the same node under a recognised one later in the walk.
+        # Each recognised use may carry its own paired flag, so the pin
+        # takes the opt-in of every use, whichever order they come in.
         pins: list[AllowListPin] = []
-        seen: set[int] = set()
+        seen: dict[int, int] = {}
+        uses: list[list[UnpinnedOptIn]] = []
         for candidate in _collect_candidates(root):
-            if id(candidate.node) in seen:
+            index = seen.get(id(candidate.node))
+            if index is not None:
+                if self._resolve_candidate(candidate) is not None:
+                    uses[index].append(candidate.unpinned_opt_in)
                 self.logger.debug(
                     f"Skipping {'.'.join(candidate.key_path)}: an alias "
                     "of a pin already recorded"
@@ -642,9 +746,16 @@ class AllowListScanner:
                 continue
             pin = self._build_pin(candidate, file_path, lines)
             if pin is not None:
+                seen[id(candidate.node)] = len(pins)
                 pins.append(pin)
-                seen.add(id(candidate.node))
+                uses.append([candidate.unpinned_opt_in])
 
+        pins = [
+            replace(pin, unpinned_opt_in=_merge_opt_ins(opt_ins))
+            if len(opt_ins) > 1
+            else pin
+            for pin, opt_ins in zip(pins, uses, strict=True)
+        ]
         self.logger.debug(f"Found {len(pins)} allow-list pins in {file_path}")
         return pins
 
@@ -835,4 +946,5 @@ class AllowListScanner:
             ),
             spec=spec,
             auto_fixable=lexical.auto_fixable,
+            unpinned_opt_in=candidate.unpinned_opt_in,
         )
