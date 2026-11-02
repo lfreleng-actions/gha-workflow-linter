@@ -16,20 +16,19 @@ Detecting that drift requires the linter to read the grammar exactly as
 the action reads it: any divergence produces findings against pins that
 are in fact valid.
 
-This module is a **port of the parsing half** of
-``src/resolve_config_source.py``, a file mirrored byte-for-byte between
-two repositories:
-
-* ``lfreleng-actions/harden-runner-block-action``
-* ``lfreleng-actions/python-audit-action``
-
-A CI check in each of those repositories diffs the file against the
-other's copy, so the grammar has exactly one definition. **Any change
-made to it upstream must be reflected here.** Only parsing and
-resolution are ported -- this module is pure, and performs no network,
-filesystem or subprocess work whatsoever. ``tests/test_allow_list_spec``
-carries a port of the upstream conformance tests so that divergence
-shows up as a test failure rather than as a false finding.
+This module is a **port of the parsing half** of the resolver in
+``lfreleng-actions/harden-runner-block-action``, the only repository
+that carries it. The grammar lives in ``src/resolve_config_grammar.py``
+there, and ``src/resolve_config_source.py`` is the entry point that
+re-exports it. Other consumers, such as
+``lfreleng-actions/python-audit-action``, call that resolver rather than
+keep a copy, so the grammar has exactly one definition. **Any change
+made to it upstream, in harden-runner-block-action, must be reflected
+here.** Only parsing and resolution are ported -- this module is pure,
+and performs no network, filesystem or subprocess work whatsoever.
+``tests/test_allow_list_spec`` carries a port of the upstream
+conformance tests so that divergence shows up as a test failure rather
+than as a false finding.
 
 The port makes two deliberate, behaviour-preserving changes: results are
 frozen dataclasses rather than ``dict`` objects, and the error type
