@@ -126,7 +126,6 @@ def _commands() -> list[tuple[str, dict[str, Any], str]]:
     return commands
 
 
-@pytest.mark.xfail(strict=True, reason="setup-uv is not guarded yet")
 def test_setup_uv_step_is_guarded() -> None:
     step = _step("setup-uv")
 
@@ -135,14 +134,12 @@ def test_setup_uv_step_is_guarded() -> None:
     assert step["env"] == SETUP_UV_ENV
 
 
-@pytest.mark.xfail(strict=True, reason="setup-python has no id yet")
 def test_setup_python_is_the_trusted_interpreter() -> None:
     step = _step("setup-python")
 
     assert str(step["uses"]).startswith("actions/setup-python@")
 
 
-@pytest.mark.xfail(strict=True, reason="uv and Python are found on PATH")
 def test_steps_bind_the_trusted_tools() -> None:
     for step in STEPS:
         env = step.get("env") or {}
@@ -156,7 +153,6 @@ def test_steps_bind_the_trusted_tools() -> None:
     assert any(_PYTHON_REFERENCE.search(cmd) for cmd in used)
 
 
-@pytest.mark.xfail(strict=True, reason="uv calls do not name an interpreter")
 def test_every_uv_call_names_the_trusted_interpreter() -> None:
     for name, step, command in _commands():
         for match in _UV_COMMAND.finditer(command):
@@ -172,7 +168,6 @@ def test_every_uv_call_names_the_trusted_interpreter() -> None:
             ), f"{name}: {command}"
 
 
-@pytest.mark.xfail(strict=True, reason="PYTHON* settings reach the build")
 def test_uv_builds_without_caller_python_settings() -> None:
     for step in STEPS:
         script = str(step.get("run", ""))
@@ -185,7 +180,6 @@ def test_uv_builds_without_caller_python_settings() -> None:
             )
 
 
-@pytest.mark.xfail(strict=True, reason="the linter is found on PATH")
 def test_every_python_start_is_isolated() -> None:
     starts = 0
     for name, _, command in _commands():
@@ -200,7 +194,6 @@ def test_every_python_start_is_isolated() -> None:
     assert starts, "no step starts the trusted interpreter"
 
 
-@pytest.mark.xfail(strict=True, reason="the linter is found on PATH")
 def test_linter_runs_through_the_trusted_interpreter() -> None:
     script = str(_step("gha-workflow-linter")["run"])
 
@@ -210,7 +203,6 @@ def test_linter_runs_through_the_trusted_interpreter() -> None:
     assert "cmd_prefix" not in script
 
 
-@pytest.mark.xfail(strict=True, reason="no step clears PYTHON* settings")
 def test_cleanup_spares_the_trusted_bindings() -> None:
     checked = 0
     for step in STEPS:
@@ -314,7 +306,6 @@ _NEEDS_JQ = pytest.mark.skipif(
 
 @_NEEDS_BASH
 @pytest.mark.parametrize("source_tree", [True, False], ids=["source", "pypi"])
-@pytest.mark.xfail(strict=True, reason="uv calls do not name an interpreter")
 def test_install_keeps_the_trusted_interpreter(
     tmp_path: Path, source_tree: bool
 ) -> None:
@@ -345,7 +336,6 @@ def test_install_keeps_the_trusted_interpreter(
 
 
 @_NEEDS_BASH
-@pytest.mark.xfail(strict=True, reason="the PyPI branch runs uvx")
 def test_pypi_install_upgrades_an_installed_linter(tmp_path: Path) -> None:
     # setup-python's interpreter is shared by the whole job, so an
     # earlier step may already have installed an older release there;
@@ -378,7 +368,6 @@ def test_pypi_install_upgrades_an_installed_linter(tmp_path: Path) -> None:
         ("Run gha-workflow-linter", "python3"),
     ],
 )
-@pytest.mark.xfail(strict=True, reason="no step checks its interpreter")
 def test_step_refuses_an_untrusted_interpreter(
     tmp_path: Path, name: str, trusted: str
 ) -> None:
@@ -403,7 +392,6 @@ def test_step_refuses_an_untrusted_interpreter(
 
 
 @_NEEDS_BASH
-@pytest.mark.xfail(strict=True, reason="no step refuses UV_NO_MODIFY_PATH")
 @pytest.mark.parametrize("value", [None, "", "1"], ids=["unset", "empty", "1"])
 def test_inherited_no_modify_path_is_refused(
     tmp_path: Path, value: str | None
@@ -452,7 +440,6 @@ def _run_linter_step(
 
 
 @_NEEDS_BASH
-@pytest.mark.xfail(strict=True, reason="the run step keeps PYTHON* settings")
 def test_linter_starts_without_caller_python_settings(tmp_path: Path) -> None:
     # -I ignores PYTHON* settings but not __PYVENV_LAUNCHER__, so the
     # run step clears the caller's before it starts the interpreter.
@@ -506,7 +493,6 @@ def _caller_venv(tmp_path: Path, marker: Path) -> Path:
 
 @_NEEDS_BASH
 @_NEEDS_JQ
-@pytest.mark.xfail(strict=True, reason="the run step keeps __PYVENV_LAUNCHER__")
 def test_caller_venv_launcher_cannot_redirect_python(tmp_path: Path) -> None:
     marker = tmp_path / "bait-ran"
     launcher = _caller_venv(tmp_path, marker)

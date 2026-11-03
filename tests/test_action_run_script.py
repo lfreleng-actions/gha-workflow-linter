@@ -68,13 +68,19 @@ CLEAN = {
     "validation_summary": {"total_errors": 0},
 }
 
+#: Stands in for the trusted interpreter, which the script runs as
+#: ``"$TRUSTED_PYTHON" -I -m gha_workflow_linter.cli``. Any other start
+#: fails.
 _STUB = """#!{python}
 import json, os, sys
+prefix = ["-I", "-m", "gha_workflow_linter.cli"]
+if sys.argv[1:4] != prefix:
+    sys.exit("not started as the isolated linter module: %r" % sys.argv)
+args = sys.argv[4:]
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as log:
-    log.write(json.dumps(sys.argv[1:]) + "\\n")
+    log.write(json.dumps(args) + "\\n")
 with open(os.environ["STUB_LOG"], encoding="utf-8") as log:
     invocation = sum(1 for line in log if line.strip())
-args = sys.argv[1:]
 status = int(os.environ.get("STUB_EXIT", "0"))
 if "STUB_JSON_RAW" in os.environ:
     document = os.environ["STUB_JSON_RAW"]
@@ -220,7 +226,7 @@ def run_action(tmp_path: Path) -> Any:
     """
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
-    stub = stub_dir / "gha-workflow-linter"
+    stub = stub_dir / "python"
     stub.write_text(_STUB.format(python=sys.executable), encoding="utf-8")
     stub.chmod(0o755)
 
@@ -270,8 +276,8 @@ def run_action(tmp_path: Path) -> Any:
         runner_temp.mkdir(exist_ok=True)
 
         env = {
-            "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
-            "USE_UVX": "false",
+            "PATH": os.environ["PATH"],
+            "TRUSTED_PYTHON": str(stub),
             "RUNNER_TEMP": str(runner_temp),
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),

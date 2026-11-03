@@ -861,6 +861,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+The Action installs its own uv and runs its own Python, so earlier
+steps of the job cannot choose either. It fails at once if the job sets
+`UV_NO_MODIFY_PATH`: with that variable set, `astral-sh/setup-uv` would
+start whichever `uv` comes first on the job's `PATH`.
+
 ## Configuration
 
 GHA Workflow Linter is configurable via YAML files, environment variables, or
