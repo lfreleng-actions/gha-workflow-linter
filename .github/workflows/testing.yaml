@@ -185,3 +185,227 @@ jobs:
             exit 1
           fi
           echo "total-calls=$TOTAL_CALLS"
+
+  ### Caller Variables Must Not Pick the Action's Interpreter ###
+  workspace-isolation:
+    name: 'Workspace Isolation (${{ matrix.os }}, ${{ matrix.selector }})'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        # 'request' names an interpreter outright (UV_PYTHON and kin);
+        # 'active-environment' fakes an activated venv or conda env.
+        # They run apart so that UV_PYTHON cannot mask the latter.
+        selector: [request, active-environment]
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
+
+      - name: 'Checkout sample repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: 'lfreleng-actions/actions-template'
+          path: 'actions-template'
+          persist-credentials: false
+
+      # What a caller's earlier step could do: write bait into the
+      # workspace, put it first on PATH through $GITHUB_PATH and export
+      # hostile settings through $GITHUB_ENV. Each bait appends to the
+      # marker when it runs or is imported. A PATH= line in $GITHUB_ENV
+      # would prove nothing: the runner puts every $GITHUB_PATH entry
+      # ahead of it.
+      - name: 'Plant bait and hostile settings'
+        shell: bash
+        env:
+          SELECTOR: ${{ matrix.selector }}
+        run: |
+          set -euo pipefail
+          ws="$GITHUB_WORKSPACE"
+          marker="$RUNNER_TEMP/bait-ran"
+          stub() {
+            # $0 and $* expand when the stub runs, not here.
+            # shellcheck disable=SC2016
+            printf '#!/bin/sh\necho "%s: $0 $*" >> "%s"\nexit 1\n' \
+              "$1" "$marker" > "$2"
+            chmod +x "$2"
+          }
+          module() {
+            printf 'with open(%s, "a") as f:\n    f.write("module %s\\n")\n' \
+              "'$marker'" "$1" > "$2"
+          }
+          mkdir -p .venv/bin .venv/conda-meta xdg-bin pkg/urllib urllib
+          printf 'home = %s\nversion = 3.13.0\n' "$ws/.venv/bin" \
+            > .venv/pyvenv.cfg
+          for name in python python3 python3.11 python3.13 uv; do
+            stub "venv $name" ".venv/bin/$name"
+          done
+          # Loaded by any interpreter that takes .venv as its prefix,
+          # as __PYVENV_LAUNCHER__ below asks even under -I.
+          for version in 3.11 3.12 3.13; do
+            site=".venv/lib/python$version/site-packages"
+            mkdir -p "$site"
+            printf 'import os; open(%s, "a").write("venv site\\n")\n' \
+              "'$marker'" > "$site/bait.pth"
+          done
+          stub 'xdg env' xdg-bin/env
+          stub 'xdg bash' xdg-bin/bash
+          for dir in . pkg; do
+            for name in json base64 sitecustomize usercustomize; do
+              module "$name" "$dir/$name.py"
+            done
+            module urllib "$dir/urllib/__init__.py"
+          done
+
+          case "$RUNNER_ARCH" in
+            ARM64) arch=aarch64 ;;
+            *) arch=x86_64 ;;
+          esac
+          echo "$ws/.venv/bin" >> "$GITHUB_PATH"
+          {
+            echo "PYTHONPATH=pkg:."
+            echo "PYTHONHOME=$ws/.venv"
+            echo "PYTHONUSERBASE=$ws/.venv"
+            echo "PYTHONSTARTUP=$ws/sitecustomize.py"
+            echo "PYTHONEXECUTABLE=$ws/.venv/bin/python3"
+            echo "__PYVENV_LAUNCHER__=$ws/.venv/bin/python3"
+            echo "UV_NO_CACHE=1"
+            echo "UV_PYTHON_ARCH=$arch"
+            echo "UV_PYTHON_INSTALL_MIRROR=https://127.0.0.1:9"
+            echo "XDG_BIN_HOME=$ws/xdg-bin"
+            if [[ "$SELECTOR" == "request" ]]; then
+              echo "UV_PYTHON=$ws/.venv/bin/python3"
+              echo "UV_PYTHON_SEARCH_PATH=$ws/.venv/bin"
+              echo "UV_PYTHON_INSTALL_DIR=$ws/uv-python"
+              echo "UV_PYTHON_PREFERENCE=only-system"
+            else
+              echo "VIRTUAL_ENV=$ws/.venv"
+              echo "CONDA_PREFIX=$ws/.venv"
+              echo "CONDA_DEFAULT_ENV=base"
+              echo "UV_INTERNAL__PARENT_INTERPRETER=$ws/.venv/bin/python3"
+              echo "UV_INTERNAL__TEST_PYTHON_MANAGED=1"
+              echo "UV_CACHE_DIR=$ws/uv-cache"
+            fi
+          } >> "$GITHUB_ENV"
+
+      # Proves the bait is live under the exported settings, so a clean
+      # verify step below means the Action avoided it, not that it was
+      # never reachable. PYTHONHOME is dropped only so that the real
+      # interpreter starts far enough to import the planted module. The
+      # real one is named by absolute path: 'command -v' would return
+      # the bait, and macOS bash keeps a python3 it has already hashed.
+      # Each bait exits 1, so every start expected to reach it has
+      # '|| true' and the marker decides.
+      - name: 'Control: an unguarded start runs the bait'
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/bait-ran"
+          real=/usr/bin/python3
+          python3 --version || true
+          env -u PYTHONHOME -u PYTHONEXECUTABLE -u __PYVENV_LAUNCHER__ \
+            "$real" -c 'import json' || true
+          if ! grep -q '^venv python3:' "$marker" 2>/dev/null ||
+              ! grep -q '^module json$' "$marker"; then
+            echo "::error::The bait did not run; the control is broken"
+            exit 1
+          fi
+          # -I leaves __PYVENV_LAUNCHER__ in force. CPython on Linux
+          # honours it; a macOS launcher may replace it with its own.
+          env -u PYTHONHOME -u PYTHONPATH -u PYTHONSTARTUP \
+            -u PYTHONEXECUTABLE "$real" -I -c pass || true
+          if ! grep -q '^venv site$' "$marker"; then
+            if [[ "$RUNNER_OS" == "Linux" ]]; then
+              echo "::error::The site-packages bait did not run"
+              exit 1
+            fi
+            echo "::notice::This runner's Python ignores __PYVENV_LAUNCHER__"
+          fi
+          cat "$marker"
+          rm -f "$marker"
+
+      - name: 'Run the action (cold)'
+        id: cold
+        uses: $/
+        with:
+          path: 'actions-template'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Run the action (warm)'
+        id: warm
+        uses: $/
+        with:
+          path: 'actions-template'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # With UV_NO_MODIFY_PATH set, setup-uv would start the bait uv
+      # that is first on PATH; the Action must refuse to run instead.
+      - name: 'Export UV_NO_MODIFY_PATH'
+        shell: bash
+        run: echo "UV_NO_MODIFY_PATH=1" >> "$GITHUB_ENV"
+
+      - name: 'Run the action (UV_NO_MODIFY_PATH set)'
+        id: no-modify-path
+        continue-on-error: true
+        uses: $/
+        with:
+          path: 'actions-template'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 'Check outputs and that no bait ran'
+        shell: bash
+        env:
+          NO_MODIFY_PATH_OUTCOME: ${{ steps.no-modify-path.outcome }}
+          COLD_TOTAL: ${{ steps.cold.outputs.total-calls }}
+          COLD_ERRORS: ${{ steps.cold.outputs.errors-found }}
+          COLD_SUMMARY: ${{ steps.cold.outputs.scan-summary }}
+          WARM_TOTAL: ${{ steps.warm.outputs.total-calls }}
+          WARM_ERRORS: ${{ steps.warm.outputs.errors-found }}
+          WARM_SUMMARY: ${{ steps.warm.outputs.scan-summary }}
+        run: |
+          set -euo pipefail
+          marker="$RUNNER_TEMP/bait-ran"
+          if [[ -e "$marker" ]]; then
+            echo "::error::Bait ran during the action:"
+            cat "$marker"
+            exit 1
+          fi
+          case ":$PATH:" in
+            *":$GITHUB_WORKSPACE/xdg-bin:"*)
+              echo "::error::The caller's XDG_BIN_HOME is on PATH"
+              exit 1 ;;
+          esac
+          check() {
+            local run="$1" total="$2" errors="$3" summary="$4"
+            if ! [[ "$total" =~ ^[0-9]+$ && "$total" -gt 0 ]]; then
+              echo "::error::$run: unexpected total-calls: '$total'"
+              exit 1
+            fi
+            if ! [[ "$errors" =~ ^[0-9]+$ ]]; then
+              echo "::error::$run: unexpected errors-found: '$errors'"
+              exit 1
+            fi
+            if ! jq -e '.scan_summary | type == "object"' \
+                <<< "$summary" >/dev/null; then
+              echo "::error::$run: scan-summary is not a scan document"
+              exit 1
+            fi
+            echo "$run: total-calls=$total errors-found=$errors"
+          }
+          check cold "$COLD_TOTAL" "$COLD_ERRORS" "$COLD_SUMMARY"
+          check warm "$WARM_TOTAL" "$WARM_ERRORS" "$WARM_SUMMARY"
+          if [[ "$NO_MODIFY_PATH_OUTCOME" != "failure" ]]; then
+            echo "::error::UV_NO_MODIFY_PATH run: expected a refusal," \
+              "got '$NO_MODIFY_PATH_OUTCOME'"
+            exit 1
+          fi

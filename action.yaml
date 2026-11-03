@@ -153,46 +153,95 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # The trusted interpreter: setup-python's absolute 'python-path'
+    # output. Every later uv call names it with --python, and every
+    # Python start runs it by that path with -I, so no caller variable
+    # (PATH, UV_PYTHON, VIRTUAL_ENV, PYTHONPATH and the like) can pick
+    # or redirect the interpreter this Action runs.
     - name: "Setup Python"
+      id: setup-python
       # yamllint disable-line rule:line-length
       uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: "3.11"
 
+    # With UV_NO_MODIFY_PATH set, to any value, setup-uv leaves its own
+    # binary off PATH but still starts a bare "uv python find", so the
+    # caller's PATH would pick the uv that runs, ahead of every guard on
+    # the next step. A step cannot unset an inherited variable: refuse.
+    - name: "Refuse an inherited UV_NO_MODIFY_PATH"
+      id: no-modify-path
+      shell: bash
+      run: |
+        if [[ -n "${UV_NO_MODIFY_PATH+set}" ]]; then
+          echo "::error title=Unsupported environment::UV_NO_MODIFY_PATH" \
+            "is set, so setup-uv would start the first 'uv' on the" \
+            "caller's PATH; unset it before this Action ❌"
+          exit 1
+        fi
+
+    # setup-uv's only uv call for these inputs is "uv python find",
+    # whose result it executes. An invalid preference makes uv refuse
+    # its arguments before any lookup; setup-uv then reports the
+    # Python version as "unknown", which nothing reads. The working
+    # directory keeps the caller's uv settings out of its lookup.
     - name: "Install uv"
-      # setup-uv runs the interpreter 'uv python find' returns for its
-      # working directory and reads uv settings (required-version,
-      # cache-dir) there; the default is the caller's workspace. Point it
-      # at this action's own files instead, so the cache key also hashes
-      # the dependencies this action installs. The UV_* settings cover an
-      # action loaded from inside the workspace ('uses: ./').
+      id: setup-uv
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        working-directory: ${{ github.action_path }}
+        # Without it setup-uv puts the caller's HOME/XDG_* bin dir on PATH
+        tool-bin-dir: ${{ runner.temp }}/gha-workflow-linter/bin
+        # The post-step "uv cache prune" would hit the invalid preference
+        enable-cache: false
       env:
         UV_NO_CONFIG: "1"
-        UV_SYSTEM_PYTHON: "1"
         UV_NO_PROJECT: "1"
-      with:
-        enable-cache: true
-        working-directory: ${{ github.action_path }}
+        UV_PYTHON_PREFERENCE: "lookup-disabled"
+        # Inherited, it makes setup-uv probe uv, which the line above fails
+        UV_PYTHON_ARCH: ""
+        UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/gha-workflow-linter/python
 
-    - name: "Install gha-workflow-linter (if local)"
+    - name: "Install gha-workflow-linter"
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
+        UV: ${{ steps.setup-uv.outputs.uv-path }}
+        # Not PYTHON*: the loop below unsets every caller PYTHON* setting
+        TRUSTED_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         # uv also reads uv.toml/pyproject.toml settings from the parent
         # directories of the one it runs in. With the action checked out
         # inside the caller's workspace ('uses: ./...'), those parents are
         # the caller's checkout, whose settings (such as index-url) would
         # apply to this install. The action sets no uv config of its own.
         UV_NO_CONFIG: "1"
+        # An action-owned cache, not one a caller's UV_CACHE_DIR names
+        UV_CACHE_DIR: ${{ runner.temp }}/gha-workflow-linter/cache
       run: |
         # A 'uses:' caller gets the whole repository at the ref it names,
         # pyproject.toml included, so this installs that ref's own CLI.
         # The Action and the CLI are one release: the step passes flags,
-        # such as '--json-output', that only a matching CLI accepts. The
-        # uvx branch serves a copy of action.yaml without its source
-        # tree, and gets the latest release from PyPI.
+        # such as '--json-output', that only a matching CLI accepts. A
+        # copy of action.yaml without its source tree gets the latest
+        # release from PyPI instead. Either way the linter goes into the
+        # trusted interpreter, which the next step runs it from.
+        #
+        # uv starts the build backend without -I, so a caller's
+        # PYTHONPATH, PYTHONHOME or PYTHONSTARTUP would reach it.
+        for name in $(compgen -e); do
+          case "$name" in
+            PYTHON* | __PYVENV_LAUNCHER__) unset "$name" ;;
+          esac
+        done
+        # An empty --python makes uv fall back to discovery, which is
+        # what the caller's environment steers; refuse that outright.
+        case "$TRUSTED_PYTHON" in
+          /* | [A-Za-z]:[\\/]*) ;;
+          *) echo "Error: no absolute trusted interpreter:" \
+               "'$TRUSTED_PYTHON' ❌" >&2
+             exit 1 ;;
+        esac
         if [[ -f "$ACTION_PATH/pyproject.toml" ]]; then
           echo "Installing gha-workflow-linter from the Action's source..."
           cd "$ACTION_PATH"
@@ -201,17 +250,21 @@ runs:
           if ! git -C "$ACTION_PATH" rev-parse --git-dir >/dev/null 2>&1; then
             export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+action"
           fi
-          uv pip install --system -e .
-          echo "USE_UVX=false" >> "$GITHUB_ENV"
+          "$UV" pip install --no-config --python "$TRUSTED_PYTHON" \
+            -e .
         else
           echo "No source tree; using the latest gha-workflow-linter from PyPI"
-          echo "USE_UVX=true" >> "$GITHUB_ENV"
+          # The interpreter is shared by the whole job: an earlier step may
+          # have installed an older release, which a bare install keeps.
+          "$UV" pip install --no-config --python "$TRUSTED_PYTHON" \
+            --upgrade-package gha-workflow-linter gha-workflow-linter
         fi
 
     - name: "Run gha-workflow-linter"
       id: gha-workflow-linter
       shell: bash
       env:
+        TRUSTED_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         INPUT_PATH: ${{ inputs.path }}
         INPUT_CONFIG_FILE: ${{ inputs.config-file }}
         INPUT_LOG_LEVEL: ${{ inputs.log-level }}
@@ -237,12 +290,25 @@ runs:
         INPUT_UPDATE_ALLOW_LIST: ${{ inputs.update-allow-list }}
         INPUT_ALLOW_LIST_ORG: ${{ inputs.allow-list-org }}
       run: |
-        # Determine command prefix (uvx for PyPI, direct for local)
-        if [[ "$USE_UVX" == "true" ]]; then
-          cmd_prefix="uvx --from gha-workflow-linter gha-workflow-linter"
-        else
-          cmd_prefix="gha-workflow-linter"
-        fi
+        # The trusted interpreter, by path and isolated (-I): neither a
+        # console script looked up on PATH nor PYTHONPATH, PYTHONHOME or
+        # the working directory decides what runs.
+        #
+        # -I does not cover __PYVENV_LAUNCHER__: CPython takes it as its
+        # own path and loads the site-packages of the virtual environment
+        # it names. Clear it with the PYTHON* names.
+        for name in $(compgen -e); do
+          case "$name" in
+            PYTHON* | __PYVENV_LAUNCHER__) unset "$name" ;;
+          esac
+        done
+        case "$TRUSTED_PYTHON" in
+          /* | [A-Za-z]:[\\/]*) ;;
+          *) echo "Error: no absolute trusted interpreter:" \
+               "'$TRUSTED_PYTHON' ❌" >&2
+             exit 1 ;;
+        esac
+        linter=("$TRUSTED_PYTHON" -I -m gha_workflow_linter.cli)
 
         # Build command arguments
         args=("$INPUT_PATH")
@@ -446,7 +512,7 @@ runs:
           display_format=(--format "$INPUT_OUTPUT_FORMAT")
         fi
         status=0
-        $cmd_prefix lint "${args[@]}" "${display_format[@]}" \
+        "${linter[@]}" lint "${args[@]}" "${display_format[@]}" \
           --json-output "$document_file" --no-cache || status=$?
         json_output=$(cat "$document_file" 2>/dev/null || true)
 

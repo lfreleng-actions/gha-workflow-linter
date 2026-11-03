@@ -72,12 +72,11 @@ NOT_EXPOSED: dict[str, str] = {
 }
 
 #: Flags placed in an argument array, or given on the ``lint``
-#: invocation itself. Scoped to those forms on purpose: the script also
-#: runs ``uvx --from ...``, and ``--from`` is not a linter option. The
-#: script is matched after joining ``\``-continued lines, since a long
-#: invocation is wrapped across several.
+#: invocation itself. The script is matched after joining
+#: ``\``-continued lines, since a long invocation is wrapped across
+#: several.
 _ARRAY_LITERAL = re.compile(r"\b\w+\+?=\(([^)]*)\)")
-_LINT_INVOCATION = re.compile(r"\$cmd_prefix lint ([^\n]*)")
+_LINT_INVOCATION = re.compile(r'"\$\{linter\[@\]\}" lint ([^\n]*)')
 _FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 
 _INPUT_BINDING = re.compile(r"^\$\{\{ inputs\.([a-z0-9-]+) \}\}$")
