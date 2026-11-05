@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from gha_workflow_linter.github_api import GitHubGraphQLClient
 
-NOW = datetime(2026, 6, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 12, tzinfo=UTC)
 
 REPO_KEY = "actions/checkout"
 # The version a previous run left in the persistent cache.
@@ -180,7 +180,7 @@ class TestParseIsoDatetime:
 
     def test_parses_zulu_suffix(self) -> None:
         parsed = _parse_iso_datetime("2026-01-02T03:04:05Z")
-        assert parsed == datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        assert parsed == datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
     def test_parses_explicit_offset(self) -> None:
         parsed = _parse_iso_datetime("2026-01-02T03:04:05+00:00")
