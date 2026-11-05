@@ -12,9 +12,9 @@ asyncio.gather() or similar parallel patterns.
 """
 
 import argparse
-import asyncio
 import contextlib
 import functools
+import inspect
 from pathlib import Path
 import sys
 import time
@@ -60,7 +60,7 @@ class AsyncTracer:
 
     def wrap_async_function(self, func: Any) -> Any:
         """Wrap an async function to trace its execution."""
-        if not asyncio.iscoroutinefunction(func):
+        if not inspect.iscoroutinefunction(func):
             return func
 
         @functools.wraps(func)
@@ -181,7 +181,7 @@ def monkey_patch_async_functions() -> AsyncTracer:
     for attr_name in dir(github_api.GitHubGraphQLClient):
         if attr_name.startswith("_") and not attr_name.startswith("__"):
             attr = getattr(github_api.GitHubGraphQLClient, attr_name)
-            if asyncio.iscoroutinefunction(attr):
+            if inspect.iscoroutinefunction(attr):
                 setattr(
                     github_api.GitHubGraphQLClient,
                     attr_name,
@@ -201,7 +201,7 @@ def monkey_patch_async_functions() -> AsyncTracer:
     for attr_name in dir(action_call_check.ActionCallValidator):
         if attr_name.startswith("_") or attr_name.startswith("validate"):
             attr = getattr(action_call_check.ActionCallValidator, attr_name)
-            if asyncio.iscoroutinefunction(attr):
+            if inspect.iscoroutinefunction(attr):
                 setattr(
                     action_call_check.ActionCallValidator,
                     attr_name,
@@ -212,7 +212,7 @@ def monkey_patch_async_functions() -> AsyncTracer:
     try:
         for attr_name in dir(action_call_fix.AutoFixer):
             attr = getattr(action_call_fix.AutoFixer, attr_name)
-            if asyncio.iscoroutinefunction(attr):
+            if inspect.iscoroutinefunction(attr):
                 setattr(
                     action_call_fix.AutoFixer,
                     attr_name,
