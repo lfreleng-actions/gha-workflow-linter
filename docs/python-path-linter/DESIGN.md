@@ -65,28 +65,27 @@ Rules:
    something the scan cannot read. A word after the mode settles (a
    script's own arguments) does not matter, and the scan reads a word
    ending in `.py` as the script.
-3. **Trust is syntactic.** A block earns trust in two ways. Either the
-   step's YAML `working-directory` is `${{ github.action_path }}` (with
-   an optional literal subpath that does not climb), which bash cannot
-   change; or the block's first statement (after an optional `set -e`)
-   is `cd "$GITHUB_ACTION_PATH[/sub]"`, under a shell that starts with
-   `-e` or guarded by `|| exit`, and the block holds no other `cd`,
-   `pushd`, `popd`, `exec`, `eval`, `source`, `.`, and no command whose
-   name is not a literal word. A `cd "$GITHUB_ACTION_PATH" && a && b`
-   list earns trust for the length of the list under the same
-   condition. Workflows never earn trust this way (there is no action
-   path).
-4. **A variable substitutes under single assignment.** That means
-   one assignment in the block, at top level (not in a
-   function, loop, branch, subshell, pipeline or substitution), not
-   `+=` or indexed, and no `read`, `export`, `declare`, `unset` or
-   similar naming the variable. The scan substitutes the assigned words
-   as written, so `PY_RUN=(uv run --no-config python)` works and
-   anything cleverer does not. `"$(command -v X)"` stands for the
-   program X.
-5. **uv settings come from the step's YAML `env:` and the command's
-   own prefix assignments.** The scan does not follow `export`; a
-   reader can move the setting to `env:`.
+3. **No block-level trust.** A command earns an exemption from what
+   its author wrote in it alone: `-I` for Python; for uv, `--python` naming a
+   literal absolute path outside the workspace with `--no-project` or
+   an absolute `UV_PROJECT_ENVIRONMENT`, `--no-config`, `--system`.
+   The working directory, YAML or shell, grants nothing. (An earlier
+   draft trusted a leading `cd "$GITHUB_ACTION_PATH"` and a YAML
+   `working-directory` under the action path; measured on the estate
+   they suppressed no finding and drew fifteen review findings.)
+4. **No variable tracking.** A non-literal word in a deciding position
+   is PPA009. `"$(command -v X)"` stands for the program X; a `$NAME`
+   in a `PYTHONPATH` value counts as an absolute path for a fixed set
+   of runner variables and for no others. (Single-assignment constants suppressed
+   seven findings on the estate and drew ten review findings.)
+5. **Wrappers: known or unresolved.** The scan understands the options
+   in its tables; any other option, any `env -S`, and any `env -u`/`-i`
+   before a uv command is PPA009. Unknown never means "takes no
+   operand". uv settings come from the step's YAML `env:`, the
+   command's prefix assignments and its `env` words, last one winning.
+   Backslashes in unquoted words, ANSI-C strings and `printf`
+   conversions beyond `%s` count as unresolved; the scan does not
+   decode them.
 6. **A parse error anywhere in a block is PPA010 "not fully
    scanned"** on that block, never a clean result. The reader replaces
    `${{ }}` expressions with same-length markers before parsing (the
@@ -132,16 +131,17 @@ the design accepts:
   is unset. The linter does not know about the `export` two commands
   earlier; the fix (`${PYTHONPATH:+:$PYTHONPATH}`) is the one the rule
   recommends anyway.
-- `f() { return 1; }; cd "$GITHUB_ACTION_PATH"; f && cd "$OLDPWD"`: a
-  second `cd` in the block ends syntactic trust, run or not.
+- Every case that relied on a `cd` into the action directory: there
+  is no directory trust, so the scan reports Python there as
+  anywhere else; `-I` is the fix.
 
 ## Module layout for the implementation
 
 | Module | Role |
 | --- | --- |
 | `_parse.py` | Over tree-sitter: blocks, commands, words, redirects, lines. |
-| `_words.py` | Literal text of a word; constants; `$(command -v X)`. |
-| `_commands.py` | Per-command judgement: wrappers, arguments, trust, PPA009. |
+| `_words.py` | Literal text of a word; `$(command -v X)`. |
+| `_commands.py` | Per-command judgement: wrappers, arguments, PPA009. |
 | `_pythonpath.py` | As on #434. |
 | `_envfile.py` | `$GITHUB_ENV` lines and records. |
 | `_yaml.py` | As on #434 (reader, env scopes, directory, setup-uv). |
@@ -149,4 +149,4 @@ the design accepts:
 
 Target size: about a quarter of #434. Nothing in `_commands.py` should
 need to know about any command other than the one it judges, plus the
-block-level facts (trusted, constants, step env).
+step's YAML `env:`.
