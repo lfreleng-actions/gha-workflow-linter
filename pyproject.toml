@@ -10,7 +10,7 @@ name = "gha-workflow-linter"
 dynamic = ["version"]
 description = "GitHub Actions workflow linter for validating action and workflow calls"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "The Linux Foundation", email = "releng@linuxfoundation.org"},
@@ -23,11 +23,11 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
 ]
@@ -74,7 +74,7 @@ version-file = "src/gha_workflow_linter/_version.py"
 packages = ["src/gha_workflow_linter"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 80
 extend-exclude = ["src/gha_workflow_linter/_version.py"]
 
@@ -104,6 +104,7 @@ ignore = [
     "PLR2004", # magic value used in comparison
     "PLR0912", # too many branches
     "PLR0915", # too many statements
+    "UP042",   # str+Enum to StrEnum changes str()/format() of members
 ]
 
 # PLR0917 was stabilised in ruff 0.16.0.  This project already selects
@@ -141,7 +142,7 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.basedpyright]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 # Every tracked Python location. This list governs editor/LSP checking
 # and bare `basedpyright` invocations; the pre-commit hook deliberately
 # carries no `files:` filter, so it checks every staged Python file
@@ -192,7 +193,7 @@ reportOverlappingOverload = "error"
 reportUnsupportedDunderAll = "error"
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true

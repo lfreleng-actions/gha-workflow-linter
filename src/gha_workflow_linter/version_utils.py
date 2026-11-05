@@ -10,7 +10,7 @@ independently of the ``AutoFixer`` orchestration and its network clients.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 
 def _parse_version(tag: str) -> tuple[int, int, int]:
@@ -157,7 +157,7 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -195,7 +195,7 @@ def _select_version_with_cooldown(
         tag, sha, _ = candidates[0]
         return (tag, sha)
 
-    reference = now or datetime.now(timezone.utc)
+    reference = now or datetime.now(UTC)
     cutoff = reference - timedelta(days=cooldown_days)
 
     for tag, sha, published in candidates:

@@ -19,7 +19,7 @@ classification are all exercised, in the style of
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 import json
 import re
 import subprocess
@@ -120,7 +120,7 @@ def _iso_days_ago(days: int) -> str:
     Returns:
         A ``YYYY-MM-DDTHH:MM:SSZ`` string, as GitHub returns.
     """
-    moment = datetime.now(timezone.utc) - timedelta(days=days)
+    moment = datetime.now(UTC) - timedelta(days=days)
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
