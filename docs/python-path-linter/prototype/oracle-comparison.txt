@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+bash oracle cases: {'same': 92, 'finding -> unresolved': 13, 'same + unresolved': 4, 'FALSE POSITIVE': 3}
+  [unresolved] PY=python3; CMD=$PY; PY=echo; $CMD -c "import csv"
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] PY=(python3 -I); PY[1]=-E; "${PY[@]}" -c 'import csv'
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] PY_RUN=(python3 -I); "${PY_RUN[0]}" -c 'import csv'
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] f() { python3 "$@"; }; f -c "import csv"
+      expected ['PPA002'] got ['PPA009']
+  [FALSE POSITIVE] export PYTHONPATH="$T"; PYTHONPATH+=":$T"; python3 "$T/script.py"
+      expected [] got ['PPA004']
+  [unresolved] PY=(); PY[1]=python3; "${PY[1]}" -c 'import csv'
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] opts=-I; read -r opts <<<'-E'; python3 "$opts" -c 'import csv'
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] PY="$(command -v python3)"; env "$PY" -c "import csv"
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] env -S "python3 -c 'import csv'"
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] for flag in -I -IB -Is -IS -Iu -Iq -Ib -IO -IOO -IBs -IBS -IBu -IBq -IBb -IBO -Isu -E; do python3 "$flag" -c 'import csv'; done
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] set -e; f() { shift; python3 "$@"; }; f -I -c "import csv"
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] set -e; f() { set -- -E; python3 "$@" -c "import csv"; }; f -I
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] read -r flag <<<'-E'; opts=("$flag"); flag=-I; python3 "${opts[@]}" -c 'import csv'
+      expected ['PPA002'] got ['PPA009']
+  [unresolved] pythons='python3 python3'; for py in $pythons; do "$py" -c 'import csv'; done
+      expected ['PPA002'] got ['PPA009']
+  [FALSE POSITIVE] set -e; f() { return 1; }; cd "$GITHUB_ACTION_PATH"; f && cd "$OLDPWD"; python3 -c "import csv"
+      expected [] got ['PPA002']
+  [FALSE POSITIVE] set -e; f() { return 0; }; cd "$GITHUB_ACTION_PATH"; f || cd "$OLDPWD"; python3 -c "import csv"
+      expected [] got ['PPA002']

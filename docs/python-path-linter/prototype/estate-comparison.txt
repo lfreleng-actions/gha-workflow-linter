@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+walker=462 proto=573 matched=436
+walker-only=26 by rule {'PPA001': 7, 'PPA002': 5, 'PPA004': 1, 'PPA006': 1, 'PPA007': 12}
+proto-only=137 by rule {'PPA001': 15, 'PPA002': 1, 'PPA006': 6, 'PPA007': 6, 'PPA009': 59, 'PPA010': 50}
+
+== walker-only (prototype misses)
+  PPA007 info-yaml-validate-action/action.yaml:159  uv run --no-config --locked --python "$py" --script \ "${ACTION_PATH}/info_yaml_validate.py"
+  PPA001 python-sbom-action/action.yaml:418  "${install_cmd[@]}"
+  PPA002 python-sbom-action/action.yaml:475  "$@" python -c 'import sys; print(sys.executable)'
+  PPA002 python-test-action/action.yaml:976  "$PYTHON_BIN" -c \ 'import pytest; print(f"pytest {pytest.__version__} OK")'
+  PPA002 python-test-action/action.yaml:988  "$PYTHON_BIN" -c 'import tomllib' >/dev/null 2>&1
+  PPA004 tag-validate-action/action.yaml:255  echo "PYTHONPATH=${ACTION_PATH}/src:${SAFE_PYTHONPATH}" >> "$GITHUB_ENV"
+  PPA001 tag-validate-action/action.yaml:517  ${CLI_CMD} ${VERBOSE_FLAG} validate "${TAG_LOCATION}" "${COMMON_ARGS[@]}"
+  PPA001 tag-validate-action/action.yaml:544  ${CLI_CMD} ${VERBOSE_FLAG} verify "${TAG_LOCATION}" "${ALL_VERIFY_ARGS[@]}"
+  PPA002 vars-to-env-action/action.yaml:87  "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' \ >/dev/null 2>&1
+  PPA002 maven-snapshot-metadata-action/.github/workflows/testing.yaml:80  "${PYTHON}" -c "${probe}"
+  PPA001 maven-snapshot-metadata-action/.github/workflows/testing.yaml:85  "${PYTHON}" -m unittest discover -s tests -t . -v
+  PPA001 vars-to-env-action/.github/workflows/testing.yaml:69  "$python" -m unittest discover -s tests -v
+  PPA007 generic-workflows/tests/test-lint-plan.sh:244  "${PY_RUN[@]}" - "${resolver}" <<'PYEOF'
+  PPA007 generic-workflows/tests/test-lint-plan.sh:281  env \ GITHUB_WORKSPACE="${repo_root}" \ RUNNER_TEMP="${workdir}" \ GITHUB_OUTPUT="${workdir}/out" \
+  PPA007 generic-workflows/tests/test-lint-plan.sh:751  "${PY_RUN[@]}" -c \ 'import json; print(json.dumps([{"name": f"t{i}"} for i in range(60)]))'
+  PPA007 generic-workflows/tests/test-lint-plan.sh:1213  "${PY_RUN[@]}" - "$1" "$2" <<'ORGJSON'
+  PPA007 generic-workflows/tests/test-lint-plan.sh:1282  env \ GITHUB_WORKSPACE="${hostile}" \ RUNNER_TEMP="${workdir}" \ GITHUB_OUTPUT="${workdir}/out" \ GI
+  PPA007 generic-workflows/tests/test-lint-plan.sh:1571  "${PY_RUN[@]}" - "${resolver}" "${url}" <<'PYEOF'
+  PPA007 generic-workflows/tests/test-lint-plan.sh:1716  "${PY_RUN[@]}" - "${workflow}" "$1" <<'PYEOF'
+  PPA007 generic-workflows/tests/test-lint-plan.sh:1841  "${PY_RUN[@]}" - "${stub_config}" <<'PYEOF'
+  PPA007 generic-workflows/tests/test-lint-plan.sh:1899  "${PY_RUN[@]}" - "${workflow}" <<'PYEOF'
+  PPA001 gha-workflow-linter/scripts/quick_benchmark.sh:94  python -m gha_workflow_linter cache clear >/dev/null 2>&1
+  PPA001 pull-request-fixer/scripts/integration-test.sh:394  python3 -m json.tool > /dev/null 2>&1
+  PPA006 python-nss-ng/scripts/run-all-tests.sh:188  uv venv
+  PPA007 python-nss-ng/scripts/run-all-tests.sh:210  uv pip install meson-python meson ninja
+  PPA007 standalone-linting-action/tests/lib/action-step.sh:58  "${PY_RUN[@]}" - "$1" "$2" "$3" > "$4" <<'PYEOF'
+
+== proto-only, real rules
+  PPA001 gerrit-docker-k8s/action.yaml:955  python3 -m pip install --user --upgrade 'PyNaCl>=1.5,<2'
+  PPA002 gerrit-docker-k8s/action.yaml:956  python3 -c "import nacl.public; print('PyNaCl OK')"
+  PPA001 gha-workflow-linter/scripts/quick_benchmark.sh:112  python -m gha_workflow_linter "$TARGET_PATH" "$args" --quiet
+  PPA006 github2gerrit-action/scripts/demo_github_actions_version.sh:28  uv run python -m github2gerrit.cli --help
+  PPA007 github2gerrit-action/scripts/demo_github_actions_version.sh:28  uv run python -m github2gerrit.cli --help
+  PPA001 github2gerrit-action/scripts/demo_github_actions_version.sh:28  uv run python -m github2gerrit.cli --help
+  PPA006 github2gerrit-action/scripts/demo_github_actions_version.sh:42  GITHUB_ACTIONS=true uv run python -m github2gerrit.cli --help
+  PPA007 github2gerrit-action/scripts/demo_github_actions_version.sh:42  GITHUB_ACTIONS=true uv run python -m github2gerrit.cli --help
+  PPA001 github2gerrit-action/scripts/demo_github_actions_version.sh:42  GITHUB_ACTIONS=true uv run python -m github2gerrit.cli --help
+  PPA006 github2gerrit-action/scripts/demo_github_actions_version.sh:55  uv run python -m github2gerrit.cli --version
+  PPA007 github2gerrit-action/scripts/demo_github_actions_version.sh:55  uv run python -m github2gerrit.cli --version
+  PPA001 github2gerrit-action/scripts/demo_github_actions_version.sh:55  uv run python -m github2gerrit.cli --version
+  PPA006 github2gerrit-action/scripts/demo_github_actions_version.sh:69  GITHUB_ACTIONS=true GITHUB_REPOSITORY=test/repo uv run python -m github2gerrit.cli https://github.co
+  PPA007 github2gerrit-action/scripts/demo_github_actions_version.sh:69  GITHUB_ACTIONS=true GITHUB_REPOSITORY=test/repo uv run python -m github2gerrit.cli https://github.co
+  PPA001 github2gerrit-action/scripts/demo_github_actions_version.sh:69  GITHUB_ACTIONS=true GITHUB_REPOSITORY=test/repo uv run python -m github2gerrit.cli https://github.co
+  PPA006 project-reporting-tool/testing/quick-test.sh:63  uv run lf-releng-project-reporting generate \ --project "TestProject" \ --repos-path "${REPOS_DIR}"
+  PPA007 project-reporting-tool/testing/quick-test.sh:63  uv run lf-releng-project-reporting generate \ --project "TestProject" \ --repos-path "${REPOS_DIR}"
+  PPA001 pull-request-fixer/scripts/integration-test.sh:399  python3 -m json.tool
+  PPA006 python-nss-ng/scripts/run-all-tests.sh:197  uv venv
+  PPA007 python-nss-ng/scripts/run-all-tests.sh:217  uv pip install meson-python meson ninja
+  PPA001 repository-metadata-action/action.yaml:303  python -m src.main
+  PPA001 rtd-build-action/action.yaml:267  PYTHONPATH="${ACTION_PATH}" \ python3 -m lib.cli "${args[@]}"
+  PPA001 rtd-build-action/action.yaml:274  PYTHONPATH="${ACTION_PATH}" python3 -m lib.emit_outputs
+  PPA001 rtd-build-action/action.yaml:279  PYTHONPATH="${ACTION_PATH}" python3 -m lib.render_summary
+  PPA001 sbom-action/action.yaml:3263  exec "${cdx}/bin/python" -E -s -m scripts.python_backend \ "$@"
+  PPA001 security-workflows/tests/workflow-steps.sh:279  python3 -m tests.test_scan_contents
+  PPA001 sigul-docker-k8s/scripts/deploy-sigul-infrastructure.sh:1896  python3 -m json.tool
+  PPA001 sigul-sign-docker/scripts/deploy-sigul-infrastructure.sh:1001  python3 -m json.tool
+
+== PPA009 unresolved: 59; by detail kind:
+    44 program
+     6 uv --python
+     3 uv --project
+     2 uv --directory
+     2 ${GERRIT_SITE_EXPORT
+     1 "review-assets/scripts/${command[0]}" ma
+     1 written to GITHUB_ENV, so every later st
+
+== PPA009 by repo
+     7 generic-workflows
+     6 sbom-action
+     5 python-sbom-action
+     5 python-test-action
+     4 dependamerge
+     4 vars-to-env-action
+     3 gerrit-docker-k8s
+     3 sigul-sign-action
+     3 standalone-linting-action
+     2 bots-template
+     2 github-code-monkey-bot
+     2 go-audit-action
+     2 info-yaml-validate-action
+     2 maven-snapshot-metadata-action
+     2 project-reporting-tool
+     1 gerrit-action
+     1 github-code-review-bot
+     1 jjb-action
+     1 maven-xml-settings-action
+     1 pypi-version-check-action
+     1 tag-validate-action
+     1 tailscale-openstack-bastion-action
+
+== PPA009 sample (program unresolved), distinct programs
+    10 "${PY_RUN[@]}"
+     6 "${PYTHON_CMD}"
+     3 "$(command -v python)"
+     3 "$python"
+     2 $PYTHON_CMD
+     2 "${PYTHON}"
+     2 "${TEST_DIR}/copy-artifacts-simple-test.sh"
+     2 "${STEPS_INSTALL_CYCLONEDX_OUTPUTS_CYCLONEDX_PY}"
+     2 "${tox_cmd[@]}"
+     2 "${TRUSTED_PYTHON3}"
+     1 "${tool_dir}/govulncheck"
+     1 "${tool_dir}/gosec"
+     1 ${1:?usage: install.sh <python> <venv-dir>}
+     1 "${MVN:-mvn}"
+     1 "$PYTHON"
+     1 "$@"
+     1 "${STEPS_SETUP_PYTHON_PYTHON_PATH}"
+     1 "$(venv_executable "$scanner" python)"
+     1 "${resolved}"
+     1 "$candidate"
+
+== PPA010 parse errors: 50
+  feat-push-by-digest/tests/legacy/build-release.sh:83  && [[ "${IMAGE_NAMESPACE}" =~ \ ^${namespace_component}(/${namespace_component})*$ ]] then
+  docker-build-images-action/tests/legacy/build-release.sh:83  && [[ "${IMAGE_NAMESPACE}" =~ \ ^${namespace_component}(/${namespace_component})*$ ]] then
+  docker-build-matrix-action/tests/legacy/discover-v0.6.2.sh:33  <<
+  docker-release-detect-action/tests/legacy/detect-release-merge.sh:97  <<
+  docker-workflows/.github/workflows/build-test-release.yaml:1092  <<
+  docker-workflows/.github/workflows/build-test-release.yaml:1122  <<
+  docker-workflows/.github/workflows/build-test-release.yaml:1133  <<
+  docker-workflows/.github/workflows/build-test.yaml:668  <<
+  docker-workflows/.github/workflows/build-test.yaml:698  <<
+  docker-workflows/.github/workflows/build-test.yaml:709  <<
+  docker-workflows/.github/workflows/merge.yaml:861  <<
+  docker-workflows/.github/workflows/merge.yaml:891  <<
+  docker-workflows/.github/workflows/merge.yaml:902  <<
+  gerrit-review-action/scripts/review-command.sh:101  "${c1_lead}"
+  go-test-action/action.yaml:105  for tool in realpath awk; do if ! command -v "${tool}" > /dev/null 2>&1; then echo "Error:
+  inject-issue-id-action/action.yaml:50  <<
+  inject-issue-id-action/action.yaml:58  <<
+  lftools-uv/.specify/extensions/git/scripts/bash/create-new-feature.sh:116  10#
+  lftools-uv/.specify/extensions/git/scripts/bash/create-new-feature.sh:139  10#
+  lftools-uv/.specify/extensions/git/scripts/bash/create-new-feature.sh:353  10#
+  lftools-uv/.specify/scripts/bash/common.sh:83  10#
+  lftools-uv/.specify/scripts/bash/common.sh:328
+  lftools-uv/.specify/scripts/bash/create-new-feature.sh:105  10#
+  lftools-uv/.specify/scripts/bash/create-new-feature.sh:129  10#
+  lftools-uv/.specify/scripts/bash/create-new-feature.sh:299  10#
+  docs-drop-docker-format/scripts/publish.sh:67  10#
+  docs-drop-docker-format/scripts/publish.sh:69  10#
+  docs-drop-docker-format/scripts/publish.sh:74  10#
+  docs-drop-docker-format/scripts/publish.sh:900
+  docs-drop-docker-format/tests/test_publish.sh:438  10#
+  fix-exact-metadata-match/scripts/publish.sh:67  10#
+  fix-exact-metadata-match/scripts/publish.sh:69  10#
+  fix-exact-metadata-match/scripts/publish.sh:74  10#
+  fix-exact-metadata-match/scripts/publish.sh:901
+  fix-exact-metadata-match/tests/test_publish.sh:481  10#
+  nexus-publish-action/scripts/publish.sh:67  10#
+  nexus-publish-action/scripts/publish.sh:69  10#
+  nexus-publish-action/scripts/publish.sh:74  10#
+  nexus-publish-action/scripts/publish.sh:893
+  nexus-publish-action/tests/test_publish.sh:438  10#
+  nexus-staging-action/action.yaml:123  10#
+  security-workflows/tests/workflow-steps.sh:328  (not: ${unpermitted//$'\n'/, }
+  security-workflows/tests/workflow-steps.sh:371  (not: ${unnamed}
+  sonarqube-cloud-scan-action/action.yaml:950  10#
+  standalone-linting-action/action.yaml:578  10#
+  standalone-linting-action/action.yaml:579  10#
+  standalone-linting-action/action.yaml:580  10#
+  standalone-linting-action/action.yaml:2156  set -euo pipefail # Hooks probing for a token behave better with the variables # absent th
+  test-gradle-project/gradlew:180  for arg
+  version-extract-action/action.yaml:101  # Relative paths name the caller's workspace, not the action's # own directory, which this
