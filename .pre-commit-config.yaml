@@ -97,6 +97,8 @@ repos:
           - httpx>=0.28.1
           - typing-extensions>=4.12.0
           - pytest>=8.0.0
+          - tree-sitter>=0.25
+          - tree-sitter-bash>=0.25
 
   - repo: https://github.com/btford/write-good
     rev: ab66ce10136dfad5146e69e70f82a3efac8842c1  # frozen: v1.0.8

@@ -39,6 +39,8 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "typing-extensions>=4.12.0",
+    "tree-sitter>=0.25",
+    "tree-sitter-bash>=0.25",
 ]
 
 [project.optional-dependencies]
