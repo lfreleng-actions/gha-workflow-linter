@@ -15,12 +15,14 @@ from __future__ import annotations
 from bisect import bisect_right
 from typing import TYPE_CHECKING
 
-from tree_sitter import Language, Parser
-import tree_sitter_bash
+from tree_sitter import Parser
+
+from gha_workflow_linter.shell._tree import BASH
+from gha_workflow_linter.shell._tree import node_text as _node_text
 
 from ._commands import CommandChecks
 from ._invocation import IGNORE_MARK, RULES
-from ._words import Finding, _node_text
+from ._words import Finding
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -28,8 +30,6 @@ if TYPE_CHECKING:
     from tree_sitter import Node
 
     from ._words import Block
-
-BASH = Language(tree_sitter_bash.language())
 
 
 class BlockScan(CommandChecks):

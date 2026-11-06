@@ -19,8 +19,12 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass, field
 import re
+from typing import TYPE_CHECKING
 
 import yaml
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # The parts of a word the reader produces. ``Lit`` is literal text and
 # ``Expr`` a ``${{ }}`` expression; ``Word`` is a sequence of them.
@@ -441,3 +445,65 @@ class _Reader:
                 starts.append((found, number + offset))
                 position = found + len(text)
         return starts or [(0, number)]
+
+
+def swapped_text(
+    yblock: Block,
+    expressions: list[Expression],
+    swap: Callable[[re.Match[str]], str],
+) -> tuple[str, list[tuple[int, int]]]:
+    """The block text with markers swapped, and its line starts in bytes.
+
+    The YAML reader maps lines by offsets into the value as written,
+    with each ``${{ }}`` in full; the parser counts bytes of the
+    swapped text. Both are walked once, in step, so each character is
+    encoded a single time. A line that starts inside a multi-line
+    expression starts, in the swapped text, where the expression's
+    replacement ends, so text after the expression belongs to its
+    closing line.
+    """
+    original = restore_expressions(yblock.text, expressions)
+    pieces: list[str] = []
+    starts: list[tuple[int, int]] = []
+    lines = iter(yblock.starts)
+    pending = next(lines, None)
+    # The walk's position: characters of the original, bytes of the
+    # swapped text.
+    char = byte = 0
+    position = 0  # in the marked text
+
+    def map_literal(limit: int) -> None:
+        """Place the line starts in the literal text up to ``limit``.
+
+        A line that starts exactly at ``limit`` (where an expression
+        opens) maps there too, before the expression's marker.
+        """
+        nonlocal pending, char, byte
+        while pending is not None and pending[0] <= limit:
+            byte += len(original[char : pending[0]].encode())
+            char = pending[0]
+            starts.append((byte, pending[1]))
+            pending = next(lines, None)
+        byte += len(original[char:limit].encode())
+        char = limit
+
+    for match in MARKER.finditer(yblock.text):
+        literal = yblock.text[position : match.start()]
+        name = swap(match)
+        pieces += [literal, name]
+        map_literal(char + len(literal))
+        expression_end = char + len(expressions[int(match.group(2))].text)
+        byte += len(name.encode())
+        # A line starting inside the expression lands after its marker.
+        while pending is not None and pending[0] < expression_end:
+            starts.append((byte, pending[1]))
+            pending = next(lines, None)
+        char = expression_end
+        position = match.end()
+    tail = yblock.text[position:]
+    pieces.append(tail)
+    map_literal(char + len(tail))
+    while pending is not None:  # a start past the text's end
+        starts.append((byte, pending[1]))
+        pending = next(lines, None)
+    return "".join(pieces), starts

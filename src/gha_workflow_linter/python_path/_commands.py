@@ -28,6 +28,9 @@ import os
 import re
 from typing import TYPE_CHECKING
 
+from gha_workflow_linter.shell._tree import node_text as _node_text
+from gha_workflow_linter.shell._tree import statement_redirects
+
 from ._envfile import ENV_FILE, forwards_stdin
 from ._invocation import (
     DECLARATIONS,
@@ -52,7 +55,7 @@ from ._invocation import (
 )
 from ._pythonpath import TEXT
 from ._uv import UvChecks
-from ._words import Word, _node_text, command_words, statement_redirects
+from ._words import Word, command_words
 
 if TYPE_CHECKING:
     from tree_sitter import Node
