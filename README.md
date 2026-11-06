@@ -195,6 +195,7 @@ should do:
 | ---------------- | -------------------------- | -------- | -------------------------------------- |
 | `--action-calls` | `off｜report｜fix｜update` | `fix`    | Action and workflow `uses:` references |
 | `--allow-list`   | `off｜report｜update`      | `report` | `harden-runner` allow-list pins        |
+| `--stderr-merge` | `off｜report`              | `report` | Stderr merged into output used as data |
 
 <!-- markdownlint-enable MD013 MD060 -->
 
@@ -363,16 +364,18 @@ Example output (default behavior, test actions skipped):
 | `4`  | `--verify-allow-list` and the tool could not reach the latest release |
 | `5`  | `--verify-action-calls` and outdated action calls remain              |
 | `6`  | Rate-limited API, and the run asked it to verify or update            |
+| `8`  | `--verify-stderr-merge` and a stderr merge used as data remains       |
 
 <!-- markdownlint-enable MD013 -->
 
 When more than one applies, the most significant wins: `6`, then `4`,
-then `3`, then `5`, then `1`. A check that could not run outranks a stale
+then `3`, then `5`, then `8`, then `1`. Code `7` stays reserved for a
+planned `python-path` check. A check that could not run outranks a stale
 result, because enforcement reporting success when it never looked is
 worse than useless. A condition you asked about by name outranks the
 generic `1`, and nothing masks it.
 
-Codes `3`, `4` and `5` require the matching `--verify-*` flag. Without
+Codes `3`, `4`, `5` and `8` require the matching `--verify-*` flag. Without
 it, the linter reports those findings and leaves the exit code alone.
 
 #### Rate limiting
@@ -653,6 +656,252 @@ then the `upstream` git remote, then `origin`. Contributors working from
 a personal fork should pass `--allow-list-org` explicitly, since `origin`
 would otherwise resolve to a `.github` repository that does not exist.
 
+### Stderr Merge Checking
+
+A command that merges stderr into stdout (`2>&1`, `&>`, `|&`, or any
+command after `exec 2>&1`) and then parses, compares or exports the
+result works until the tool prints a warning. Then the warning becomes
+part of the data. In #187, `gerrit_query.sh` captured
+`ssh … gerrit query --format JSON … 2>&1` and handed it to `jq`; one
+SSH warning broke every consumer of `gerrit-change-info`.
+
+The check reads shell offline and never calls the GitHub API, so it runs
+under a rate limit and when no action calls exist to check:
+
+```bash
+# Report merges (the default); never fails the run
+gha-workflow-linter lint --stderr-merge report
+
+# Fail with exit status 8 on a high or medium finding
+gha-workflow-linter lint --verify-stderr-merge
+
+# Fail on low findings too
+gha-workflow-linter lint --verify-stderr-merge --stderr-merge-min-confidence low
+
+# Skip the check
+gha-workflow-linter lint --stderr-merge off
+```
+
+It offers no `fix` or `update` mode: where stderr should go depends on
+what the step does with it, so the fix needs a person.
+
+#### Rules
+
+<!-- markdownlint-disable MD013 -->
+
+| Rule     | Reports                                                                                                                | Confidence | Suggested fix                                                       |
+| -------- | ---------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------- |
+| `SEM001` | Merged stream piped into a structured parser (`jq`, `yq`, `base64 -d`, JSON through Python or Node)                    | high       | Send stderr elsewhere: `2>"$err"`, printed on failure, or the log   |
+| `SEM002` | Merged capture whose variable the success path parses, compares, or writes to `$GITHUB_*`                              | high       | Capture stdout alone; keep stderr in a file for the error message   |
+| `SEM003` | Merged stream piped into a field extractor (`cut`, `awk`, `sed -n`, `grep -o`, `read`), or captured and passed on      | medium     | As `SEM001`                                                         |
+| `SEM004` | Merged stream used through `grep -q` or an anchored extraction, or from a command that writes its data to stderr       | low        | Merge when the tool writes the wanted text to stderr; else `SEM001` |
+
+<!-- markdownlint-enable MD013 -->
+
+The rule identifiers stay stable across releases. Enforcement counts
+`high` and `medium` findings unless `--stderr-merge-min-confidence`
+(or `stderr_merge.min_confidence` in the configuration file) sets
+another floor. Display uses (`tee FILE`, `cat` or `head -N` to the
+log, indentation through `sed`, and `head -1`, `sort` or plain `grep`
+whose result is not captured, compared or parsed; given more than one
+count, `head` and `tail` take the last, so `head -n 1 -n 10` prints
+ten lines) and logging commands
+(`echo`, `printf`, workflow commands, `logger`, and functions named
+like `log_*` or `die`) do not count as data uses. `true`, `:` and
+`logger` print nothing on stdout, so `true "$x" >> "$GITHUB_OUTPUT"`
+exports nothing. `exit` and `return`
+read their argument as a status, so passing a merged value to one
+counts as passing it on.
+
+The check calls an extraction anchored when every line it can print
+has the fixed prefix: a `grep` whose patterns all start with `^`, with
+no space before it, a `sed -n` whose scripts are all `s/^…/…/` commands
+or `/^…/` addresses governing `d`, `p`, `q`, `=`, `s` or `P` commands,
+or an `awk` program of `/^…/` rules and `BEGIN` blocks. An inverted
+(`grep -v`), fixed-string (`grep -F`, `fgrep`), context-printing
+(`-A`, `-B`, `-C`, `-NUM`) or file-fed (`grep -f`) match, NUL-separated
+records (`-z`), a `sed` without `-n`, a `sed` or `awk` script read from
+a file, a negated address (`/^x/!p`), a range (`/^x/,/^y/p`), a command
+that reads another line (`n`, `N`, `getline`), an `s` command's `e` or
+`w` flag, an `awk` record separator (`RS`), a further unanchored command
+or rule (`sed -n -e '/^x/p' -e p`), and an alternation (`^a|b`) are not
+anchored and keep their rule.
+
+A capture keeps what every statement in it writes, the bodies of `if`,
+`case` and loops included, and a value that `echo` or `printf` prints
+into another `$( )`, from any stage of a pipeline, stays tracked.
+`cat "$x"` opens a file named by the value, so it counts as passing the
+value on. A command reading files it names reads them, not the pipe:
+`a 2>&1 | cat f` and `a 2>&1 | jq . f` read `f`, while no file operand,
+`-`, `/dev/stdin`, `/dev/fd/0` or `/proc/self/fd/0` reads the pipe.
+The check reads the file operands of `jq`, `xq`, `tomlq`, `grep`,
+`sed`, `awk`, `cut`, `sort`, `uniq`, `head`, `tail`, `base64`,
+`xmllint` and `python -m json.tool`, the way each parses its options:
+a value attached to an option, as in `sed -e's/^/  /'`,
+`grep -equery`, `python3 -mjson.tool` or `node --eval=…`, is that
+option's value, a cluster such as `base64 -di` holds each of its
+letters, and the options of `xargs`, `python` and `node` end where
+the program they run begins. `jq -n` and `yq -n` read no input
+unless the filter calls `input` or `inputs`, or comes from a file;
+the name in a string, a comment or an object key, as in `{input: 1}`,
+is no call, while one in an interpolation is;
+`xargs -a FILE` reads no input, and `read -u 3` or `mapfile -u 3` read
+descriptor 3; given more than one `-u`, the last counts, as in Bash.
+`read -t 0` tests whether input is waiting, and reads and sets
+nothing, so `a 2>&1 | read -t 0` is `SEM004`, as `grep -q` is, and a
+`while read -t 0` loop reads nothing. A
+pipeline stage that reads a here-string, here-document or file of its
+own, as in `a 2>&1 | jq . <<< "$x"` or `jq . <0`, takes nothing from the
+pipe, while `<&0` keeps it; a here-document after a pipeline feeds its
+last stage. A here-string or here-document feeds the descriptor it
+names, unless a later redirect replaces that descriptor:
+`jq . <<< "$x" <f` reads `f`, and `jq . 3<<< "$x"` feeds descriptor 3,
+which a `read -u 3` reads and `jq` does not. A group, a subshell, `if`,
+`case` or a `for` loop as a stage hands the pipe to the commands in it, so
+`a 2>&1 | { jq .; }` and `a 2>&1 | if c; then jq .; fi` are `SEM001`; a
+pipeline inside one passes the pipe on when each of its stages does, as
+`{ cat | cat; }` does, and a merge inside one reaches the stages after
+it the same way, as in `{ a 2>&1 | cat; } | jq .`; and a value printed
+inside one, as in
+`{ printf '%s' "$x"; } | jq .`, feeds the next stage. A here-string or
+here-document on a group, a subshell or control flow feeds the commands
+in it the same way, so `{ jq .; } <<< "$x"` is `SEM002`. A `while read`
+loop whose body does nothing but log, and uses the variables it reads
+in nothing but what it logs, is display. A test, a `case` selector or
+arithmetic on such a variable makes the loop an extractor. A logging
+loop that prints a variable it reads to its stdout, as in
+`while read -r l; do echo "$l"; done | jq .`, passes the stream on, as
+`cat` does. A `printf -v` in such a loop stores its text and prints
+nothing, so it neither passes the stream on nor, redirected to
+`$GITHUB_OUTPUT`, exports it; the check follows the copy it stores, so
+`printf -v msg '%s' "$l"; echo "$msg"` passes the stream on.
+
+A redirect on a group, a subshell, `if`, `case` or a loop reaches each
+command in it, before that command's own redirects, as Bash applies
+them: `{ tool 2>/dev/null; } 2>&1` merges nothing, while
+`{ gh api x 2>&1; } | jq .` does, and `if …; fi >> "$GITHUB_OUTPUT"`
+exports what its commands print. A runner file is a destination that
+is the expansion and nothing else, as in `"$GITHUB_OUTPUT"` or
+`${GITHUB_ENV}`; `logs/GITHUB_OUTPUT.log` and a single-quoted
+`'$GITHUB_OUTPUT'` are ordinary files. The check sees through
+`timeout`, `sudo`, `env`, `nice`, `stdbuf` and `command`, reading each
+one's own options, clusters included, so `sudo -n jq .` and
+`sudo -nu root jq .` run `jq`; a `-v` or `-V` makes `command` describe
+a command when it comes before that command, not after it. Of these,
+`command` alone runs a built-in in the shell itself: in
+`env printf -v VAR …` or `sudo read VAR` another process runs, and the
+shell's `VAR` keeps its value. `env -S` and
+`--split-string` split their operand into words, as GNU env does, so
+`env -S 'jq .'` runs `jq`. A redirect to
+`/dev/stdout`, `/dev/stderr` or `/dev/fd/N` reaches wherever that
+descriptor goes, quoted or not, so `tool &>'/dev/stdout' | jq .`
+merges, and a quoted descriptor number is still one: `tool 2>&'1'`
+merges as `tool 2>&1` does. Words after a redirect's target belong to
+the command, as Bash reads them: `python3 2>/dev/null -c …` runs
+Python code, and in `printf '%s' "$x" >> "$GITHUB_OUTPUT" extra` the
+destination is `$GITHUB_OUTPUT` and `extra` is an argument.
+
+#### Success path and failure path
+
+A capture used to explain a failure is correct: the command failed, and
+its stderr is the explanation. The check reports a use of a merged
+capture on the success path, and places each use lexically, within one
+`run:` block or script function:
+
+- `if ! VAR=$(…); then A; else B; fi`: `A` is the failure path.
+- `if VAR=$(…); then A; else B; fi`: `B` is the failure path.
+- `VAR=$(…) || A`: `A` is the failure path, as is `B` in
+  `VAR=$(…) || A || B`.
+- `VAR=$(…)`, then `S=$?`, then `if [ "$S" -eq 0 ]`: the zero branch is
+  the success path and the other branches, `elif` included, the failure
+  path. `-ne 0`, `!= 0` and a leading `!` turn that round. The test
+  must be the `if`'s last condition, come after `S=$?`, and `S` stay
+  unwritten since: an assignment, `read S`, `mapfile S`, `printf -v S`,
+  `getopts`, `let`, `eval`, `((S++))`, `unset S`, `local S` or
+  `for S in` all end it. `read -a ARR S` sets the array and leaves
+  `S` alone, and `printf '%s' -v S` prints `-v S`, since printf's
+  options end at the format string, so neither ends it. The capture
+  must be the whole statement before `S=$?`: after
+  `VAR=$(…) && check` or `! VAR=$(…)`, `$?` is that list's or
+  negation's status, not the capture's.
+
+Everything else counts as the success path, including code after the
+`fi`, a status tested through a `test` command rather than `[ ]`, and a
+capture or status test joined to another command by `&&` or `||`
+(`if VAR=$(…) && check` runs its `else` when `check` fails after the
+capture succeeded). A merged value stays tracked until a write that
+always runs replaces it: an assignment, `(( VAR = 3 ))`,
+`printf -v VAR`, `read VAR`, `mapfile VAR` or `unset VAR`. One in a
+branch, after `||` or `&&`, or in a subshell does not, nor does an
+append (`VAR+=…`) or a write that expands the variable itself
+(`VAR="${VAR%x}"`, `(( VAR = VAR + 1 ))`). Nor does `read -t 0 VAR`,
+which tests for input and sets nothing, a `read -t` whose timeout is
+not a literal above zero, or `mapfile -O N VAR`, which keeps the
+elements it does not reach. Nor does `read -u N VAR`, `mapfile -u N`
+or `readarray -u N` for any `N` but 0, nor one with an input redirect
+of its own other than a here-string, a here-document or `<&0`, as in
+`< FILE read VAR`, nor one with an output redirect to anything but
+`/dev/null` or a standard descriptor, as in
+`> "$dest" printf -v VAR …`: a closed descriptor, a missing file or a
+missing directory makes Bash skip the command, which then sets
+nothing. Nor does a `read` or `mapfile` after `0>&-`, `0>/dev/null` or an
+earlier `exec 0>&-`, which close its stdin or open it for writing:
+it fails and sets nothing. One that expands another
+variable, such as `$VAR_OLD`, replaces it. The check follows a value
+copied to another variable, as in `COPY="$VAR"`, `local COPY=$VAR` or
+`printf -v COPY '%s' "$VAR"`, through that variable's own uses, and a
+use of the copy on the capture's failure path stays a diagnostic.
+`printf -v` prints nothing, so piping it on, or redirecting it to
+`$GITHUB_OUTPUT`, passes nothing. In
+arithmetic a bare name reads the value: `(( VAR > 3 ))` and
+`$(( VAR + 1 ))` are `SEM002`. An assignment before a command, as in
+`VAR=$(…) cmd`, sets that command's environment and leaves the
+shell's `$VAR` alone, so the check does not follow it; before a POSIX
+special built-in such as `:` or `export`, which `sh` keeps, it does. A
+capture made inside a subshell or substitution stays there. An
+`exec 2>&1` inside a subshell, substitution or function leaves the
+commands outside it alone, and a later `exec 2>/dev/null` ends it. That
+over-reports by design; the suppression directive covers the rest.
+
+#### Commands that write their data to stderr
+
+These need the merge, so the check caps them at `low` (`SEM004`):
+java's own `-version` (not one after `-jar`, `-m` or the main class)
+and `javac -version`, python's own `-V` and `--version` (not ones
+after the script, `-c` or `-m`), `ldd --version`, `ssh -V` before the
+destination, `mkcert -version`, `openssl s_client`,
+`nc -z` and `nc -v`, and `docker logs` or `podman logs`. The cap is
+the command's own: a capture that also holds a merge from another
+command, as in `v=$(python3 -V 2>&1; gh api x 2>&1)`, reports the
+other command's finding.
+
+#### Suppressing a deliberate merge
+
+Both forms `allow-list-pin-ok` accepts work here:
+
+```yaml
+    run: |
+      # gha-workflow-linter: stderr-merge-ok -- the tool prints JSON on stderr
+      out=$(tool --json 2>&1)
+      tool --json 2>&1 | jq .  # stderr-merge-ok
+```
+
+On a one-line `run:` value, the inline form may also be a YAML comment
+after the value, which YAML keeps out of the shell:
+`run: 'tool 2>&1 | jq .'  # stderr-merge-ok -- reason`.
+
+A suppressed finding never fails the run. The text report counts
+suppressed findings, `--show-suppressed` lists them with their
+reasons, and the JSON document carries them with `"suppressed": true`.
+
+#### Context tags
+
+Each finding carries the tags of its file, naming what a defect there
+puts at risk: `action` for composite action metadata, since a defect
+breaks every caller, and for workflows `workflow_call`,
+`pull_request_target`, `workflow_run`, `secrets`, `write-permissions`
+and `no-checkout`.
+
 ### What Gets Scanned
 
 The linter walks the tree below the path you give it, collecting
@@ -669,6 +918,16 @@ The scan root itself never counts as a boundary, so pointing the linter
 at a worktree scans that worktree. Pointing it at a directory that
 merely *contains* repositories finds nothing, since each child is a
 boundary.
+
+The stderr-merge check reads more: the `run:` steps of workflows and
+composite actions, and shell scripts (`*.sh`, `*.bash`, and files with
+no extension whose shebang names a shell). It honours `--exclude`,
+`--skip-actions` and `.gitignore`, never entering an excluded or
+ignored directory, and skips virtual environments, caches and
+`node_modules`. A file named
+with `--files`, by a relative or absolute path or glob, gets scanned
+whatever its name; the scan reports a missing path as unread,
+which fails `--verify-stderr-merge`, while a glob may match nothing.
 
 ### Multi-Repository Mode
 
@@ -735,13 +994,17 @@ table listing every repository, its pin counts and its status.
 | `updated`      | The run rewrote something, leaving nothing to do     |
 | `findings`     | Something needs attention                            |
 | `unresolved`   | A host did not resolve, leaving the check incomplete |
+| `incomplete`   | The stderr-merge check could not read every file     |
 | `rate-limited` | GitHub throttled the API, so the checks did not run  |
 | `failed`       | The sweep could not scan the repository              |
 
-`unresolved` and `rate-limited` get their own labels because an
-incomplete check says nothing about the repository: its counts are empty
-for want of an answer, not for want of a problem. `rate-limited` appears
-whatever the exit code, since an advisory sweep still exits `0`.
+`unresolved`, `incomplete` and `rate-limited` get their own labels
+because an incomplete check says nothing about the repository: its
+counts are empty for want of an answer, not for want of a problem.
+`incomplete` and `rate-limited` appear whatever the exit code, since an
+advisory sweep still exits `0`. A stderr-merge finding counts as
+outstanding at or above the run's `--stderr-merge-min-confidence`
+floor, so with `low` a `SEM004` finding alone reads `findings`.
 
 What remains outranks what the run achieved, so a partial remediation —
 some pins rewritten, others still stale — reports `findings` rather than
@@ -824,6 +1087,9 @@ repos:
     rev: d86993e21bbcddcfa9dac63cd43213b6a58fa6fb  # frozen: v0.1.1
     hooks:
       - id: gha-workflow-linter
+      # Offline; fails the commit on a high or medium stderr merge.
+      # Needs a rev that includes this hook: v0.1.1 above predates it.
+      # - id: gha-stderr-merge
 ```
 
 ### As a GitHub Action
@@ -1243,7 +1509,8 @@ then reports none of what it repaired.
   "rate_limited": false,
   "checks": {
     "action-calls": {"mode": "fix", "ran": true},
-    "allow-list": {"mode": "report", "ran": true}
+    "allow-list": {"mode": "report", "ran": true},
+    "stderr-merge": {"mode": "report", "ran": true}
   },
   "error": null,
   "scan_summary": {
@@ -1308,6 +1575,42 @@ enough to have any. Every path the linter itself reaches emits a
 document, so a consumer never has to treat an empty stream as
 meaningful.
 
+`stderr_merge` is always present. `checked` says whether the check ran:
+`false` separates a check switched off from one that found nothing.
+Each finding names its `path`, `line`, `rule`, `confidence`, `detail`,
+the source line as `snippet` (`detail` says what uses the output, and
+on which line), the captured `variable` where one exists,
+the file's `tags`, and whether a directive `suppressed` it. `summary`
+counts unsuppressed findings by rule and by confidence, and `problems`
+lists files the check could not read:
+
+```json
+"stderr_merge": {
+  "checked": true,
+  "findings": [
+    {
+      "path": ".github/scripts/gerrit_query.sh",
+      "line": 14,
+      "rule": "SEM002",
+      "confidence": "high",
+      "detail": "<how jq reads $json_output, and the line>",
+      "snippet": "json_output=$(ssh -p 29418 \"$host\" gerrit query ... 2>&1)",
+      "variable": "json_output",
+      "tags": [],
+      "suppressed": false
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "suppressed": 0,
+    "files_scanned": 9,
+    "by_rule": {"SEM001": 0, "SEM002": 1, "SEM003": 0, "SEM004": 0},
+    "by_confidence": {"high": 1, "medium": 0, "low": 0}
+  },
+  "problems": []
+}
+```
+
 Argument parsing sits outside that guarantee, by design. The argument
 parser rejects an unreadable path or an out-of-range `--repo-depth`
 before the linter starts, exiting `2` — the code reserved for a usage
@@ -1351,6 +1654,8 @@ file given with `config-file` still decides it.
 | `verify-allow-list`   | Fail when stale allow-list pins remain                        | No       | `false` |
 | `update-allow-list`   | Deprecated: use `allow-list: update`                          | No       | `false` |
 | `allow-list-org`      | Org for the allow-list `@` shorthand                          | No       |         |
+| `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
+| `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1406,6 +1711,12 @@ Options:
   --allow-list-cooldown INTEGER
                              Days an allow-list host release must be public
                              before a pin is stale against it (default: 0)
+  --stderr-merge MODE        off|report (default: report)
+  --verify-stderr-merge      Fail when a high or medium stderr merge remains
+  --stderr-merge-min-confidence LEVEL
+                             Lowest confidence --verify-stderr-merge fails
+                             on: low, medium or high (default: medium)
+  --show-suppressed          List findings silenced by a directive
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions
   --two-space-comments       Use two spaces before inline comments

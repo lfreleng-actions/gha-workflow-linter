@@ -11,6 +11,7 @@ from gha_workflow_linter.check_modes import (
     ACTION_CALLS,
     ALLOW_LIST,
     SPECS,
+    STDERR_MERGE,
     CheckId,
     CheckMode,
     CheckSpec,
@@ -132,6 +133,23 @@ class TestCapabilityIsDeclaredNotImplied:
 
     def test_a_supported_mode_passes_through(self) -> None:
         assert ALLOW_LIST.validate(CheckMode.REPORT) is CheckMode.REPORT
+
+    @pytest.mark.parametrize("mode", [CheckMode.FIX, CheckMode.UPDATE])
+    def test_stderr_merge_refuses_to_remediate(self, mode: CheckMode) -> None:
+        """Where stderr should go is a decision for a person."""
+        with pytest.raises(ConfigurationError) as caught:
+            STDERR_MERGE.validate(mode)
+
+        message = str(caught.value)
+        assert f"--stderr-merge does not support mode '{mode.value}'" in (
+            message
+        )
+        assert "the fix needs a person" in message
+        assert "Supported modes: off, report" in message
+
+    def test_stderr_merge_reports_by_default(self) -> None:
+        assert STDERR_MERGE.default_mode is CheckMode.REPORT
+        assert STDERR_MERGE.choices == ("off", "report")
 
     def test_choices_follow_ladder_order(self) -> None:
         """Not alphabetical: the help text should read as a ladder."""

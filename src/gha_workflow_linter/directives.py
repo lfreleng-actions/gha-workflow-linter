@@ -31,7 +31,7 @@ The grammar implemented here is::
     <inline>     ::= <version-token> <ws>+ <body>
     <body>       ::= <directives> [ <reason> ]
     <directives> ::= <directive> ( <ws>+ <directive> )*
-    <directive>  ::= "allow-list-pin-ok"
+    <directive>  ::= "allow-list-pin-ok" | "stderr-merge-ok"
     <reason>     ::= <ws>+ "--" <ws>+ <free text>
 
 Tokens that are neither the version nor a recognised directive are kept
@@ -61,6 +61,7 @@ class Directive(str, Enum):
     """A recognised linter-suppression directive."""
 
     ALLOW_LIST_PIN_OK = "allow-list-pin-ok"
+    STDERR_MERGE_OK = "stderr-merge-ok"
 
 
 class SuppressionSource(str, Enum):

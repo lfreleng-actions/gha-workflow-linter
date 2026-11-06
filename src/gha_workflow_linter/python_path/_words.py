@@ -8,6 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from gha_workflow_linter.shell._tree import descriptor_word, redirect_words
+from gha_workflow_linter.shell._tree import node_text as _node_text
+
 from ._invocation import WORD_TYPES
 
 if TYPE_CHECKING:
@@ -52,10 +55,6 @@ class Block:
     )  # literal YAML env; None = expression
 
 
-def _node_text(src: bytes, node: Node) -> str:
-    return src[node.start_byte : node.end_byte].decode("utf-8", "replace")
-
-
 def literal_of(src: bytes, node: Node) -> str | None:
     """The literal text of a word node, or None if it holds an expansion.
 
@@ -95,27 +94,6 @@ def word_of(src: bytes, node: Node) -> Word:
     return Word(node, literal_of(src, node), quoted, _node_text(src, node))
 
 
-def statement_redirects(command: Node) -> list[Node]:
-    """The redirects tree-sitter hangs on the statement around ``command``.
-
-    They follow a command directly, or a pipeline whose last stage it
-    is (``true | cat <<EOF``): they belong to that stage.
-    """
-    parent = command.parent
-    if parent is not None and parent.type == "pipeline":
-        stages = [c for c in parent.children if c.is_named]
-        if stages[-1:] != [command]:
-            return []
-        command, parent = parent, parent.parent
-    if (
-        parent is None
-        or parent.type != "redirected_statement"
-        or parent.children[0] != command
-    ):
-        return []
-    return parent.children[1:]
-
-
 def command_words(src: bytes, command: Node) -> tuple[list[Node], list[Word]]:
     """A command's prefix assignments and its words (name first).
 
@@ -132,23 +110,13 @@ def command_words(src: bytes, command: Node) -> tuple[list[Node], list[Word]]:
             words.append(word_of(src, child.children[0]))
         elif child.type in WORD_TYPES:
             words.append(word_of(src, child))
-    redirects = statement_redirects(command)
     # ``python3 0< file``: the descriptor is a number word before the
     # redirect, whatever words the redirect carries after its target.
-    following = redirects[:1]
-    if (
-        words
-        and words[-1].node.type == "number"
-        and following
-        and following[0].type == "file_redirect"
-        and following[0].start_byte == words[-1].node.end_byte
-    ):
+    if words and descriptor_word(command, words[-1].node):
         words.pop()
-    for redirect in redirects:
-        if redirect.type == "file_redirect":
-            target = redirect.child_by_field_name("destination")
-            after = target.end_byte if target is not None else 0
-            for extra in redirect.children:
-                if extra.start_byte >= after and extra.type in WORD_TYPES:
-                    words.append(word_of(src, extra))
+    words += [
+        word_of(src, extra)
+        for extra in redirect_words(command)
+        if extra.type in WORD_TYPES
+    ]
     return assigns, words

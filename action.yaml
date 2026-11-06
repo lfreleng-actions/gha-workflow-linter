@@ -132,6 +132,20 @@ inputs:
       Organisation used to resolve the '@<sha>' allow-list shorthand.
       Defaults at runtime to github.repository_owner.
     required: false
+  stderr-merge:
+    description: >
+      What the stderr-merge check does: off or report. Unset leaves the
+      choice to the configuration file, whose default is 'report'. The
+      check reads shell offline and annotates each high or medium
+      finding, as a warning, or as an error under 'verify-stderr-merge'.
+    required: false
+  verify-stderr-merge:
+    description: >
+      Fail the run, with exit status 8, when a high or medium stderr
+      merge remains unsuppressed. Without this the findings are advisory
+      only.
+    required: false
+    default: "false"
 
 outputs:
   errors-found:
@@ -289,6 +303,8 @@ runs:
         INPUT_VERIFY_ALLOW_LIST: ${{ inputs.verify-allow-list }}
         INPUT_UPDATE_ALLOW_LIST: ${{ inputs.update-allow-list }}
         INPUT_ALLOW_LIST_ORG: ${{ inputs.allow-list-org }}
+        INPUT_STDERR_MERGE: ${{ inputs.stderr-merge }}
+        INPUT_VERIFY_STDERR_MERGE: ${{ inputs.verify-stderr-merge }}
       run: |
         # The trusted interpreter, by path and isolated (-I): neither a
         # console script looked up on PATH nor PYTHONPATH, PYTHONHOME or
@@ -489,6 +505,24 @@ runs:
           args+=(--allow-list-org "$INPUT_ALLOW_LIST_ORG")
         fi
 
+        # Modes pass through: the CLI refuses 'fix' and 'update' with
+        # its reason, as it does for 'allow-list'.
+        case "$INPUT_STDERR_MERGE" in
+          "") ;;
+          off | report | fix | update)
+            args+=(--stderr-merge "$INPUT_STDERR_MERGE")
+            ;;
+          *)
+            echo "::error title=Invalid input::'stderr-merge' must be" \
+              "off or report, not '$(command_data "$INPUT_STDERR_MERGE")'"
+            exit 2
+            ;;
+        esac
+
+        if [[ "$INPUT_VERIFY_STDERR_MERGE" == "true" ]]; then
+          args+=(--verify-stderr-merge)
+        fi
+
         # Run the linter, once. Its status is kept, not acted on at once:
         # under GitHub's 'bash -e' a failing invocation used to abort the
         # step right here, so the outputs and the summary below -- which
@@ -568,6 +602,27 @@ runs:
         echo "allow-list-stale=$allow_list_stale" >> "$GITHUB_OUTPUT"
         echo "allow-list-fixed=$allow_list_fixed" >> "$GITHUB_OUTPUT"
 
+        # One annotation per unsuppressed high or medium stderr merge.
+        # The path, line and text come from scanned files, so jq escapes
+        # them as @actions/core does -- properties also escape ':' and
+        # ',' -- and no finding can end its line or start a command.
+        stderr_merge_level="warning"
+        if [[ "$INPUT_VERIFY_STDERR_MERGE" == "true" ]]; then
+          stderr_merge_level="error"
+        fi
+        echo "$json_output" | jq -r --arg level "$stderr_merge_level" '
+            def data: gsub("%"; "%25") | gsub("\r"; "%0D")
+              | gsub("\n"; "%0A");
+            def property: data | gsub(":"; "%3A") | gsub(","; "%2C");
+            (.stderr_merge.findings // [])[]
+            | select((.suppressed | not)
+                and (.confidence == "high" or .confidence == "medium"))
+            | "::\($level) file=\(.path | property),"
+              + "line=\(.line | tostring | property),"
+              + "title=\("stderr merge " + .rule | property)::"
+              + ("\(.confidence): \(.detail): \(.snippet)" | data)
+          ' 2>/dev/null || true
+
         # Set step summary. Consult what actually ran before claiming a
         # result: with 'action-calls: off', or under a rate limit, there
         # are no errors because nothing was examined, and "all valid"
@@ -612,6 +667,19 @@ runs:
         else
           echo "✅ All $total_calls action calls are valid!" \
             >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        stderr_merge_ran=$(echo "$summary_json" | \
+          jq -r '.stderr_merge.checked // false' 2>/dev/null || echo "false")
+        if [[ "$have_document" == "true" &&
+              "$stderr_merge_ran" == "true" ]]; then
+          echo "$summary_json" | jq -r '
+              .stderr_merge.summary
+              | "\nStderr merges: \(.by_confidence.high) high," +
+                " \(.by_confidence.medium) medium," +
+                " \(.by_confidence.low) low," +
+                " \(.suppressed) suppressed"
+            ' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
         fi
 
         # The linter's status, recorded above, is the step's -- so a
