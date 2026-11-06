@@ -1351,6 +1351,8 @@ file given with `config-file` still decides it.
 | `verify-allow-list`   | Fail when stale allow-list pins remain                        | No       | `false` |
 | `update-allow-list`   | Deprecated: use `allow-list: update`                          | No       | `false` |
 | `allow-list-org`      | Org for the allow-list `@` shorthand                          | No       |         |
+| `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
+| `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1406,6 +1408,12 @@ Options:
   --allow-list-cooldown INTEGER
                              Days an allow-list host release must be public
                              before a pin is stale against it (default: 0)
+  --stderr-merge MODE        off|report (default: report)
+  --verify-stderr-merge      Fail when a high or medium stderr merge remains
+  --stderr-merge-min-confidence LEVEL
+                             Lowest confidence --verify-stderr-merge fails
+                             on: low, medium or high (default: medium)
+  --show-suppressed          List findings silenced by a directive
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions
   --two-space-comments       Use two spaces before inline comments

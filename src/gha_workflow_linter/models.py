@@ -628,6 +628,53 @@ class AllowListConfig(BaseModel):
     )
 
 
+class StderrMergeConfidence(str, Enum):
+    """How sure a stderr-merge finding is that the merge corrupts data."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class StderrMergeConfig(BaseModel):
+    """Configuration for the stderr-merge check.
+
+    The rules are heuristics, so the check is advisory by default: it
+    reports findings but never changes the exit code. ``verify`` opts in
+    to enforcement.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Report shell that merges stderr into output used as data"
+        ),
+    )
+    mode: CheckMode = Field(
+        default=CheckMode.REPORT,
+        # Excluded for the same reason as AllowListConfig.mode:
+        # _apply_check_modes derives it from 'enabled'.
+        exclude=True,
+        description=(
+            "Runtime view of what this check does, derived from 'enabled' "
+            "or set by --stderr-merge. Not a configuration key"
+        ),
+    )
+    verify: bool = Field(
+        default=False,
+        description=(
+            "Treat unsuppressed findings at or above 'min_confidence' as "
+            "errors and exit with the STDERR_MERGE_FOUND status"
+        ),
+    )
+    min_confidence: StderrMergeConfidence = Field(
+        default=StderrMergeConfidence.MEDIUM,
+        description=(
+            "Lowest confidence that 'verify' enforces: low, medium or high"
+        ),
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -729,6 +776,10 @@ class Config(BaseModel):
     allow_list: AllowListConfig = Field(
         default_factory=AllowListConfig,
         description="Allow-list pin checking configuration",
+    )
+    stderr_merge: StderrMergeConfig = Field(
+        default_factory=StderrMergeConfig,
+        description="stderr-merge check configuration",
     )
 
     @property
@@ -867,7 +918,7 @@ class CLIOptions(BaseModel):
     )
     show_suppressed: bool = Field(
         default=False,
-        description="Report suppressed allow-list pins as notices",
+        description="Report suppressed allow-list pins and stderr merges",
     )
     allow_list_org: str | None = Field(
         default=None,
@@ -881,6 +932,18 @@ class CLIOptions(BaseModel):
             "before a pin is stale against it (falls back to the "
             "configuration file, then 0)"
         ),
+    )
+    stderr_merge_mode: CheckMode | None = Field(
+        default=None,
+        description="Mode given to --stderr-merge, authoritative when present",
+    )
+    verify_stderr_merge: bool = Field(
+        default=False,
+        description="Treat stderr-merge findings as errors",
+    )
+    stderr_merge_min_confidence: StderrMergeConfidence | None = Field(
+        default=None,
+        description="Lowest stderr-merge confidence that verify enforces",
     )
     multi_repo: bool = Field(
         default=False,

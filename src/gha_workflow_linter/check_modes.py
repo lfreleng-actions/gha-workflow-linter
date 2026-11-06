@@ -83,6 +83,7 @@ __all__ = [
     "ACTION_CALLS",
     "ALLOW_LIST",
     "SPECS",
+    "STDERR_MERGE",
     "CheckId",
     "CheckMode",
     "CheckSpec",
@@ -99,6 +100,7 @@ class CheckId(str, Enum):
 
     ACTION_CALLS = "action-calls"
     ALLOW_LIST = "allow-list"
+    STDERR_MERGE = "stderr-merge"
 
 
 class CheckMode(str, Enum):
@@ -277,9 +279,28 @@ that did not ask about it.
 """
 
 
+STDERR_MERGE: Final = CheckSpec(
+    id=CheckId.STDERR_MERGE,
+    flag="--stderr-merge",
+    supported_modes=frozenset({CheckMode.OFF, CheckMode.REPORT}),
+    default_mode=CheckMode.REPORT,
+    refusals=dict.fromkeys(
+        (CheckMode.FIX, CheckMode.UPDATE),
+        "where stderr should go depends on what the step does with "
+        "it; the fix needs a person",
+    ),
+)
+"""Detection of shell that merges stderr into output used as data.
+
+Advisory by default: the rules are heuristics, so a finding only fails
+the run under ``--verify-stderr-merge``.
+"""
+
+
 SPECS: Final[Mapping[CheckId, CheckSpec]] = {
     ACTION_CALLS.id: ACTION_CALLS,
     ALLOW_LIST.id: ALLOW_LIST,
+    STDERR_MERGE.id: STDERR_MERGE,
 }
 """Every check, by identifier."""
 

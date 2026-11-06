@@ -58,6 +58,10 @@ NOT_EXPOSED: dict[str, str] = {
         "diagnostic detail for interactive use; suppressed pins are still "
         "counted in the JSON summary"
     ),
+    "floor": (
+        "the Action annotates high and medium findings, the default floor; "
+        "a different floor belongs in the configuration file"
+    ),
     "multi_repo": "the Action runs against a single checkout",
     "repo_depth": "only meaningful with --multi-repo",
     "auto_fix": "deprecated spelling; the Action emits --action-calls",

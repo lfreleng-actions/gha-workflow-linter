@@ -43,7 +43,7 @@ from rich.progress import (
 from rich.table import Table
 import typer
 
-from . import __version__, exit_codes
+from . import __version__, exit_codes, stderr_merge_report
 from .action_call_check import ActionCallValidator
 from .action_call_fix import AutoFixer
 from .allow_list_check import AllowListChecker, AllowListOutcome
@@ -56,7 +56,13 @@ from .allow_list_report import (
     render_text as render_allow_list,
 )
 from .cache import CachePrimeReport, ValidationCache
-from .check_modes import ACTION_CALLS, ALLOW_LIST, CheckId, CheckMode
+from .check_modes import (
+    ACTION_CALLS,
+    ALLOW_LIST,
+    STDERR_MERGE,
+    CheckId,
+    CheckMode,
+)
 from .config import ConfigManager
 from .console import console, err_console
 from .dependabot import find_dependabot_config, resolve_cooldown
@@ -78,12 +84,14 @@ from .models import (
     CLIOptions,
     Config,
     LogLevel,
+    StderrMergeConfidence,
     ValidationError,
     ValidationMethod,
     ValidationResult,
 )
 from .multi_repo import find_repositories, is_repository
 from .scanner import WorkflowScanner
+from .stderr_merge import named_files
 from .system_utils import get_default_workers
 from .utils import has_test_comment
 
@@ -91,6 +99,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 
     from .git_ignored import IgnoreScope
+    from .stderr_merge import StderrMergeResult
 
 
 def _get_relative_path(file_path: Path, base_path: Path) -> Path:
@@ -499,6 +508,10 @@ def _apply_cli_overrides(
         config.allow_list.org = options.allow_list_org
     if options.allow_list_cooldown is not None:
         config.allow_list.cooldown_days = options.allow_list_cooldown
+    if options.verify_stderr_merge:
+        config.stderr_merge.verify = True
+    if options.stderr_merge_min_confidence is not None:
+        config.stderr_merge.min_confidence = options.stderr_merge_min_confidence
 
     # Settle and validate the modes before anything repository-dependent.
     # An unsupported rung is a usage error, and a usage error must not
@@ -587,6 +600,15 @@ def _apply_check_modes(config: Config, options: CLIOptions) -> None:
         config.allow_list.update = allow_mode.advances_version
     else:
         config.allow_list.mode = _mode_from_allow_list_flags(config)
+
+    if options.stderr_merge_mode is not None:
+        merge_mode = STDERR_MERGE.validate(options.stderr_merge_mode)
+        config.stderr_merge.mode = merge_mode
+        config.stderr_merge.enabled = merge_mode.runs
+    else:
+        config.stderr_merge.mode = (
+            CheckMode.REPORT if config.stderr_merge.enabled else CheckMode.OFF
+        )
 
 
 def _mode_from_action_call_flags(config: Config) -> CheckMode:
@@ -963,6 +985,57 @@ def _configure_logging(
     return quiet
 
 
+# The stderr-merge options, declared here rather than inline so the
+# lint signature stays within the function-length gate.
+_STDERR_MERGE_OPTION = typer.Option(
+    None,
+    "--stderr-merge",
+    metavar="MODE",
+    help=(
+        "What the stderr-merge check does: off or report (default: "
+        "report). Advisory unless --verify-stderr-merge"
+    ),
+)
+_VERIFY_STDERR_MERGE_OPTION = typer.Option(
+    False,
+    "--verify-stderr-merge",
+    help=(
+        "Treat stderr-merge findings at or above "
+        "--stderr-merge-min-confidence as errors and exit with status 8"
+    ),
+)
+_STDERR_MERGE_MIN_CONFIDENCE_OPTION = typer.Option(
+    None,
+    "--stderr-merge-min-confidence",
+    help=(
+        "Lowest stderr-merge confidence --verify-stderr-merge "
+        "enforces: low, medium or high (default: medium)"
+    ),
+)
+
+
+def _stderr_merge_fields(
+    mode: CheckMode | None,
+    verify: bool,
+    floor: StderrMergeConfidence | None,
+) -> dict[str, Any]:
+    """Map the stderr-merge flags onto their CLIOptions fields.
+
+    Args:
+        mode: ``--stderr-merge``.
+        verify: ``--verify-stderr-merge``.
+        floor: ``--stderr-merge-min-confidence``.
+
+    Returns:
+        Keyword arguments for :class:`CLIOptions`.
+    """
+    return {
+        "stderr_merge_mode": mode,
+        "verify_stderr_merge": verify,
+        "stderr_merge_min_confidence": floor,
+    }
+
+
 @app.command()
 def lint(
     path: Path | None = typer.Argument(
@@ -1185,8 +1258,9 @@ def lint(
         False,
         "--show-suppressed",
         help=(
-            "Report allow-list pins silenced by an 'allow-list-pin-ok' "
-            "directive. Never affects the exit code"
+            "Report allow-list pins and stderr merges silenced by an "
+            "'allow-list-pin-ok' or 'stderr-merge-ok' directive. Never "
+            "affects the exit code"
         ),
     ),
     allow_list_org: str | None = typer.Option(
@@ -1209,6 +1283,9 @@ def lint(
         ),
         min=0,
     ),
+    stderr_merge: CheckMode | None = _STDERR_MERGE_OPTION,
+    verify_stderr_merge: bool = _VERIFY_STDERR_MERGE_OPTION,
+    floor: StderrMergeConfidence | None = _STDERR_MERGE_MIN_CONFIDENCE_OPTION,
     multi_repo: bool = typer.Option(
         False,
         "--multi-repo",
@@ -1360,6 +1437,7 @@ def lint(
             show_suppressed=show_suppressed,
             allow_list_org=allow_list_org,
             allow_list_cooldown=allow_list_cooldown,
+            **_stderr_merge_fields(stderr_merge, verify_stderr_merge, floor),
             multi_repo=multi_repo,
             repo_depth=repo_depth,
         )
@@ -2044,6 +2122,9 @@ def _read_inputs(config: Config, options: CLIOptions) -> set[Path]:
                     scanner.resolve_specific_files, repository, options.files
                 )
             )
+            # The stderr-merge check reads every file named, shell
+            # scripts included, which the workflow resolver passes over.
+            found |= _gathered(partial(named_files, repository, options.files))
         else:
             found |= _gathered(partial(scanner.find_workflow_files, repository))
             for pattern in widest.allow_list.extra_globs:
@@ -2821,6 +2902,7 @@ def _check_modes(
     *,
     action_calls_ran: bool,
     allow_list_ran: bool,
+    stderr_merge_ran: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Describe what each check was asked to do, and whether it did it.
 
@@ -2839,6 +2921,7 @@ def _check_modes(
         config: Resolved configuration, for the modes.
         action_calls_ran: Whether the action-call check executed.
         allow_list_ran: Whether the allow-list check executed.
+        stderr_merge_ran: Whether the stderr-merge check executed.
 
     Returns:
         Per check, the mode it was set to and whether it executed,
@@ -2854,6 +2937,10 @@ def _check_modes(
             "mode": config.allow_list.mode.value,
             "ran": allow_list_ran,
         },
+        CheckId.STDERR_MERGE.value: {
+            "mode": config.stderr_merge.mode.value,
+            "ran": stderr_merge_ran,
+        },
     }
 
 
@@ -2867,6 +2954,7 @@ def _emit_results(
     *,
     collect_json: bool = False,
     rate_limited: bool = False,
+    stderr_merge: StderrMergeResult | None = None,
 ) -> dict[str, Any] | None:
     """Generate and display the scan/validation results.
 
@@ -2882,6 +2970,7 @@ def _emit_results(
         rate_limited: Whether the checks were skipped because the API was
             rate-limited, recorded in the JSON document so a consumer can
             tell that from a clean run.
+        stderr_merge: Result of the stderr-merge check, when it ran.
 
     Returns:
         The JSON payload when ``collect_json`` is set, so a caller may
@@ -2929,7 +3018,9 @@ def _emit_results(
                 config,
                 action_calls_ran=action_calls_ran,
                 allow_list_ran=allow_list_ran,
+                stderr_merge_ran=stderr_merge is not None,
             ),
+            stderr_merge=stderr_merge,
         )
         if not collect_json:
             sink.publish(document)
@@ -2958,6 +3049,10 @@ def _emit_results(
             root=options.path,
             show_suppressed=config.allow_list.show_suppressed,
             update_hint=not config.allow_list.update,
+        )
+    if not options.quiet:
+        stderr_merge_report.render_text(
+            stderr_merge, show_suppressed=options.show_suppressed
         )
     return collected
 
@@ -3216,6 +3311,7 @@ def _determine_exit_code(
     allow_list: AllowListOutcome | None = None,
     *,
     rate_limited: bool = False,
+    stderr_merge: StderrMergeResult | None = None,
 ) -> int:
     """Compute the process exit code from fixes and validation errors.
 
@@ -3234,11 +3330,13 @@ def _determine_exit_code(
             verifying or updating run asked for never ran. An advisory
             run asked no question and still succeeds; a run that did ask
             gets no answer from "could not look".
+        stderr_merge: Result of the stderr-merge check, when it ran.
+            Advisory unless ``--verify-stderr-merge``.
 
     Returns:
         A code from :mod:`gha_workflow_linter.exit_codes`.
     """
-    codes: list[int] = []
+    codes: list[int] = [stderr_merge_report.exit_code(config, stderr_merge)]
 
     if rate_limited and _demanded_an_answer(options, config):
         # Appended rather than returned, so the precedence table in
@@ -3314,7 +3412,7 @@ def _determine_exit_code(
             # problem, so only what remains can fail the run.
             codes.append(exit_codes.ALLOW_LIST_STALE)
 
-    return exit_codes.combine(*codes) if codes else exit_codes.SUCCESS
+    return exit_codes.combine(*codes)
 
 
 def _has_outdated_actions(autofix: _AutoFixOutcome) -> bool:
@@ -3339,6 +3437,10 @@ class RunOutcome:
     Attributes:
         exit_code: The code this repository alone would have exited with.
         allow_list: Outcome of the allow-list stage, when it ran.
+        stderr_merge: Result of the stderr-merge check, when it ran.
+        stderr_merge_floor: The lowest confidence at which a
+            stderr-merge finding is outstanding, as configured by
+            ``--stderr-merge-min-confidence``.
         files_changed: How many files a fixer rewrote.
         defects: Validation errors left unrepaired, excluding test
             references and anything the auto-fixer rewrote.
@@ -3365,6 +3467,8 @@ class RunOutcome:
 
     exit_code: int
     allow_list: AllowListOutcome | None = None
+    stderr_merge: StderrMergeResult | None = None
+    stderr_merge_floor: str = "medium"
     files_changed: int = 0
     defects: int = 0
     outdated: int = 0
@@ -3431,6 +3535,7 @@ def _short_circuit_document(
     shared_cache: ValidationCache,
     outcome: _ScanShortCircuit,
     rate_limited: bool,
+    stderr_merge: StderrMergeResult | None = None,
 ) -> dict[str, Any]:
     """Build the JSON document for a run that ended before validating.
 
@@ -3449,6 +3554,8 @@ def _short_circuit_document(
         shared_cache: Cache the validator would have used.
         outcome: What the scan stage returned.
         rate_limited: Whether the API was rate-limited.
+        stderr_merge: Result of the stderr-merge check, which reads the
+            checkout itself and so runs whatever the workflow scan found.
 
     Returns:
         The document, ready to print or collect.
@@ -3467,7 +3574,9 @@ def _short_circuit_document(
                 # The scan failed, so neither check examined anything.
                 action_calls_ran=False,
                 allow_list_ran=False,
+                stderr_merge_ran=stderr_merge is not None,
             ),
+            stderr_merge=stderr_merge,
         )
 
     validator = ActionCallValidator(config, cache=shared_cache)
@@ -3487,7 +3596,57 @@ def _short_circuit_document(
             # a short circuit before its stage is reached, so it never
             # looked at the pins it would have checked.
             allow_list_ran=False,
+            stderr_merge_ran=stderr_merge is not None,
         ),
+        stderr_merge=stderr_merge,
+    )
+
+
+def _short_circuit_outcome(
+    config: Config,
+    options: CLIOptions,
+    scan_result: _ScanShortCircuit,
+    stderr_merge: StderrMergeResult | None,
+    payload: dict[str, Any] | None,
+    rate_limited: bool,
+) -> RunOutcome:
+    """Finish a run whose workflow scan ended it early.
+
+    The stderr-merge check has already run, being offline, so its
+    report and exit code still reach the caller.
+
+    Args:
+        config: Resolved configuration for this repository.
+        options: Resolved CLI options.
+        scan_result: Why the scan ended the run.
+        stderr_merge: Result of the stderr-merge check, when it ran.
+        payload: The JSON document, when one was built.
+        rate_limited: Whether pre-flight found the API rate-limited.
+
+    Returns:
+        What the run produced.
+    """
+    if not options.quiet and options.output_format != "json":
+        stderr_merge_report.render_text(
+            stderr_merge, show_suppressed=options.show_suppressed
+        )
+    return RunOutcome(
+        exit_code=exit_codes.combine(
+            scan_result.exit_code,
+            stderr_merge_report.exit_code(config, stderr_merge),
+        ),
+        stderr_merge=stderr_merge,
+        stderr_merge_floor=config.stderr_merge.min_confidence.value,
+        error=scan_result.error,
+        json_payload=payload,
+        # Recorded even though the ordering in _scan_and_validate
+        # means a throttled run reaches its outcome before the
+        # empty-scan short circuit, so this is not observable today.
+        # An outcome that misdescribes its own run is a trap for the
+        # next reader of RunOutcome.rate_limited, and it is what
+        # would make a regression in that ordering show up as
+        # "clean" rather than as a wrong status.
+        rate_limited=rate_limited,
     )
 
 
@@ -3519,6 +3678,10 @@ def _run_one_repository(
     """
     scanner = WorkflowScanner(config)
 
+    # Offline, so it runs before the workflow scan can short-circuit: a
+    # repository with shell scripts and no workflows still gets checked.
+    merges = stderr_merge_report.run_stage(config, options, scanner)
+
     scan_result = _scan_and_validate(
         config, options, scanner, shared_cache, rate_limited=rate_limited
     )
@@ -3531,22 +3694,12 @@ def _run_one_repository(
             # repository with nothing to check both emitted an empty
             # stream, which a consumer cannot tell from a crash.
             payload = _short_circuit_document(
-                scanner, config, shared_cache, scan_result, rate_limited
+                scanner, config, shared_cache, scan_result, rate_limited, merges
             )
             if not collect_json:
                 sink.publish(payload)
-        return RunOutcome(
-            exit_code=scan_result.exit_code,
-            error=scan_result.error,
-            json_payload=payload,
-            # Recorded even though the ordering in _scan_and_validate
-            # means a throttled run reaches its outcome before the
-            # empty-scan short circuit, so this is not observable today.
-            # An outcome that misdescribes its own run is a trap for the
-            # next reader of RunOutcome.rate_limited, and it is what
-            # would make a regression in that ordering show up as
-            # "clean" rather than as a wrong status.
-            rate_limited=rate_limited,
+        return _short_circuit_outcome(
+            config, options, scan_result, merges, payload, rate_limited
         )
     validation = scan_result
 
@@ -3586,6 +3739,7 @@ def _run_one_repository(
         allow_list,
         collect_json=collect_json,
         rate_limited=rate_limited,
+        stderr_merge=merges,
     )
 
     # Report outdated actions when auto-fix repaired validation errors but
@@ -3612,8 +3766,11 @@ def _run_one_repository(
             config,
             allow_list,
             rate_limited=rate_limited,
+            stderr_merge=merges,
         ),
         allow_list=allow_list,
+        stderr_merge=merges,
+        stderr_merge_floor=config.stderr_merge.min_confidence.value,
         files_changed=sum(
             1
             for changes in autofix.fixed_files.values()
@@ -4099,6 +4256,34 @@ def _display_multi_repo_summary(
         )
 
 
+def _unfinished_status(outcome: RunOutcome) -> str | None:
+    """Label a repository whose checks did not finish, if any did not.
+
+    Read from the recorded state rather than the exit code, because an
+    advisory run reports SUCCESS by design: the code cannot tell a
+    repository that was examined and found clean from one that was
+    never examined. Each case gets its own label for the reason
+    ``unresolved`` has one -- the check did not finish, so the empty
+    counts beside it say nothing, and ``clean`` or ``findings`` on a row
+    of zeros both tell the reader the opposite of what happened.
+
+    Args:
+        outcome: What the repository produced.
+
+    Returns:
+        A short, styled status, or None when every check finished.
+    """
+    if outcome.rate_limited:
+        return "[red]rate-limited[/red]"
+    if outcome.allow_list and outcome.allow_list.unresolved:
+        return "[red]unresolved[/red]"
+    # A stderr-merge scan that could not read a file, or failed outright,
+    # stays advisory in the exit code, but its findings are not complete.
+    if outcome.stderr_merge and outcome.stderr_merge.problems:
+        return "[red]incomplete[/red]"
+    return None
+
+
 def _sweep_status(outcome: RunOutcome) -> str:
     """Describe one repository's outcome for the summary table.
 
@@ -4132,26 +4317,21 @@ def _sweep_status(outcome: RunOutcome) -> str:
     if outcome.error:
         return "[red]failed[/red]"
 
-    # Read from the recorded state rather than the exit code, because an
-    # advisory run reports SUCCESS by design: the code cannot tell a
-    # repository that was examined and found clean from one that was
-    # never examined. Given its own label for the reason ``unresolved``
-    # has one -- the checks did not run, so the empty counts beside it
-    # say nothing, and ``clean`` or ``findings`` on a row of zeros both
-    # tell the reader the opposite of what happened.
-    if outcome.rate_limited:
-        return "[red]rate-limited[/red]"
+    unfinished = _unfinished_status(outcome)
+    if unfinished:
+        return unfinished
 
     allow_list = outcome.allow_list
-    if allow_list and allow_list.unresolved:
-        return "[red]unresolved[/red]"
-
     if (
         (allow_list and allow_list.outstanding)
         or outcome.defects
         or outcome.outdated
         or outcome.write_failures
         or outcome.autofix_error
+        or (
+            outcome.stderr_merge
+            and outcome.stderr_merge.enforced(outcome.stderr_merge_floor)
+        )
     ):
         return "[yellow]findings[/yellow]"
 
@@ -4667,6 +4847,7 @@ def build_json_results(
     rate_limited: bool = False,
     error: str | None = None,
     check_modes: Mapping[str, dict[str, Any]] | None = None,
+    stderr_merge: StderrMergeResult | None = None,
 ) -> dict[str, Any]:
     """
     Build the JSON results document for one repository.
@@ -4692,6 +4873,9 @@ def build_json_results(
             the text notice. Omitted only by a run that failed before
             settling its modes, which reports every check as unrun with
             no known mode rather than reporting nothing.
+        stderr_merge: Result of the stderr-merge check. The
+            ``stderr_merge`` key is always present, with
+            ``checked: false`` when the check did not run.
 
     Returns:
         The results as a JSON-serialisable mapping.
@@ -4736,6 +4920,7 @@ def build_json_results(
 
     if allow_list is not None:
         result.update(build_allow_list_json(allow_list, root=scan_path))
+    result.update(stderr_merge_report.build_json(stderr_merge))
 
     return result
 
@@ -4749,6 +4934,7 @@ def output_json_results(
     *,
     rate_limited: bool = False,
     check_modes: Mapping[str, dict[str, Any]] | None = None,
+    stderr_merge: StderrMergeResult | None = None,
 ) -> None:
     """
     Output results in JSON format.
@@ -4763,6 +4949,7 @@ def output_json_results(
         rate_limited: Whether the API was rate-limited, so the checks
             never ran
         check_modes: Each check's mode, by check name
+        stderr_merge: Result of the stderr-merge check, when it ran
     """
     result = build_json_results(
         scan_summary,
@@ -4772,6 +4959,7 @@ def output_json_results(
         allow_list,
         rate_limited=rate_limited,
         check_modes=check_modes,
+        stderr_merge=stderr_merge,
     )
 
     # Use plain print() to avoid Rich formatting/ANSI codes in JSON output
