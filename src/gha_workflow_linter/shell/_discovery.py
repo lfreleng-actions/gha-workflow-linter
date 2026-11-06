@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 ACTION_NAMES = ("action.yml", "action.yaml")
 # Shells whose scripts the scan reads, as a shebang names them.
@@ -233,16 +233,23 @@ def explicit_kind(path: str) -> str:
 
 
 def candidate_files(
-    root: str, problems: list[str] | None = None
+    root: str,
+    problems: list[str] | None = None,
+    skip: Callable[[str], bool] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Yield (path, kind) for every file the scan reads under root.
 
     A root that does not exist, and a directory that cannot be listed,
-    are added to ``problems`` when it is given.
+    are added to ``problems`` when it is given. ``skip``, when given,
+    is asked about each directory below the root, spelled with a
+    trailing separator, and each file (the root too, when it is one)
+    before its shebang is probed: a directory it skips is not entered,
+    so nothing beneath it is read.
     """
     missed = problems if problems is not None else []
     if os.path.isfile(root):
-        yield root, explicit_kind(root)
+        if not (skip and skip(root)):
+            yield root, explicit_kind(root)
         return
     if not os.path.isdir(root):
         missed.append(f"{root}: no such file or directory")
@@ -252,9 +259,16 @@ def candidate_files(
         missed.append(f"{error.filename}: {error.strerror}")
 
     for directory, subdirs, files in os.walk(root, onerror=unreadable):
-        subdirs[:] = sorted(d for d in subdirs if d not in PRUNE_DIRS)
+        subdirs[:] = sorted(
+            d
+            for d in subdirs
+            if d not in PRUNE_DIRS
+            and not (skip and skip(os.path.join(directory, d, "")))
+        )
         for name in sorted(files):
             path = os.path.join(directory, name)
+            if skip and skip(path):
+                continue
             # A symlink, a FIFO, a socket or a device is not scanned: a
             # read of a FIFO would wait for a writer.
             if os.path.islink(path) or not os.path.isfile(path):

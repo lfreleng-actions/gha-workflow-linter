@@ -48,6 +48,13 @@ class TestParseTrailingComment:
         assert parsed.version is None
         assert parsed.directives == frozenset({ALLOW})
 
+    def test_stderr_merge_directive_with_reason(self) -> None:
+        """The stderr-merge directive parses alongside its reason."""
+        parsed = parse_trailing_comment("# stderr-merge-ok -- by design")
+        assert parsed.version is None
+        assert parsed.directives == frozenset({Directive.STDERR_MERGE_OK})
+        assert parsed.reason == "by design"
+
     def test_none_comment(self) -> None:
         """``None`` parses to a wholly empty result."""
         parsed = parse_trailing_comment(None)
