@@ -102,6 +102,8 @@ NOT_SHELL = re.compile(r"^(?:python\d*(?:\.\d+t?)?|pwsh|powershell|cmd|node)$")
 MARKER = re.compile(
     re.escape(MARK_OPEN) + r"(\w+):(\d+)" + re.escape(MARK_CLOSE)
 )
+# A comment after a value: YAML needs blank space before its ``#``.
+TRAILING_COMMENT = re.compile(r"[ \t]+(#.*)$")
 # The line breaks PyYAML counts, so line numbers agree with its marks.
 LINE_BREAK = re.compile("\r\n|[\r\n\x85\u2028\u2029]")
 # Node visits allowed per file. Aliases let a small file name the same
@@ -125,12 +127,15 @@ class Block:
     ``starts`` maps the text back to the file: the offset in the value
     (as written, before its ``${{ }}`` expressions are marked) where
     each source line's text starts, with the line's 1-based number, in
-    order.
+    order. ``comment`` is the YAML comment after a plain or quoted
+    value, with its 1-based line: YAML drops it from the value, so the
+    shell never sees it.
     """
 
     text: str
     starts: list[tuple[int, int]]
     env: dict[str, Word] = field(default_factory=dict)
+    comment: tuple[int, str] | None = None
 
     def line_at(self, offset: int) -> int:
         """The 1-based source line of an offset in the value."""
@@ -408,7 +413,19 @@ class _Reader:
             mark_expressions(value, table),
             self.line_map(run, value),
             env,
+            self.trailing_comment(run),
         )
+
+    def trailing_comment(self, run: yaml.ScalarNode) -> tuple[int, str] | None:
+        """The comment after a plain or quoted value, on its last line."""
+        if run.style in ("|", ">"):
+            return None
+        line = int(run.end_mark.line)
+        if line >= len(self.lines):
+            return None
+        rest = self.lines[line][int(run.end_mark.column) :]
+        found = TRAILING_COMMENT.match(rest)
+        return None if found is None else (line + 1, found.group(1))
 
     def line_map(
         self, run: yaml.ScalarNode, value: str
