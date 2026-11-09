@@ -15,6 +15,8 @@ from dataclasses import dataclass, field, replace
 import os
 from typing import TYPE_CHECKING
 
+from gha_workflow_linter.shell._tree import node_text as _node_text
+
 from ._envfile import PythonpathChecks
 from ._invocation import (
     EXPR_OPEN,
@@ -25,7 +27,7 @@ from ._invocation import (
     env_of,
     is_outside_path,
 )
-from ._words import _node_text, literal_of
+from ._words import literal_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable

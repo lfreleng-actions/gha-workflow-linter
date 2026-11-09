@@ -8,6 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from gha_workflow_linter.shell._tree import node_text as _node_text
+from gha_workflow_linter.shell._tree import statement_redirects
+
 from ._invocation import WORD_TYPES
 
 if TYPE_CHECKING:
@@ -52,10 +55,6 @@ class Block:
     )  # literal YAML env; None = expression
 
 
-def _node_text(src: bytes, node: Node) -> str:
-    return src[node.start_byte : node.end_byte].decode("utf-8", "replace")
-
-
 def literal_of(src: bytes, node: Node) -> str | None:
     """The literal text of a word node, or None if it holds an expansion.
 
@@ -93,27 +92,6 @@ def word_of(src: bytes, node: Node) -> Word:
         and all(c.type in ("string", "raw_string") for c in node.children)
     )
     return Word(node, literal_of(src, node), quoted, _node_text(src, node))
-
-
-def statement_redirects(command: Node) -> list[Node]:
-    """The redirects tree-sitter hangs on the statement around ``command``.
-
-    They follow a command directly, or a pipeline whose last stage it
-    is (``true | cat <<EOF``): they belong to that stage.
-    """
-    parent = command.parent
-    if parent is not None and parent.type == "pipeline":
-        stages = [c for c in parent.children if c.is_named]
-        if stages[-1:] != [command]:
-            return []
-        command, parent = parent, parent.parent
-    if (
-        parent is None
-        or parent.type != "redirected_statement"
-        or parent.children[0] != command
-    ):
-        return []
-    return parent.children[1:]
 
 
 def command_words(src: bytes, command: Node) -> tuple[list[Node], list[Word]]:
