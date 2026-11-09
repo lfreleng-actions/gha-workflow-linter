@@ -876,3 +876,144 @@ class TestTheSummaryOnlyClaimsWhatRan:
             "All 3 action calls are valid"
             in run_action(document=document).summary
         )
+
+
+def _with_stderr_merges(*findings: dict[str, Any]) -> dict[str, Any]:
+    """Return a clean document whose stderr-merge check found these.
+
+    Args:
+        findings: Finding objects as the linter writes them.
+
+    Returns:
+        The document.
+    """
+    document: dict[str, Any] = json.loads(json.dumps(CLEAN))
+    active = [f for f in findings if not f.get("suppressed")]
+    document["stderr_merge"] = {
+        "checked": True,
+        "findings": list(findings),
+        "summary": {
+            "total": len(active),
+            "suppressed": len(findings) - len(active),
+            "by_confidence": {
+                level: sum(1 for f in active if f["confidence"] == level)
+                for level in ("high", "medium", "low")
+            },
+        },
+        "problems": [],
+    }
+    return document
+
+
+def _finding(
+    confidence: str, *, suppressed: bool = False, path: str = "ci.yaml"
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "line": 12,
+        "rule": {"high": "SEM001", "medium": "SEM003", "low": "SEM004"}[
+            confidence
+        ],
+        "confidence": confidence,
+        "detail": "merged output reaches jq",
+        "snippet": "out=$(curl x 2>&1)",
+        "suppressed": suppressed,
+    }
+
+
+class TestStderrMerge:
+    """Inputs reach the linter; findings reach the reader."""
+
+    def test_unset_passes_nothing(self, run_action: Any) -> None:
+        result = run_action()
+
+        assert "--stderr-merge" not in result.args
+        assert "--verify-stderr-merge" not in result.args
+
+    @pytest.mark.parametrize("mode", ["off", "report", "fix"])
+    def test_a_mode_passes_through(self, run_action: Any, mode: str) -> None:
+        """'fix' too: the CLI refuses it with the reason.
+
+        Args:
+            mode: The mode requested.
+        """
+        result = run_action({"stderr-merge": mode})
+
+        assert result.value_of("--stderr-merge") == mode
+
+    def test_a_value_that_is_no_mode_is_refused(self, run_action: Any) -> None:
+        result = run_action({"stderr-merge": "sometimes"})
+
+        assert result.returncode == 2
+        assert result.invocations == []
+        assert "'stderr-merge' must be off or report" in result.stdout
+
+    def test_verify(self, run_action: Any) -> None:
+        result = run_action({"verify-stderr-merge": "true"})
+
+        assert "--verify-stderr-merge" in result.args
+
+    def test_high_and_medium_findings_are_annotated(
+        self, run_action: Any
+    ) -> None:
+        document = _with_stderr_merges(
+            _finding("high"),
+            _finding("medium"),
+            _finding("low"),
+            _finding("high", suppressed=True),
+        )
+
+        annotations = [
+            line
+            for line in run_action(document=document).stdout.splitlines()
+            if "title=stderr merge" in line
+        ]
+
+        assert annotations == [
+            "::warning file=ci.yaml,line=12,title=stderr merge SEM001::"
+            "high: merged output reaches jq: out=$(curl x 2>&1)",
+            "::warning file=ci.yaml,line=12,title=stderr merge SEM003::"
+            "medium: merged output reaches jq: out=$(curl x 2>&1)",
+        ]
+
+    def test_verify_makes_them_errors(self, run_action: Any) -> None:
+        document = _with_stderr_merges(_finding("high"))
+
+        result = run_action({"verify-stderr-merge": "true"}, document)
+
+        assert "::error file=ci.yaml,line=12,title=stderr merge" in (
+            result.stdout
+        )
+
+    def test_a_hostile_path_cannot_issue_a_command(
+        self, run_action: Any
+    ) -> None:
+        """A file name can hold a comma, a colon or a newline."""
+        document = _with_stderr_merges(
+            _finding("high", path="a,b:c\n::error::injected")
+        )
+
+        lines = run_action(document=document).stdout.splitlines()
+
+        assert not any(line.startswith("::error::injected") for line in lines)
+        assert any(
+            "file=a%2Cb%3Ac%0A%3A%3Aerror%3A%3Ainjected,line=12" in line
+            for line in lines
+        )
+
+    def test_counts_reach_the_summary(self, run_action: Any) -> None:
+        document = _with_stderr_merges(
+            _finding("high"), _finding("low"), _finding("high", suppressed=True)
+        )
+
+        summary = run_action(document=document).summary
+
+        assert "Stderr merges: 1 high, 0 medium, 1 low, 1 suppressed" in (
+            summary
+        )
+        assert "All 7 action calls are valid" in summary
+
+    def test_a_check_that_did_not_run_has_no_counts(
+        self, run_action: Any
+    ) -> None:
+        assert "Stderr merges" not in run_action().summary

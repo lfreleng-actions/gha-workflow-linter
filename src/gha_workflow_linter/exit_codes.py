@@ -25,9 +25,12 @@ Code  Name                      Meaning
 5     ACTIONS_OUTDATED          ``--verify-actions`` and outdated calls remain.
 6     RATE_LIMITED              Rate-limited API, and the run asked it to
                                 verify or update something.
+7     *reserved*                For the planned ``python-path`` check.
+8     STDERR_MERGE_FOUND        ``--verify-stderr-merge`` and stderr-merge
+                                findings at or above the floor remain.
 ===== ========================= ================================================
 
-Precedence is ``6 > 4 > 3 > 5 > 1 > 0``. An infrastructure failure must
+Precedence is ``6 > 4 > 3 > 5 > 8 > 1 > 0``. An infrastructure failure must
 never be reported as a clean-or-stale result, and a condition the caller
 specifically asked about must not be masked by the generic ``1``.
 """
@@ -85,6 +88,14 @@ and it exists so a scheduled sweep can tell a clean estate from one it
 never managed to examine.
 """
 
+STDERR_MERGE_FOUND: Final = 8
+"""``--verify-stderr-merge`` was requested and unsuppressed findings at
+or above the confidence floor remain.
+
+``7`` is left for the planned ``python-path`` check, so neither check
+renumbers the other.
+"""
+
 
 # Ordered most to least significant. The first condition that holds
 # decides the exit code. RATE_LIMITED leads: every code below it
@@ -95,6 +106,7 @@ _PRECEDENCE: Final[tuple[int, ...]] = (
     ALLOW_LIST_UNRESOLVED,
     ALLOW_LIST_STALE,
     ACTIONS_OUTDATED,
+    STDERR_MERGE_FOUND,
     DEFECTS_FOUND,
     SUCCESS,
 )
@@ -144,6 +156,7 @@ _DESCRIPTIONS: Final[dict[int, str]] = {
     ALLOW_LIST_UNRESOLVED: "Allow-list latest release unresolved",
     ACTIONS_OUTDATED: "Outdated action calls",
     RATE_LIMITED: "Rate-limited; requested work did not run",
+    STDERR_MERGE_FOUND: "Stderr merged into output used as data",
 }
 
 
@@ -155,6 +168,7 @@ __all__ = [
     "DEFECTS_FOUND",
     "RATE_LIMITED",
     "RUNTIME_ERROR",
+    "STDERR_MERGE_FOUND",
     "SUCCESS",
     "combine",
     "describe",

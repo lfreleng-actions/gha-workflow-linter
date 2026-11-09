@@ -82,6 +82,8 @@ def _off(workspace: Path) -> list[str]:
         "off",
         "--allow-list",
         "off",
+        "--stderr-merge",
+        "off",
     ]
 
 
@@ -176,6 +178,25 @@ class TestAModeSettlesTheWholeBehaviour:
 
         assert config.allow_list.enabled is True
         assert config.allow_list.update is True
+
+    def test_stderr_merge_off_disables_the_check(self) -> None:
+        config = Config()
+        _apply_check_modes(config, CLIOptions(stderr_merge_mode=CheckMode.OFF))
+
+        assert config.stderr_merge.enabled is False
+        assert config.stderr_merge.mode is CheckMode.OFF
+
+    def test_stderr_merge_follows_the_configuration_file(self) -> None:
+        config = Config.model_validate({"stderr_merge": {"enabled": False}})
+        _apply_check_modes(config, CLIOptions())
+
+        assert config.stderr_merge.mode is CheckMode.OFF
+
+    def test_stderr_merge_fix_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError, match="needs a person"):
+            _apply_check_modes(
+                Config(), CLIOptions(stderr_merge_mode=CheckMode.FIX)
+            )
 
     def test_an_unsupported_rung_is_refused(self) -> None:
         """Refused outright rather than quietly downgraded to update."""
@@ -347,6 +368,7 @@ class TestOffMeansTheCheckDoesNotRun:
         assert document["checks"] == {
             "action-calls": {"mode": "off", "ran": False},
             "allow-list": {"mode": "off", "ran": False},
+            "stderr-merge": {"mode": "off", "ran": False},
         }
 
     def test_a_setup_failure_still_names_every_check(
@@ -380,6 +402,7 @@ class TestOffMeansTheCheckDoesNotRun:
         assert document["checks"] == {
             "action-calls": {"mode": None, "ran": False},
             "allow-list": {"mode": None, "ran": False},
+            "stderr-merge": {"mode": None, "ran": False},
         }
 
     def test_a_settled_failure_reports_the_modes_it_settled(

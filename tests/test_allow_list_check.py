@@ -753,6 +753,15 @@ class TestSuppressionMatrix:
         assert finding.kind is AllowListFindingKind.STALE
         assert finding.suppressed is True
 
+    def test_stderr_merge_directive_does_not_suppress(self) -> None:
+        """Only ``allow-list-pin-ok`` silences an allow-list finding."""
+        finding = classify_one(
+            make_pin(directives=frozenset({Directive.STDERR_MERGE_OK}))
+        )
+
+        assert finding is not None
+        assert finding.suppressed is False
+
     def test_unpinned_is_suppressible(self) -> None:
         """Tracking a branch can be a deliberate development choice."""
         finding = classify_one(

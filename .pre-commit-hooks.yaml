@@ -12,3 +12,27 @@
   args: [lint, .]
   always_run: false
   require_serial: true
+
+- id: gha-stderr-merge
+  name: Stderr merged into output used as data
+  description: >-
+    Report shell that merges stderr into stdout and then parses, compares
+    or exports the result. Offline: the action-call and allow-list checks,
+    which reach the GitHub API, are switched off.
+  entry: gha-workflow-linter
+  language: python
+  # Workflows and action metadata are YAML; scripts are found by suffix
+  # or shebang. The scan discovers files itself, so a match only decides
+  # whether the hook runs.
+  types_or: [yaml, shell]
+  pass_filenames: false
+  args:
+    - lint
+    - .
+    - --action-calls
+    - "off"
+    - --allow-list
+    - "off"
+    - --verify-stderr-merge
+  always_run: false
+  require_serial: true

@@ -10,6 +10,8 @@ import posixpath
 import re
 from typing import TYPE_CHECKING
 
+from gha_workflow_linter.shell._tree import node_text as _node_text
+
 from ._invocation import EXPR_CLOSE, EXPR_OPEN, expression_marker
 from ._pythonpath import (
     SELF,
@@ -20,14 +22,13 @@ from ._pythonpath import (
     Token,
     pythonpath_problems,
 )
-from ._words import Word, _node_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from tree_sitter import Node
 
-    from ._words import Block
+    from ._words import Block, Word
 
 
 # ${{ }} expressions as the reader swaps them.
