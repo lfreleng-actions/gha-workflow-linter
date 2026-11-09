@@ -28,6 +28,7 @@ from gha_workflow_linter.models import (
     GitHubAPIConfig,
     LogLevel,
     NetworkConfig,
+    StderrMergeConfig,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ NESTED_BLOCKS: list[tuple[str, type[BaseModel]]] = [
     ("github_api", GitHubAPIConfig),
     ("cache", CacheConfig),
     ("allow_list", AllowListConfig),
+    ("stderr_merge", StderrMergeConfig),
 ]
 
 

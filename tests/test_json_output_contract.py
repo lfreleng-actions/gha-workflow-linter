@@ -30,6 +30,7 @@ import pytest
 from typer.testing import CliRunner
 
 from gha_workflow_linter import exit_codes
+from gha_workflow_linter.check_modes import CheckMode
 from gha_workflow_linter.cli import app, run_linter
 from gha_workflow_linter.exceptions import ConfigurationError
 from gha_workflow_linter.models import (
@@ -421,3 +422,106 @@ class TestRefusedInvocation:
         assert result.exit_code == exit_codes.RUNTIME_ERROR
         document = json.loads(result.stdout)
         assert "verbose" in document["error"]
+
+
+class TestStderrMergeIsAlwaysPresent:
+    """Every document carries ``stderr_merge``, run or not.
+
+    ``checked`` separates a check that ran and found nothing from one
+    that was switched off or never reached, which otherwise read alike.
+    """
+
+    MERGE = 'out=$(curl -s x 2>&1)\njq . <<< "$out"\n'
+
+    def _with_script(self, root: Path) -> Path:
+        repository = _repository(root)
+        (repository / "fetch.sh").write_text(self.MERGE)
+        return repository
+
+    def test_a_short_circuit_still_runs_the_check(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No action calls to validate does not skip an offline check.
+
+        Args:
+            tmp_path: Repository root.
+            capsys: Captures standard output.
+        """
+        run_linter(_config(tmp_path), _options(self._with_script(tmp_path)))
+
+        section = _document(capsys)["stderr_merge"]
+        assert section["checked"] is True
+        assert [f["rule"] for f in section["findings"]] == ["SEM002"]
+        assert section["summary"]["by_confidence"]["high"] == 1
+
+    def test_a_full_run_carries_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        config = _config(tmp_path)
+        config.action_calls_mode = CheckMode.OFF
+
+        run_linter(config, _options(self._with_script(tmp_path)))
+
+        document = _document(capsys)
+        assert document["checks"]["stderr-merge"] == {
+            "mode": "report",
+            "ran": True,
+        }
+        assert document["stderr_merge"]["findings"][0]["path"] == "fetch.sh"
+
+    def test_a_scan_failure_carries_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        with mock.patch(
+            "gha_workflow_linter.cli.WorkflowScanner.scan_directory",
+            side_effect=PermissionError("Permission denied"),
+        ):
+            run_linter(_config(tmp_path), _options(self._with_script(tmp_path)))
+
+        assert _document(capsys)["stderr_merge"]["checked"] is True
+
+    def test_off_reports_checked_false(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        config = _config(tmp_path)
+        config.stderr_merge.mode = CheckMode.OFF
+
+        run_linter(config, _options(self._with_script(tmp_path)))
+
+        section = _document(capsys)["stderr_merge"]
+        assert section["checked"] is False
+        assert section["findings"] == []
+        assert section["summary"]["total"] == 0
+
+    def test_a_refused_invocation_carries_it(self, tmp_path: Path) -> None:
+        """Args:
+        tmp_path: Directory to point the run at.
+        """
+        result = CliRunner().invoke(
+            app,
+            [
+                "lint",
+                str(tmp_path),
+                "--stderr-merge",
+                "fix",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == exit_codes.RUNTIME_ERROR
+        document = json.loads(result.stdout)
+        assert "needs a person" in document["error"]
+        assert document["stderr_merge"]["checked"] is False

@@ -38,9 +38,15 @@ from gha_workflow_linter.models import (
     Config,
     ReferenceType,
     Severity,
+    StderrMergeConfidence,
+    StderrMergeConfig,
     ValidationError,
     ValidationResult,
     result_category,
+)
+from gha_workflow_linter.stderr_merge import (
+    StderrMergeFinding,
+    StderrMergeResult,
 )
 
 if TYPE_CHECKING:
@@ -58,6 +64,7 @@ class TestExitCodeConstants:
         assert exit_codes.ALLOW_LIST_UNRESOLVED == 4
         assert exit_codes.ACTIONS_OUTDATED == 5
         assert exit_codes.RATE_LIMITED == 6
+        assert exit_codes.STDERR_MERGE_FOUND == 8
 
     def test_codes_are_unique(self) -> None:
         codes = [
@@ -68,6 +75,7 @@ class TestExitCodeConstants:
             exit_codes.ALLOW_LIST_UNRESOLVED,
             exit_codes.ACTIONS_OUTDATED,
             exit_codes.RATE_LIMITED,
+            exit_codes.STDERR_MERGE_FOUND,
         ]
         assert len(codes) == len(set(codes))
 
@@ -78,7 +86,7 @@ class TestExitCodeConstants:
 
 
 class TestCombine:
-    """Precedence: 6 > 4 > 3 > 5 > 1 > 0."""
+    """Precedence: 6 > 4 > 3 > 5 > 8 > 1 > 0."""
 
     def test_empty_is_success(self) -> None:
         assert exit_codes.combine() == exit_codes.SUCCESS
@@ -127,6 +135,18 @@ class TestCombine:
                 exit_codes.ALLOW_LIST_STALE,
             ),
             (
+                (exit_codes.STDERR_MERGE_FOUND, exit_codes.DEFECTS_FOUND),
+                exit_codes.STDERR_MERGE_FOUND,
+            ),
+            (
+                (exit_codes.ACTIONS_OUTDATED, exit_codes.STDERR_MERGE_FOUND),
+                exit_codes.ACTIONS_OUTDATED,
+            ),
+            (
+                (exit_codes.RATE_LIMITED, exit_codes.STDERR_MERGE_FOUND),
+                exit_codes.RATE_LIMITED,
+            ),
+            (
                 (exit_codes.SUCCESS, exit_codes.DEFECTS_FOUND),
                 exit_codes.DEFECTS_FOUND,
             ),
@@ -145,7 +165,7 @@ class TestCombine:
 
 class TestDescribe:
     def test_known_codes_have_descriptions(self) -> None:
-        for code in (0, 1, 2, 3, 4, 5, 6):
+        for code in (0, 1, 2, 3, 4, 5, 6, 8):
             assert "Unknown" not in exit_codes.describe(code)
 
     def test_unknown_code(self) -> None:
@@ -849,3 +869,72 @@ class TestAllowListRemediationExitCodes:
         """The inverse of the earlier no-dead-knobs guard."""
         assert "update" in AllowListConfig.model_fields
         assert "update_allow_list" in CLIOptions.model_fields
+
+
+class TestStderrMerge:
+    """--verify-stderr-merge alone lets the check fail the run."""
+
+    @staticmethod
+    def _result(rule: str, *, suppressed: bool = False) -> StderrMergeResult:
+        finding = StderrMergeFinding(
+            "s.sh", 1, rule, "detail", "snippet", suppressed=suppressed
+        )
+        return StderrMergeResult([finding], files_scanned=1)
+
+    @staticmethod
+    def _code(result: StderrMergeResult, **settings: Any) -> int:
+        config = Config(stderr_merge=StderrMergeConfig(**settings))
+        return _determine_exit_code(
+            _options(), _validation(), _autofix(), config, stderr_merge=result
+        )
+
+    def test_advisory_by_default(self) -> None:
+        assert self._code(self._result("SEM001")) == exit_codes.SUCCESS
+
+    def test_verify_fails_on_a_medium_finding(self) -> None:
+        code = self._code(self._result("SEM003"), verify=True)
+        assert code == exit_codes.STDERR_MERGE_FOUND
+
+    def test_verify_ignores_low_findings_by_default(self) -> None:
+        code = self._code(self._result("SEM004"), verify=True)
+        assert code == exit_codes.SUCCESS
+
+    def test_the_floor_can_be_lowered(self) -> None:
+        code = self._code(
+            self._result("SEM004"),
+            verify=True,
+            min_confidence=StderrMergeConfidence.LOW,
+        )
+        assert code == exit_codes.STDERR_MERGE_FOUND
+
+    def test_suppressed_findings_never_fail(self) -> None:
+        code = self._code(self._result("SEM001", suppressed=True), verify=True)
+        assert code == exit_codes.SUCCESS
+
+    def test_an_unread_file_fails_a_verifying_run(self) -> None:
+        """A check asked to enforce that could not look must not pass."""
+        result = StderrMergeResult([], 1, ("bad.yml: not valid YAML",))
+        assert self._code(result) == exit_codes.SUCCESS
+        assert self._code(result, verify=True) == exit_codes.RUNTIME_ERROR
+
+    def test_outdated_actions_outrank_it(self) -> None:
+        config = Config(stderr_merge=StderrMergeConfig(verify=True))
+        code = _determine_exit_code(
+            _options(verify_actions=True),
+            _validation(),
+            _autofix(stale=TestOutdatedActions.STALE),
+            config,
+            stderr_merge=self._result("SEM001"),
+        )
+        assert code == exit_codes.ACTIONS_OUTDATED
+
+    def test_it_outranks_defects(self) -> None:
+        config = Config(stderr_merge=StderrMergeConfig(verify=True))
+        code = _determine_exit_code(
+            _options(),
+            _validation([_validation_error()]),
+            _autofix(),
+            config,
+            stderr_merge=self._result("SEM001"),
+        )
+        assert code == exit_codes.STDERR_MERGE_FOUND
