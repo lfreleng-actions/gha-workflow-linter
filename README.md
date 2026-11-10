@@ -761,7 +761,13 @@ These need the merge, so the check caps them at `low` (`SEM004`):
 `java -version` and `javac -version`, python's own `-V` and
 `--version` (not ones after the script, `-c` or `-m`),
 `ldd --version`, `ssh -V`, `mkcert -version`, `openssl s_client`,
-`nc -z` and `nc -v`, and `docker logs` or `podman logs`. The cap is
+`nc -z` and `nc -v`, and `docker logs` or `podman logs`. The cap
+applies through a container or remote launcher too: `docker exec`,
+`docker run`, `podman exec` and `podman run`, `kubectl exec` with its
+command after `--`, and `ssh` with one simple remote command (limit 3
+sets out the grammar), so the cap
+covers `docker exec box openssl s_client` while
+`docker exec box curl x` keeps its rating. The cap is
 the command's own: a capture that also holds a merge from another
 command, as in `v=$(python3 -V 2>&1; gh api x 2>&1)`, reports the
 other command's finding.
@@ -788,12 +794,26 @@ are deliberate:
    unlisted command goes unreported. A merged capture passed as an
    argument to one reports `SEM003` at `medium`.
 3. **Wrappers.** The check looks through `timeout`, `sudo`, `env`,
-   `nice`, `stdbuf` and `command`. It does not look inside container
-   or remote launchers (`docker exec`, `docker run`, `podman exec`,
-   `kubectl exec`, `ssh`): a command in the list above that runs
-   through one, such as `openssl s_client` under `docker exec`, takes
-   the rating of its use rather than the `low` cap. Suppress it with a
-   reason.
+   `nice`, `stdbuf` and `command`. It looks through container and
+   remote launchers (`docker exec`, `docker run`, `podman exec`,
+   `kubectl exec`, `ssh`) to apply the `low` cap above, and for no
+   other purpose, reading each launcher's common options. The
+   look-through follows a fixed grammar, and a launcher outside it
+   keeps its own rating:
+   - `ssh` counts when its remote program is one simple command alone:
+     a list, pipeline, subshell, substitution or redirect, as in
+     `ssh host 'openssl s_client; curl x'`, keeps the launcher's
+     rating.
+   - `docker` or `podman` with `--entrypoint CMD` or
+     `--entrypoint=CMD` keeps the launcher's rating, since the
+     entrypoint, not the words after the image, runs.
+   - `docker` or `podman` with `-d` (also in a cluster such as `-dit`)
+     or `--detach` keeps the launcher's rating, since the capture
+     holds the container ID.
+
+   No other launcher option changes the result. A command the
+   launcher runs through a shell, as in `docker exec box sh -c '…'`,
+   takes the rating of its use. Suppress it with a reason.
 4. **Anchored extraction** (`SEM004`) rests on the pattern: a `grep`,
    `awk` or `sed` pattern anchored at the start of the line. The check
    does not examine options such as `grep -v`, `-A`, `-B` or `-C`, nor
