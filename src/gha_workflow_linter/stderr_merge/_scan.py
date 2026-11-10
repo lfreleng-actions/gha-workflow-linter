@@ -270,7 +270,8 @@ def _discovered(
     Both filters prune the walk: an excluded or ignored directory is
     not entered, so an unreadable one beneath it is no problem. An
     exclude pattern matching a directory's path with a trailing
-    separator matches every file beneath it.
+    separator matches every file beneath it. A nested repository (a
+    directory below the root holding a ``.git`` entry) is not entered.
     """
 
     def skip(name: str) -> bool:
@@ -280,7 +281,9 @@ def _discovered(
 
     return [
         (Path(name), kind)
-        for name, kind in candidate_files(str(root), problems, skip)
+        for name, kind in candidate_files(
+            str(root), problems, skip, stop_at_repositories=True
+        )
     ]
 
 

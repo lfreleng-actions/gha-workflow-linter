@@ -996,9 +996,10 @@ The stderr-merge and python-path checks read more: the `run:` steps of
 workflows and composite actions, and shell scripts (`*.sh`, `*.bash`,
 and files with no extension whose shebang names a shell). They honour
 `--exclude` and `.gitignore`, never entering an excluded or ignored
-directory, and skip virtual environments, caches and `node_modules`. A
-file named with `--files`, by a relative or absolute path or glob, gets
-scanned whatever its name.
+directory, skip virtual environments, caches and `node_modules`, and
+stop at the same nested repository boundaries. A file named with
+`--files`, by a relative or absolute path or glob, gets scanned
+whatever its name and wherever it lies.
 
 ### Multi-Repository Mode
 

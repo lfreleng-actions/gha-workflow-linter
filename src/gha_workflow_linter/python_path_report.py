@@ -545,7 +545,8 @@ def _discovered(
     """Files discovery finds under the root, less excluded and ignored ones.
 
     The same filter the stderr-merge check applies: both prune the
-    walk, so nothing beneath an excluded or ignored directory is read.
+    walk, so nothing beneath an excluded or ignored directory, or a
+    nested repository, is read.
     """
 
     def skip(name: str) -> bool:
@@ -555,7 +556,9 @@ def _discovered(
 
     return [
         (Path(name), kind)
-        for name, kind in candidate_files(str(root), problems, skip)
+        for name, kind in candidate_files(
+            str(root), problems, skip, stop_at_repositories=True
+        )
     ]
 
 

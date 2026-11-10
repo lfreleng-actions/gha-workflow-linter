@@ -1220,6 +1220,33 @@ def test_scan_repository_prunes_excluded_directories(tmp_path: Path) -> None:
     assert len(unexcluded.problems) == 1
 
 
+def test_scan_repository_stops_at_nested_repositories(tmp_path: Path) -> None:
+    """A worktree or clone below the root is another checkout."""
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, "a.sh", "gh api x 2>&1 | jq .\n")
+    _write(tmp_path, ".worktrees/topic/.git", "gitdir: ../../.git/wt\n")
+    _write(tmp_path, ".worktrees/topic/a.sh", "gh api x 2>&1 | jq .\n")
+    (tmp_path / "vendor" / "lib" / ".git").mkdir(parents=True)
+    _write(tmp_path, "vendor/lib/b.sh", "gh api x 2>&1 | jq .\n")
+
+    result = scan_repository(tmp_path)
+
+    assert [f.path for f in result.findings] == ["a.sh"]
+    assert result.problems == ()
+
+
+def test_named_files_in_a_nested_repository_are_scanned(
+    tmp_path: Path,
+) -> None:
+    """``--files`` bypasses discovery, so the boundary does not apply."""
+    (tmp_path / "vendor" / "lib" / ".git").mkdir(parents=True)
+    _write(tmp_path, "vendor/lib/b.sh", "gh api x 2>&1 | jq .\n")
+
+    result = scan_repository(tmp_path, files=["vendor/lib/b.sh"])
+
+    assert [f.path for f in result.findings] == ["vendor/lib/b.sh"]
+
+
 def test_scan_repository_reports_unreadable_yaml(tmp_path: Path) -> None:
     """A workflow that is not YAML is a problem, not a crash."""
     _write(tmp_path, ".github/workflows/bad.yml", "jobs: [\n")

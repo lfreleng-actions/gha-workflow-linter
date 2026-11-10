@@ -232,10 +232,21 @@ def explicit_kind(path: str) -> str:
     return "workflow" if is_workflow else "action"
 
 
+def is_repository_root(path: str) -> bool:
+    """Whether a directory holds a ``.git`` entry, file or directory.
+
+    A clone has a ``.git`` directory; a worktree or submodule has a
+    ``.git`` file pointing at its git directory.
+    """
+    return os.path.exists(os.path.join(path, ".git"))
+
+
 def candidate_files(
     root: str,
     problems: list[str] | None = None,
     skip: Callable[[str], bool] | None = None,
+    *,
+    stop_at_repositories: bool = False,
 ) -> Iterator[tuple[str, str]]:
     """Yield (path, kind) for every file the scan reads under root.
 
@@ -245,6 +256,12 @@ def candidate_files(
     trailing separator, and each file (the root too, when it is one)
     before its shebang is probed: a directory it skips is not entered,
     so nothing beneath it is read.
+
+    With ``stop_at_repositories``, a directory below the root that is
+    the root of a git repository (a clone, worktree or submodule) is
+    not entered either, as ``WorkflowScanner`` walks: what lies beneath
+    belongs to another repository, or another checkout of this one.
+    The root itself is never a boundary.
     """
     missed = problems if problems is not None else []
     if os.path.isfile(root):
@@ -264,6 +281,10 @@ def candidate_files(
             for d in subdirs
             if d not in PRUNE_DIRS
             and not (skip and skip(os.path.join(directory, d, "")))
+            and not (
+                stop_at_repositories
+                and is_repository_root(os.path.join(directory, d))
+            )
         )
         for name in sorted(files):
             path = os.path.join(directory, name)
