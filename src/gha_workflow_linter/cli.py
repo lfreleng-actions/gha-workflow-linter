@@ -4389,6 +4389,36 @@ def _display_multi_repo_summary(
         )
 
 
+def _incomplete_status(outcome: RunOutcome) -> str | None:
+    """Label a repository whose checks did not finish, else None.
+
+    Read from the recorded state rather than the exit code, because an
+    advisory run reports SUCCESS by design: the code cannot tell a
+    repository that was examined and found clean from one that was
+    never examined. A rate-limited run did not run the checks; an
+    unresolved host left the allow-list check incomplete; and a
+    stderr-merge or python-path scan that recorded problems could not
+    read a file, or failed outright. In each case the empty counts
+    beside the label say nothing, and ``clean`` or ``findings`` on a
+    row of zeros would tell the reader the opposite of what happened.
+
+    Args:
+        outcome: What the repository produced.
+
+    Returns:
+        A short, styled status, or None when every check finished.
+    """
+    if outcome.rate_limited:
+        return "[red]rate-limited[/red]"
+    if outcome.allow_list and outcome.allow_list.unresolved:
+        return "[red]unresolved[/red]"
+    if (outcome.stderr_merge and outcome.stderr_merge.problems) or (
+        outcome.python_path and outcome.python_path.problems
+    ):
+        return "[red]scan failed[/red]"
+    return None
+
+
 def _sweep_status(outcome: RunOutcome) -> str:
     """Describe one repository's outcome for the summary table.
 
@@ -4411,7 +4441,9 @@ def _sweep_status(outcome: RunOutcome) -> str:
     gives the reader no way to tell the two apart. A rate-limited
     repository gets one for the same reason, and is read from the
     recorded state rather than the exit code, since an advisory run
-    reports success however little it managed to check.
+    reports success however little it managed to check. A stderr-merge
+    or python-path scan that recorded problems is labelled
+    ``scan failed`` for the same reason, with or without ``--verify-*``.
 
     Args:
         outcome: What the repository produced.
@@ -4422,20 +4454,11 @@ def _sweep_status(outcome: RunOutcome) -> str:
     if outcome.error:
         return "[red]failed[/red]"
 
-    # Read from the recorded state rather than the exit code, because an
-    # advisory run reports SUCCESS by design: the code cannot tell a
-    # repository that was examined and found clean from one that was
-    # never examined. Given its own label for the reason ``unresolved``
-    # has one -- the checks did not run, so the empty counts beside it
-    # say nothing, and ``clean`` or ``findings`` on a row of zeros both
-    # tell the reader the opposite of what happened.
-    if outcome.rate_limited:
-        return "[red]rate-limited[/red]"
+    incomplete = _incomplete_status(outcome)
+    if incomplete:
+        return incomplete
 
     allow_list = outcome.allow_list
-    if allow_list and allow_list.unresolved:
-        return "[red]unresolved[/red]"
-
     if (
         (allow_list and allow_list.outstanding)
         or outcome.defects

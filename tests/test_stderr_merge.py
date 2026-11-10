@@ -365,6 +365,109 @@ MORE = [
         id="ssh-version-through-timeout",
     ),
     pytest.param(
+        "v=$(docker exec -i box openssl s_client -connect h:443 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM004"],
+        id="openssl-through-docker-exec",
+    ),
+    pytest.param(
+        'v=$(docker exec box curl -s x 2>&1)\njq . <<< "$v"\n',
+        ["SEM002"],
+        id="ordinary-command-through-docker-exec",
+    ),
+    pytest.param(
+        "v=$(docker run --rm -e A=1 -v /a:/b img openssl s_client 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM004"],
+        id="openssl-through-docker-run",
+    ),
+    pytest.param(
+        'v=$(podman exec box openssl s_client 2>&1)\njq . <<< "$v"\n',
+        ["SEM004"],
+        id="openssl-through-podman-exec",
+    ),
+    pytest.param(
+        "v=$(kubectl -n ns exec pod -c c -- openssl s_client 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM004"],
+        id="openssl-through-kubectl-exec",
+    ),
+    pytest.param(
+        "v=$(ssh -i key -p 22 host 'openssl s_client' 2>&1)\njq . <<< \"$v\"\n",
+        ["SEM004"],
+        id="openssl-through-ssh",
+    ),
+    pytest.param(
+        "v=$(ssh host 'curl x' 2>&1)\njq . <<< \"$v\"\n",
+        ["SEM002"],
+        id="ordinary-command-through-ssh",
+    ),
+    pytest.param(
+        "v=$(ssh host 'openssl s_client -connect h:443; curl -s x' 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM002"],
+        id="compound-program-through-ssh",
+    ),
+    pytest.param(
+        "v=$(ssh host 'openssl s_client | curl -s x' 2>&1)\njq . <<< \"$v\"\n",
+        ["SEM002"],
+        id="pipeline-through-ssh",
+    ),
+    pytest.param(
+        "v=$(ssh host 'openssl s_client -connect \"a;b\"' 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM004"],
+        id="quoted-operator-through-ssh",
+    ),
+    pytest.param(
+        "v=$(docker run --entrypoint curl img openssl s_client 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM002"],
+        id="entrypoint-through-docker-run",
+    ),
+    pytest.param(
+        "v=$(podman run --entrypoint=curl img openssl s_client 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM002"],
+        id="entrypoint-equals-through-podman-run",
+    ),
+    pytest.param(
+        "id=$(docker run -d img openssl s_client 2>&1)\n"
+        'echo "id=$id" >> "$GITHUB_OUTPUT"\n',
+        ["SEM002"],
+        id="detached-docker-run",
+    ),
+    pytest.param(
+        "id=$(docker run --detach img openssl s_client 2>&1)\n"
+        'echo "id=$id" >> "$GITHUB_OUTPUT"\n',
+        ["SEM002"],
+        id="detached-long-docker-run",
+    ),
+    pytest.param(
+        "id=$(docker run -dit --rm img openssl s_client 2>&1)\n"
+        'echo "id=$id" >> "$GITHUB_OUTPUT"\n',
+        ["SEM002"],
+        id="detached-cluster-docker-run",
+    ),
+    pytest.param(
+        "id=$(docker exec -d box openssl s_client 2>&1)\n"
+        'echo "id=$id" >> "$GITHUB_OUTPUT"\n',
+        ["SEM002"],
+        id="detached-docker-exec",
+    ),
+    pytest.param(
+        "v=$(docker exec -it --detach-keys ctrl-x box openssl s_client 2>&1)\n"
+        'jq . <<< "$v"\n',
+        ["SEM004"],
+        id="detach-keys-is-not-detach",
+    ),
+    pytest.param(
+        "v=$(sudo docker container exec -u root box timeout 5 "
+        'openssl s_client 2>&1)\njq . <<< "$v"\n',
+        ["SEM004"],
+        id="wrappers-around-and-inside-a-launcher",
+    ),
+    pytest.param(
         'v=$(nc -zv host 22 2>&1)\n[ -n "$v" ]\n',
         ["SEM004"],
         id="nc-by-design",
@@ -1115,6 +1218,54 @@ def test_scan_repository_prunes_excluded_directories(tmp_path: Path) -> None:
         locked.chmod(0o700)
     assert result.problems == ()
     assert len(unexcluded.problems) == 1
+
+
+def test_scan_repository_stops_at_nested_repositories(tmp_path: Path) -> None:
+    """A worktree or clone below the root is another checkout."""
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, "a.sh", "gh api x 2>&1 | jq .\n")
+    _write(tmp_path, ".worktrees/topic/.git", "gitdir: ../../.git/wt\n")
+    _write(tmp_path, ".worktrees/topic/a.sh", "gh api x 2>&1 | jq .\n")
+    (tmp_path / "vendor" / "lib" / ".git").mkdir(parents=True)
+    _write(tmp_path, "vendor/lib/b.sh", "gh api x 2>&1 | jq .\n")
+
+    result = scan_repository(tmp_path)
+
+    assert [f.path for f in result.findings] == ["a.sh"]
+    assert result.problems == ()
+
+
+def test_named_files_in_a_nested_repository_are_scanned(
+    tmp_path: Path,
+) -> None:
+    """``--files`` bypasses discovery, so the boundary does not apply."""
+    (tmp_path / "vendor" / "lib" / ".git").mkdir(parents=True)
+    _write(tmp_path, "vendor/lib/b.sh", "gh api x 2>&1 | jq .\n")
+
+    result = scan_repository(tmp_path, files=["vendor/lib/b.sh"])
+
+    assert [f.path for f in result.findings] == ["vendor/lib/b.sh"]
+
+
+def test_scan_repository_reads_an_invalid_timestamp(tmp_path: Path) -> None:
+    """A value safe_load cannot build leaves the tags, not the shell."""
+    _write(
+        tmp_path,
+        ".github/workflows/w.yml",
+        "on: push\n"
+        "env: {VERSION: 2026-13-01}\n"
+        "jobs:\n"
+        "  a:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: gh api x 2>&1 | jq .\n",
+    )
+
+    result = scan_repository(tmp_path)
+
+    assert [f.rule for f in result.findings] == ["SEM001"]
+    assert result.findings[0].tags == ()
+    assert result.problems == ()
 
 
 def test_scan_repository_reports_unreadable_yaml(tmp_path: Path) -> None:

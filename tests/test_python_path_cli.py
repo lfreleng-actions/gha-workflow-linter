@@ -186,6 +186,33 @@ def test_a_sweep_row_with_findings_is_not_clean() -> None:
     assert "clean" in _sweep_status(RunOutcome(exit_code=0))
 
 
+def test_a_sweep_row_with_scan_problems_is_a_failed_scan() -> None:
+    """An incomplete scan is not clean, enforced or not."""
+    outcome = RunOutcome(
+        exit_code=exit_codes.SUCCESS,
+        python_path=PythonPathResult([], problems=("a.sh: Permission denied",)),
+    )
+
+    assert _sweep_status(outcome) == "[red]scan failed[/red]"
+
+
+def test_discovery_stops_at_nested_repositories(tmp_path: Path) -> None:
+    """A worktree or clone below the root is another checkout."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "a.sh").write_text("python3 -m json.tool f\n")
+    worktree = tmp_path / ".worktrees" / "topic"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: ../../.git/wt\n")
+    (worktree / "a.sh").write_text("python3 -m json.tool f\n")
+    clone = tmp_path / "vendor" / "lib"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "b.sh").write_text("python3 -m json.tool f\n")
+
+    result = scan_repository(tmp_path)
+
+    assert [f.path for f in result.findings] == ["a.sh"]
+
+
 def test_a_directive_on_the_line_above_suppresses(tmp_path: Path) -> None:
     (tmp_path / ".git").mkdir()
     (tmp_path / "a.sh").write_text(

@@ -37,6 +37,7 @@ from ._words import (
     file_redirects,
     first_command,
     github_file,
+    launched,
     merges,
     output_redirects,
     pipeline_stages,
@@ -330,11 +331,17 @@ class BlockAnalysis:
     def _hit(
         self, anchor: Node, merged: Node | None, verdict: Verdict | None
     ) -> Hit | None:
-        """A hit, capped at SEM004 when the command writes data to stderr."""
+        """A hit, capped at SEM004 when the command writes data to stderr.
+
+        The cap reads through a container or remote launcher to the
+        command it runs, as it does through a wrapper.
+        """
         if verdict is None:
             return None
         if merged is not None and verdict.rule != "SEM004":
             name, args = command_parts(self.src, merged)
+            if not by_design(name, args):
+                name, args = launched(name, args)
             if by_design(name, args):
                 verdict = replace(
                     verdict,

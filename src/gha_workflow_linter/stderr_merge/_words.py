@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING
 
 from gha_workflow_linter.shell._tree import node_text
@@ -50,6 +51,87 @@ WRAPPER_OPERANDS = {
     "nice": frozenset({"-n", "--adjustment"}),
     "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
 }
+# Options of a container or remote launcher that take an operand, by
+# the subcommand (or, for ssh, the command) that reads them. Words
+# before the subcommand are docker's and podman's global options.
+LAUNCHER_OPERANDS = {
+    "global": frozenset(
+        {"-c", "-H", "-l", "--config", "--context", "--host", "--log-level"}
+    ),
+    "exec": frozenset(
+        {
+            "-e",
+            "-u",
+            "-w",
+            "--detach-keys",
+            "--env",
+            "--env-file",
+            "--preserve-fds",
+            "--user",
+            "--workdir",
+        }
+    ),
+    "run": frozenset(
+        {
+            "-a",
+            "-c",
+            "-e",
+            "-h",
+            "-l",
+            "-m",
+            "-p",
+            "-u",
+            "-v",
+            "-w",
+            "--add-host",
+            "--attach",
+            "--cap-add",
+            "--cap-drop",
+            "--cgroupns",
+            "--cidfile",
+            "--cpu-shares",
+            "--cpus",
+            "--device",
+            "--dns",
+            "--entrypoint",
+            "--env",
+            "--env-file",
+            "--expose",
+            "--gpus",
+            "--group-add",
+            "--hostname",
+            "--ipc",
+            "--label",
+            "--label-file",
+            "--log-driver",
+            "--log-opt",
+            "--memory",
+            "--mount",
+            "--name",
+            "--network",
+            "--pid",
+            "--platform",
+            "--publish",
+            "--pull",
+            "--restart",
+            "--security-opt",
+            "--shm-size",
+            "--stop-signal",
+            "--tmpfs",
+            "--ulimit",
+            "--user",
+            "--userns",
+            "--volume",
+            "--volumes-from",
+            "--workdir",
+        }
+    ),
+}
+# ssh's short options that take an operand.
+SSH_OPERANDS = frozenset("BbcDEeFIiJLlmOopQRSWw")
+# Characters shlex reads as shell operators; a word of them alone
+# makes ssh's remote program more than one simple command.
+SHELL_OPERATORS = frozenset("();<>|&")
 # Control flow whose bodies, and conditions, all write to the stdout of
 # the statement: a redirect on it reaches every command in it.
 CONTROL = frozenset(
@@ -141,6 +223,122 @@ def unwrap(name: str, args: list[str]) -> tuple[str, list[str]]:
             break
         name = rest[0].strip("${}\"'").rsplit("/", 1)[-1].lower()
         args = rest[1:]
+    return name, args
+
+
+def _skip_options(args: list[str], takes: frozenset[str]) -> list[str]:
+    """The words after leading options, each with any operand it takes."""
+    rest = list(args)
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        option = rest.pop(0)
+        if option == "--":
+            break
+        if option in takes and rest:
+            rest.pop(0)
+    return rest
+
+
+def _ssh_command(args: list[str]) -> list[str]:
+    """The remote command ``ssh`` runs, split as the remote shell would.
+
+    Short options cluster; the first letter taking an operand uses the
+    rest of the word, or else the next word.
+    """
+    rest = list(args)
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        option = rest.pop(0)
+        if option == "--":
+            break
+        letters = option[1:]
+        takes = next(
+            (n for n, c in enumerate(letters) if c in SSH_OPERANDS), -1
+        )
+        if takes == len(letters) - 1 and rest:
+            rest.pop(0)
+    return _simple_command(" ".join(rest[1:]))
+
+
+def _simple_command(program: str) -> list[str]:
+    """The words of ``program`` when it is one simple command, else none.
+
+    A list, pipeline, subshell, substitution or redirect, or quoting
+    that does not parse, yields no words.
+    """
+    if "`" in program or "\n" in program:
+        return []
+    lexer = shlex.shlex(program, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return []
+    if any(word and set(word) <= SHELL_OPERATORS for word in words):
+        return []
+    return words
+
+
+def _container_command(args: list[str], takes: frozenset[str]) -> list[str]:
+    """The command after a container launcher's options and image.
+
+    Empty when the launcher detaches (``-d``, also in a cluster such as
+    ``-dit``, or ``--detach``) or sets ``--entrypoint``: the capture
+    then holds the launcher's output, or another program's.
+    """
+    short = frozenset(option[1] for option in takes if len(option) == 2)
+    rest = list(args)
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        option = rest.pop(0)
+        if option == "--":
+            break
+        if option.split("=", 1)[0] in ("--detach", "--entrypoint"):
+            return []
+        if not option.startswith("--"):
+            for letter in option[1:]:
+                if letter == "d":
+                    return []
+                if letter in short:
+                    break
+        if option in takes and rest:
+            rest.pop(0)
+    return rest[1:]
+
+
+def _launched_words(name: str, args: list[str]) -> list[str]:
+    """The command a container or remote launcher runs; empty if none.
+
+    Reads ``docker`` and ``podman`` ``exec`` and ``run`` (also as
+    ``container exec`` and ``container run``), ``kubectl exec`` with
+    its command after ``--``, and ``ssh`` whose remote program is one
+    simple command. A detached container, or one given an entrypoint,
+    runs none.
+    """
+    if name in ("docker", "podman"):
+        rest = _skip_options(args, LAUNCHER_OPERANDS["global"])
+        if rest[:1] == ["container"]:
+            rest = rest[1:]
+        if not rest or rest[0] not in ("exec", "run"):
+            return []
+        return _container_command(rest[1:], LAUNCHER_OPERANDS[rest[0]])
+    if name == "kubectl" and "exec" in args and "--" in args:
+        end = args.index("--")
+        return args[end + 1 :] if args.index("exec") < end else []
+    if name == "ssh":
+        return _ssh_command(args)
+    return []
+
+
+def launched(name: str, args: list[str]) -> tuple[str, list[str]]:
+    """See through ``docker exec``, ``ssh`` and the like, then wrappers.
+
+    The command and arguments are returned unchanged when ``name`` is
+    not a launcher, or runs no command of its own.
+    """
+    for _ in range(4):
+        words = _launched_words(name, args)
+        if not words:
+            break
+        inner = words[0].strip("${}\"'").rsplit("/", 1)[-1].lower()
+        name, args = unwrap(inner, words[1:])
     return name, args
 
 
