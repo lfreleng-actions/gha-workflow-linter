@@ -32,6 +32,7 @@ The grammar implemented here is::
     <body>       ::= <directives> [ <reason> ]
     <directives> ::= <directive> ( <ws>+ <directive> )*
     <directive>  ::= "allow-list-pin-ok" | "stderr-merge-ok"
+                   | "python-path-ok"
     <reason>     ::= <ws>+ "--" <ws>+ <free text>
 
 Tokens that are neither the version nor a recognised directive are kept
@@ -62,6 +63,7 @@ class Directive(str, Enum):
 
     ALLOW_LIST_PIN_OK = "allow-list-pin-ok"
     STDERR_MERGE_OK = "stderr-merge-ok"
+    PYTHON_PATH_OK = "python-path-ok"
 
 
 class SuppressionSource(str, Enum):

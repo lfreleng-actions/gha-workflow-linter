@@ -55,6 +55,23 @@ class TestParseTrailingComment:
         assert parsed.directives == frozenset({Directive.STDERR_MERGE_OK})
         assert parsed.reason == "by design"
 
+    def test_python_path_directive_with_reason(self) -> None:
+        """The python-path directive parses alongside its reason."""
+        parsed = parse_trailing_comment("# python-path-ok -- trusted tree")
+        assert parsed.version is None
+        assert parsed.directives == frozenset({Directive.PYTHON_PATH_OK})
+        assert parsed.reason == "trusted tree"
+
+    def test_python_path_preceding_directive(self) -> None:
+        """The preceding-line form carries the python-path directive."""
+        found = find_suppression(
+            comment=None,
+            preceding_line="  # gha-workflow-linter: python-path-ok -- why",
+        )
+        assert found is not None
+        assert found.directives == frozenset({Directive.PYTHON_PATH_OK})
+        assert found.reason == "why"
+
     def test_none_comment(self) -> None:
         """``None`` parses to a wholly empty result."""
         parsed = parse_trailing_comment(None)
