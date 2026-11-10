@@ -28,6 +28,7 @@ from gha_workflow_linter.models import (
     GitHubAPIConfig,
     LogLevel,
     NetworkConfig,
+    PythonPathConfig,
     StderrMergeConfig,
 )
 
@@ -41,6 +42,7 @@ NESTED_BLOCKS: list[tuple[str, type[BaseModel]]] = [
     ("cache", CacheConfig),
     ("allow_list", AllowListConfig),
     ("stderr_merge", StderrMergeConfig),
+    ("python_path", PythonPathConfig),
 ]
 
 

@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ACTION_CALLS",
     "ALLOW_LIST",
+    "PYTHON_PATH",
     "SPECS",
     "STDERR_MERGE",
     "CheckId",
@@ -101,6 +102,7 @@ class CheckId(str, Enum):
     ACTION_CALLS = "action-calls"
     ALLOW_LIST = "allow-list"
     STDERR_MERGE = "stderr-merge"
+    PYTHON_PATH = "python-path"
 
 
 class CheckMode(str, Enum):
@@ -297,10 +299,29 @@ the run under ``--verify-stderr-merge``.
 """
 
 
+PYTHON_PATH: Final = CheckSpec(
+    id=CheckId.PYTHON_PATH,
+    flag="--python-path",
+    supported_modes=frozenset({CheckMode.OFF, CheckMode.REPORT}),
+    default_mode=CheckMode.REPORT,
+    refusals=dict.fromkeys(
+        (CheckMode.FIX, CheckMode.UPDATE),
+        "which interpreter a step should run, and how, depends on what "
+        "the step does; the fix needs a person",
+    ),
+)
+"""Detection of Python and uv runs that take in workspace files.
+
+Advisory by default: a finding only fails the run under
+``--verify-python-path``, and PPA009 and PPA010 never do.
+"""
+
+
 SPECS: Final[Mapping[CheckId, CheckSpec]] = {
     ACTION_CALLS.id: ACTION_CALLS,
     ALLOW_LIST.id: ALLOW_LIST,
     STDERR_MERGE.id: STDERR_MERGE,
+    PYTHON_PATH.id: PYTHON_PATH,
 }
 """Every check, by identifier."""
 

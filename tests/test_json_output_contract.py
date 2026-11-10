@@ -525,3 +525,146 @@ class TestStderrMergeIsAlwaysPresent:
         document = json.loads(result.stdout)
         assert "needs a person" in document["error"]
         assert document["stderr_merge"]["checked"] is False
+
+
+class TestPythonPathIsAlwaysPresent:
+    """Every document carries ``python_path``, run or not.
+
+    Its shape mirrors ``stderr_merge``: ``checked``, ``summary`` with
+    counts by rule and by kind and the ``enforced`` count, ``findings``
+    and ``problems``. ``verify`` adds the setting the run enforced.
+    """
+
+    SCRIPT = "python3 -m json.tool f\n"
+
+    def _with_script(self, root: Path) -> Path:
+        repository = _repository(root)
+        (repository / "fmt.sh").write_text(self.SCRIPT)
+        return repository
+
+    def test_a_short_circuit_still_runs_the_check(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """No action calls to validate does not skip an offline check.
+
+        Args:
+            tmp_path: Repository root.
+            capsys: Captures standard output.
+        """
+        run_linter(_config(tmp_path), _options(self._with_script(tmp_path)))
+
+        section = _document(capsys)["python_path"]
+        assert section["checked"] is True
+        assert section["verify"] is False
+        assert section["problems"] == []
+        assert section["findings"] == [
+            {
+                "repo": tmp_path.name,
+                "path": "fmt.sh",
+                "line": 1,
+                "kind": "script",
+                "rule": "PPA001",
+                "detail": (
+                    "python -m without -I: the working directory leads sys.path"
+                ),
+                "snippet": "python3 -m json.tool f",
+                "suppressed": False,
+            }
+        ]
+        summary = section["summary"]
+        assert summary["total"] == 1
+        assert summary["enforced"] == 1
+        assert summary["suppressed"] == 0
+        assert summary["by_rule"]["PPA001"] == 1
+        assert set(summary["by_rule"]) == {f"PPA{n:03d}" for n in range(1, 11)}
+        assert summary["by_kind"] == {"action": 0, "workflow": 0, "script": 1}
+
+    def test_a_full_run_carries_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        config = _config(tmp_path)
+        config.action_calls_mode = CheckMode.OFF
+
+        run_linter(config, _options(self._with_script(tmp_path)))
+
+        document = _document(capsys)
+        assert document["checks"]["python-path"] == {
+            "mode": "report",
+            "ran": True,
+        }
+        assert document["python_path"]["findings"][0]["path"] == "fmt.sh"
+
+    def test_a_scan_failure_carries_it(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        with mock.patch(
+            "gha_workflow_linter.cli.WorkflowScanner.scan_directory",
+            side_effect=PermissionError("Permission denied"),
+        ):
+            run_linter(_config(tmp_path), _options(self._with_script(tmp_path)))
+
+        assert _document(capsys)["python_path"]["checked"] is True
+
+    def test_off_reports_checked_false(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        config = _config(tmp_path)
+        config.python_path.mode = CheckMode.OFF
+
+        run_linter(config, _options(self._with_script(tmp_path)))
+
+        section = _document(capsys)["python_path"]
+        assert section["checked"] is False
+        assert section["verify"] is False
+        assert section["findings"] == []
+        assert section["problems"] == []
+        assert section["summary"]["total"] == 0
+        assert section["summary"]["enforced"] == 0
+
+    def test_an_unreadable_file_is_a_problem(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Args:
+        tmp_path: Repository root.
+        capsys: Captures standard output.
+        """
+        repository = _repository(tmp_path)
+        (repository / "action.yaml").write_text("runs: [unclosed\n")
+
+        run_linter(_config(tmp_path), _options(repository))
+
+        problems = _document(capsys)["python_path"]["problems"]
+        assert [p.split(":")[0] for p in problems] == ["action.yaml"]
+
+    def test_a_refused_invocation_carries_it(self, tmp_path: Path) -> None:
+        """Args:
+        tmp_path: Directory to point the run at.
+        """
+        result = CliRunner().invoke(
+            app,
+            [
+                "lint",
+                str(tmp_path),
+                "--python-path",
+                "fix",
+                "--format",
+                "json",
+            ],
+        )
+
+        assert result.exit_code == exit_codes.RUNTIME_ERROR
+        document = json.loads(result.stdout)
+        assert "needs a person" in document["error"]
+        assert document["python_path"]["checked"] is False

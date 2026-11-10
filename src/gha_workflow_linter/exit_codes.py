@@ -25,13 +25,14 @@ Code  Name                      Meaning
 5     ACTIONS_OUTDATED          ``--verify-actions`` and outdated calls remain.
 6     RATE_LIMITED              Rate-limited API, and the run asked it to
                                 verify or update something.
-7     *reserved*                For the planned ``python-path`` check.
+7     PYTHON_PATH_FOUND         ``--verify-python-path`` and a python-path
+                                finding of PPA001 to PPA008 remains.
 8     STDERR_MERGE_FOUND        ``--verify-stderr-merge`` and stderr-merge
                                 findings at or above the floor remain.
 ===== ========================= ================================================
 
-Precedence is ``6 > 4 > 3 > 5 > 8 > 1 > 0``. An infrastructure failure must
-never be reported as a clean-or-stale result, and a condition the caller
+Precedence is ``6 > 4 > 3 > 5 > 7 > 8 > 1 > 0``. An infrastructure failure
+must never be reported as a clean-or-stale result, and a condition the caller
 specifically asked about must not be masked by the generic ``1``.
 """
 
@@ -88,12 +89,17 @@ and it exists so a scheduled sweep can tell a clean estate from one it
 never managed to examine.
 """
 
+PYTHON_PATH_FOUND: Final = 7
+"""``--verify-python-path`` was requested and an unsuppressed finding of
+a rule from PPA001 to PPA008 remains.
+
+PPA009 and PPA010 never set it: they say the scan could not prove a
+command safe, not that it is unsafe.
+"""
+
 STDERR_MERGE_FOUND: Final = 8
 """``--verify-stderr-merge`` was requested and unsuppressed findings at
 or above the confidence floor remain.
-
-``7`` is left for the planned ``python-path`` check, so neither check
-renumbers the other.
 """
 
 
@@ -106,6 +112,7 @@ _PRECEDENCE: Final[tuple[int, ...]] = (
     ALLOW_LIST_UNRESOLVED,
     ALLOW_LIST_STALE,
     ACTIONS_OUTDATED,
+    PYTHON_PATH_FOUND,
     STDERR_MERGE_FOUND,
     DEFECTS_FOUND,
     SUCCESS,
@@ -156,6 +163,7 @@ _DESCRIPTIONS: Final[dict[int, str]] = {
     ALLOW_LIST_UNRESOLVED: "Allow-list latest release unresolved",
     ACTIONS_OUTDATED: "Outdated action calls",
     RATE_LIMITED: "Rate-limited; requested work did not run",
+    PYTHON_PATH_FOUND: "Python run takes in workspace files",
     STDERR_MERGE_FOUND: "Stderr merged into output used as data",
 }
 
@@ -166,6 +174,7 @@ __all__ = [
     "ALLOW_LIST_UNRESOLVED",
     "CLI_USAGE_ERROR",
     "DEFECTS_FOUND",
+    "PYTHON_PATH_FOUND",
     "RATE_LIMITED",
     "RUNTIME_ERROR",
     "STDERR_MERGE_FOUND",

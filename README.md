@@ -1585,6 +1585,8 @@ file given with `config-file` still decides it.
 | `allow-list-org`      | Org for the allow-list `@` shorthand                          | No       |         |
 | `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
 | `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
+| `python-path`         | Python-path check mode: `off` or `report`                     | No       |         |
+| `verify-python-path`  | Fail when a python-path finding PPA001 to PPA008 remains      | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1645,6 +1647,8 @@ Options:
   --stderr-merge-min-confidence LEVEL
                              Lowest confidence --verify-stderr-merge fails
                              on: low, medium or high (default: medium)
+  --python-path MODE         off|report (default: report)
+  --verify-python-path       Fail when a Python run takes in workspace files
   --show-suppressed          List findings silenced by a directive
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions
