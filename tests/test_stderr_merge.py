@@ -1247,6 +1247,27 @@ def test_named_files_in_a_nested_repository_are_scanned(
     assert [f.path for f in result.findings] == ["vendor/lib/b.sh"]
 
 
+def test_scan_repository_reads_an_invalid_timestamp(tmp_path: Path) -> None:
+    """A value safe_load cannot build leaves the tags, not the shell."""
+    _write(
+        tmp_path,
+        ".github/workflows/w.yml",
+        "on: push\n"
+        "env: {VERSION: 2026-13-01}\n"
+        "jobs:\n"
+        "  a:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: gh api x 2>&1 | jq .\n",
+    )
+
+    result = scan_repository(tmp_path)
+
+    assert [f.rule for f in result.findings] == ["SEM001"]
+    assert result.findings[0].tags == ()
+    assert result.problems == ()
+
+
 def test_scan_repository_reports_unreadable_yaml(tmp_path: Path) -> None:
     """A workflow that is not YAML is a problem, not a crash."""
     _write(tmp_path, ".github/workflows/bad.yml", "jobs: [\n")

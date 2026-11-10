@@ -189,7 +189,10 @@ def file_tags(text: str, kind: str) -> tuple[str, ...]:
         return ()
     try:
         document = yaml.safe_load(text)
-    except (yaml.YAMLError, RecursionError):
+    except (yaml.YAMLError, RecursionError, ValueError):
+        # ValueError: a scalar safe_load cannot build, such as the
+        # timestamp 2026-13-01. The shell is still read from the
+        # composed nodes, so only the tags are lost.
         return ()
     if not isinstance(document, dict):
         return ()
