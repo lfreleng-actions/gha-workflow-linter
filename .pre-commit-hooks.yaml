@@ -36,3 +36,28 @@
     - --verify-stderr-merge
   always_run: false
   require_serial: true
+
+- id: gha-python-path
+  name: Python runs that take in workspace files
+  description: >-
+    Report Python and uv runs in workflows, actions and shell scripts
+    that take in files from the workspace: the working directory on
+    sys.path, PYTHONPATH naming the checkout, or uv reading the
+    workspace's .python-version or .venv. Offline: the action-call and
+    allow-list checks, which reach the GitHub API, are switched off.
+  entry: gha-workflow-linter
+  language: python
+  # As for gha-stderr-merge: the scan discovers files itself, so a match
+  # only decides whether the hook runs.
+  types_or: [yaml, shell]
+  pass_filenames: false
+  args:
+    - lint
+    - .
+    - --action-calls
+    - "off"
+    - --allow-list
+    - "off"
+    - --verify-python-path
+  always_run: false
+  require_serial: true
