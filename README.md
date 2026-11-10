@@ -1046,12 +1046,15 @@ table listing every repository, its pin counts and its status.
 | `findings`     | Something needs attention                            |
 | `unresolved`   | A host did not resolve, leaving the check incomplete |
 | `rate-limited` | GitHub throttled the API, so the checks did not run  |
+| `scan failed`  | A shell check could not read a file, or failed       |
 | `failed`       | The sweep could not scan the repository              |
 
-`unresolved` and `rate-limited` get their own labels because an
-incomplete check says nothing about the repository: its counts are empty
-for want of an answer, not for want of a problem. `rate-limited` appears
-whatever the exit code, since an advisory sweep still exits `0`.
+`unresolved`, `rate-limited` and `scan failed` get their own labels
+because an incomplete check says nothing about the repository: its counts
+are empty for want of an answer, not for want of a problem. `rate-limited`
+and `scan failed` appear whatever the exit code, since an advisory sweep
+still exits `0`. `scan failed` covers the stderr-merge and python-path
+checks, with or without `--verify-stderr-merge` or `--verify-python-path`.
 
 What remains outranks what the run achieved, so a partial remediation —
 some pins rewritten, others still stale — reports `findings` rather than

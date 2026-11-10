@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 from unittest import mock
 
+import pytest
 from typer.testing import CliRunner
 
 from gha_workflow_linter import exit_codes
@@ -187,3 +189,36 @@ def test_a_sweep_row_with_findings_is_not_clean() -> None:
 
     assert "findings" in _sweep_status(outcome)
     assert "clean" in _sweep_status(RunOutcome(exit_code=0))
+
+
+def test_a_sweep_row_with_scan_problems_is_a_failed_scan() -> None:
+    """An incomplete scan is not clean, enforced or not."""
+    outcome = RunOutcome(
+        exit_code=exit_codes.SUCCESS,
+        stderr_merge=StderrMergeResult([], 0, ("a.sh: Permission denied",)),
+    )
+
+    assert _sweep_status(outcome) == "[red]scan failed[/red]"
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a file the user cannot read",
+)
+def test_a_sweep_with_an_unreadable_script_is_not_clean(
+    tmp_path: Path,
+) -> None:
+    """The advisory sweep exits 0, but its table must not say clean."""
+    repository = tmp_path / "alpha"
+    (repository / ".git").mkdir(parents=True)
+    locked = repository / "locked.sh"
+    locked.write_text("echo hi\n")
+    locked.chmod(0)
+    try:
+        code, output = _lint(tmp_path, "--multi-repo", "--python-path", "off")
+    finally:
+        locked.chmod(0o600)
+
+    assert code == exit_codes.SUCCESS
+    assert "scan failed" in output
+    assert "clean" not in output
