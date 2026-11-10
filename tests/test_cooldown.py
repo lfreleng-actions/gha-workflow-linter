@@ -23,6 +23,7 @@ from gha_workflow_linter.version_utils import (
     _parse_iso_datetime,
     _select_version_with_cooldown,
 )
+from tests.conftest import strip_ansi
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -541,8 +542,12 @@ class TestAllowListCooldownIsSeparate:
             ["lint", str(tmp_path), "--allow-list-cooldown", "-1"],
         )
 
+        # Typer 0.29 rewrote the range message ("x>=0" became "greater
+        # than or equal to 0"), so assert on the refused option instead.
         assert result.exit_code == 2
-        assert "x>=0" in result.output
+        assert "Invalid value for '--allow-list-cooldown'" in strip_ansi(
+            result.output
+        )
 
 
 class TestPersistentCacheUnderReleasePolicy:
