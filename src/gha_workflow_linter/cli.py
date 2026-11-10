@@ -43,7 +43,12 @@ from rich.progress import (
 from rich.table import Table
 import typer
 
-from . import __version__, exit_codes, stderr_merge_report
+from . import (
+    __version__,
+    exit_codes,
+    python_path_report,
+    stderr_merge_report,
+)
 from .action_call_check import ActionCallValidator
 from .action_call_fix import AutoFixer
 from .allow_list_check import AllowListChecker, AllowListOutcome
@@ -59,6 +64,7 @@ from .cache import CachePrimeReport, ValidationCache
 from .check_modes import (
     ACTION_CALLS,
     ALLOW_LIST,
+    PYTHON_PATH,
     STDERR_MERGE,
     CheckId,
     CheckMode,
@@ -99,6 +105,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 
     from .git_ignored import IgnoreScope
+    from .python_path_report import PythonPathResult
     from .stderr_merge import StderrMergeResult
 
 
@@ -512,6 +519,8 @@ def _apply_cli_overrides(
         config.stderr_merge.verify = True
     if options.stderr_merge_min_confidence is not None:
         config.stderr_merge.min_confidence = options.stderr_merge_min_confidence
+    if options.verify_python_path:
+        config.python_path.verify = True
 
     # Settle and validate the modes before anything repository-dependent.
     # An unsupported rung is a usage error, and a usage error must not
@@ -608,6 +617,15 @@ def _apply_check_modes(config: Config, options: CLIOptions) -> None:
     else:
         config.stderr_merge.mode = (
             CheckMode.REPORT if config.stderr_merge.enabled else CheckMode.OFF
+        )
+
+    if options.python_path_mode is not None:
+        path_mode = PYTHON_PATH.validate(options.python_path_mode)
+        config.python_path.mode = path_mode
+        config.python_path.enabled = path_mode.runs
+    else:
+        config.python_path.mode = (
+            CheckMode.REPORT if config.python_path.enabled else CheckMode.OFF
         )
 
 
@@ -1036,6 +1054,39 @@ def _stderr_merge_fields(
     }
 
 
+# The python-path options, declared here for the same reason.
+_PYTHON_PATH_OPTION = typer.Option(
+    None,
+    "--python-path",
+    metavar="MODE",
+    help=(
+        "What the python-path check does: off or report (default: "
+        "report). Advisory unless --verify-python-path"
+    ),
+)
+_VERIFY_PYTHON_PATH_OPTION = typer.Option(
+    False,
+    "--verify-python-path",
+    help=(
+        "Treat python-path findings of PPA001 to PPA008 as errors and exit "
+        "with status 7. PPA009 and PPA010 never fail the run"
+    ),
+)
+
+
+def _python_path_fields(mode: CheckMode | None, verify: bool) -> dict[str, Any]:
+    """Map the python-path flags onto their CLIOptions fields.
+
+    Args:
+        mode: ``--python-path``.
+        verify: ``--verify-python-path``.
+
+    Returns:
+        Keyword arguments for :class:`CLIOptions`.
+    """
+    return {"python_path_mode": mode, "verify_python_path": verify}
+
+
 @app.command()
 def lint(
     path: Path | None = typer.Argument(
@@ -1258,8 +1309,9 @@ def lint(
         False,
         "--show-suppressed",
         help=(
-            "Report allow-list pins and stderr merges silenced by an "
-            "'allow-list-pin-ok' or 'stderr-merge-ok' directive. Never "
+            "Report allow-list pins, stderr merges and python-path "
+            "findings silenced by an 'allow-list-pin-ok', "
+            "'stderr-merge-ok' or 'python-path-ok' directive. Never "
             "affects the exit code"
         ),
     ),
@@ -1286,6 +1338,8 @@ def lint(
     stderr_merge: CheckMode | None = _STDERR_MERGE_OPTION,
     verify_stderr_merge: bool = _VERIFY_STDERR_MERGE_OPTION,
     floor: StderrMergeConfidence | None = _STDERR_MERGE_MIN_CONFIDENCE_OPTION,
+    python_path: CheckMode | None = _PYTHON_PATH_OPTION,
+    verify_python_path: bool = _VERIFY_PYTHON_PATH_OPTION,
     multi_repo: bool = typer.Option(
         False,
         "--multi-repo",
@@ -1403,7 +1457,7 @@ def lint(
         # vetting, so the refusal reaches the --json-output file.
         _reject_files_with_multi_repo(files, multi_repo=multi_repo)
 
-        cli_options = CLIOptions(
+        options = CLIOptions(
             path=path,
             config_file=config_file,
             verbose=verbose,
@@ -1438,16 +1492,15 @@ def lint(
             allow_list_org=allow_list_org,
             allow_list_cooldown=allow_list_cooldown,
             **_stderr_merge_fields(stderr_merge, verify_stderr_merge, floor),
+            **_python_path_fields(python_path, verify_python_path),
             multi_repo=multi_repo,
             repo_depth=repo_depth,
         )
 
-        settled_checks = _apply_cli_overrides(config, cli_options, workers)
-        _resolve_cooldown(config, cli_options)
+        settled_checks = _apply_cli_overrides(config, options, workers)
+        _resolve_cooldown(config, options)
 
-        exit_code = _preflight_and_run(
-            config, cli_options, github_token, workers
-        )
+        exit_code = _preflight_and_run(config, options, github_token, workers)
 
     except typer.Exit:
         # Re-raise typer.Exit to avoid catching it as a general exception
@@ -2903,6 +2956,7 @@ def _check_modes(
     action_calls_ran: bool,
     allow_list_ran: bool,
     stderr_merge_ran: bool = False,
+    python_path_ran: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Describe what each check was asked to do, and whether it did it.
 
@@ -2922,6 +2976,7 @@ def _check_modes(
         action_calls_ran: Whether the action-call check executed.
         allow_list_ran: Whether the allow-list check executed.
         stderr_merge_ran: Whether the stderr-merge check executed.
+        python_path_ran: Whether the python-path check executed.
 
     Returns:
         Per check, the mode it was set to and whether it executed,
@@ -2941,6 +2996,10 @@ def _check_modes(
             "mode": config.stderr_merge.mode.value,
             "ran": stderr_merge_ran,
         },
+        CheckId.PYTHON_PATH.value: {
+            "mode": config.python_path.mode.value,
+            "ran": python_path_ran,
+        },
     }
 
 
@@ -2955,6 +3014,7 @@ def _emit_results(
     collect_json: bool = False,
     rate_limited: bool = False,
     stderr_merge: StderrMergeResult | None = None,
+    python_path: PythonPathResult | None = None,
 ) -> dict[str, Any] | None:
     """Generate and display the scan/validation results.
 
@@ -2971,6 +3031,7 @@ def _emit_results(
             rate-limited, recorded in the JSON document so a consumer can
             tell that from a clean run.
         stderr_merge: Result of the stderr-merge check, when it ran.
+        python_path: Result of the python-path check, when it ran.
 
     Returns:
         The JSON payload when ``collect_json`` is set, so a caller may
@@ -3019,8 +3080,10 @@ def _emit_results(
                 action_calls_ran=action_calls_ran,
                 allow_list_ran=allow_list_ran,
                 stderr_merge_ran=stderr_merge is not None,
+                python_path_ran=python_path is not None,
             ),
             stderr_merge=stderr_merge,
+            python_path=python_path,
         )
         if not collect_json:
             sink.publish(document)
@@ -3053,6 +3116,9 @@ def _emit_results(
     if not options.quiet:
         stderr_merge_report.render_text(
             stderr_merge, show_suppressed=options.show_suppressed
+        )
+        python_path_report.render_text(
+            python_path, show_suppressed=options.show_suppressed
         )
     return collected
 
@@ -3312,6 +3378,7 @@ def _determine_exit_code(
     *,
     rate_limited: bool = False,
     stderr_merge: StderrMergeResult | None = None,
+    python_path: PythonPathResult | None = None,
 ) -> int:
     """Compute the process exit code from fixes and validation errors.
 
@@ -3332,11 +3399,16 @@ def _determine_exit_code(
             gets no answer from "could not look".
         stderr_merge: Result of the stderr-merge check, when it ran.
             Advisory unless ``--verify-stderr-merge``.
+        python_path: Result of the python-path check, when it ran.
+            Advisory unless ``--verify-python-path``.
 
     Returns:
         A code from :mod:`gha_workflow_linter.exit_codes`.
     """
-    codes: list[int] = [stderr_merge_report.exit_code(config, stderr_merge)]
+    codes: list[int] = [
+        stderr_merge_report.exit_code(config, stderr_merge),
+        python_path_report.exit_code(config, python_path),
+    ]
 
     if rate_limited and _demanded_an_answer(options, config):
         # Appended rather than returned, so the precedence table in
@@ -3438,6 +3510,7 @@ class RunOutcome:
         exit_code: The code this repository alone would have exited with.
         allow_list: Outcome of the allow-list stage, when it ran.
         stderr_merge: Result of the stderr-merge check, when it ran.
+        python_path: Result of the python-path check, when it ran.
         files_changed: How many files a fixer rewrote.
         defects: Validation errors left unrepaired, excluding test
             references and anything the auto-fixer rewrote.
@@ -3465,6 +3538,7 @@ class RunOutcome:
     exit_code: int
     allow_list: AllowListOutcome | None = None
     stderr_merge: StderrMergeResult | None = None
+    python_path: PythonPathResult | None = None
     files_changed: int = 0
     defects: int = 0
     outdated: int = 0
@@ -3532,6 +3606,7 @@ def _short_circuit_document(
     outcome: _ScanShortCircuit,
     rate_limited: bool,
     stderr_merge: StderrMergeResult | None = None,
+    python_path: PythonPathResult | None = None,
 ) -> dict[str, Any]:
     """Build the JSON document for a run that ended before validating.
 
@@ -3552,6 +3627,8 @@ def _short_circuit_document(
         rate_limited: Whether the API was rate-limited.
         stderr_merge: Result of the stderr-merge check, which reads the
             checkout itself and so runs whatever the workflow scan found.
+        python_path: Result of the python-path check, offline in the
+            same way.
 
     Returns:
         The document, ready to print or collect.
@@ -3571,8 +3648,10 @@ def _short_circuit_document(
                 action_calls_ran=False,
                 allow_list_ran=False,
                 stderr_merge_ran=stderr_merge is not None,
+                python_path_ran=python_path is not None,
             ),
             stderr_merge=stderr_merge,
+            python_path=python_path,
         )
 
     validator = ActionCallValidator(config, cache=shared_cache)
@@ -3593,8 +3672,10 @@ def _short_circuit_document(
             # looked at the pins it would have checked.
             allow_list_ran=False,
             stderr_merge_ran=stderr_merge is not None,
+            python_path_ran=python_path is not None,
         ),
         stderr_merge=stderr_merge,
+        python_path=python_path,
     )
 
 
@@ -3605,11 +3686,12 @@ def _short_circuit_outcome(
     stderr_merge: StderrMergeResult | None,
     payload: dict[str, Any] | None,
     rate_limited: bool,
+    python_path: PythonPathResult | None = None,
 ) -> RunOutcome:
     """Finish a run whose workflow scan ended it early.
 
-    The stderr-merge check has already run, being offline, so its
-    report and exit code still reach the caller.
+    The stderr-merge and python-path checks have already run, being
+    offline, so their reports and exit codes still reach the caller.
 
     Args:
         config: Resolved configuration for this repository.
@@ -3618,6 +3700,7 @@ def _short_circuit_outcome(
         stderr_merge: Result of the stderr-merge check, when it ran.
         payload: The JSON document, when one was built.
         rate_limited: Whether pre-flight found the API rate-limited.
+        python_path: Result of the python-path check, when it ran.
 
     Returns:
         What the run produced.
@@ -3626,12 +3709,17 @@ def _short_circuit_outcome(
         stderr_merge_report.render_text(
             stderr_merge, show_suppressed=options.show_suppressed
         )
+        python_path_report.render_text(
+            python_path, show_suppressed=options.show_suppressed
+        )
     return RunOutcome(
         exit_code=exit_codes.combine(
             scan_result.exit_code,
             stderr_merge_report.exit_code(config, stderr_merge),
+            python_path_report.exit_code(config, python_path),
         ),
         stderr_merge=stderr_merge,
+        python_path=python_path,
         error=scan_result.error,
         json_payload=payload,
         # Recorded even though the ordering in _scan_and_validate
@@ -3642,6 +3730,58 @@ def _short_circuit_outcome(
         # would make a regression in that ordering show up as
         # "clean" rather than as a wrong status.
         rate_limited=rate_limited,
+    )
+
+
+def _finish_short_circuit(
+    scanner: WorkflowScanner,
+    config: Config,
+    options: CLIOptions,
+    shared_cache: ValidationCache,
+    scan_result: _ScanShortCircuit,
+    offline: tuple[StderrMergeResult | None, PythonPathResult | None],
+    *,
+    collect_json: bool = False,
+    rate_limited: bool = False,
+) -> RunOutcome:
+    """Close a run whose scan left no action calls to validate.
+
+    Args:
+        scanner: The scanner that produced ``scan_result``.
+        config: Resolved configuration for this repository.
+        options: Resolved CLI options.
+        shared_cache: Cache shared with every other stage.
+        scan_result: Why the scan stopped short.
+        offline: Results of the stderr-merge and python-path checks,
+            which ran before the scan.
+        collect_json: Return the JSON payload on the outcome instead of
+            printing it.
+        rate_limited: Whether pre-flight found the API rate-limited.
+
+    Returns:
+        What the run produced, for aggregation by the caller.
+    """
+    merges, runs = offline
+    payload = None
+    sink = _DocumentSink.for_options(options)
+    if collect_json or sink.wanted:
+        # The run promised a document whether or not it got far
+        # enough to fill one in. Without this, a failed scan and a
+        # repository with nothing to check both emitted an empty
+        # stream, which a consumer cannot tell from a crash.
+        payload = _short_circuit_document(
+            scanner,
+            config,
+            shared_cache,
+            scan_result,
+            rate_limited,
+            merges,
+            runs,
+        )
+        if not collect_json:
+            sink.publish(payload)
+    return _short_circuit_outcome(
+        config, options, scan_result, merges, payload, rate_limited, runs
     )
 
 
@@ -3676,25 +3816,21 @@ def _run_one_repository(
     # Offline, so it runs before the workflow scan can short-circuit: a
     # repository with shell scripts and no workflows still gets checked.
     merges = stderr_merge_report.run_stage(config, options, scanner)
+    runs = python_path_report.run_stage(config, options, scanner)
 
     scan_result = _scan_and_validate(
         config, options, scanner, shared_cache, rate_limited=rate_limited
     )
     if isinstance(scan_result, _ScanShortCircuit):
-        payload = None
-        sink = _DocumentSink.for_options(options)
-        if collect_json or sink.wanted:
-            # The run promised a document whether or not it got far
-            # enough to fill one in. Without this, a failed scan and a
-            # repository with nothing to check both emitted an empty
-            # stream, which a consumer cannot tell from a crash.
-            payload = _short_circuit_document(
-                scanner, config, shared_cache, scan_result, rate_limited, merges
-            )
-            if not collect_json:
-                sink.publish(payload)
-        return _short_circuit_outcome(
-            config, options, scan_result, merges, payload, rate_limited
+        return _finish_short_circuit(
+            scanner,
+            config,
+            options,
+            shared_cache,
+            scan_result,
+            (merges, runs),
+            collect_json=collect_json,
+            rate_limited=rate_limited,
         )
     validation = scan_result
 
@@ -3735,6 +3871,7 @@ def _run_one_repository(
         collect_json=collect_json,
         rate_limited=rate_limited,
         stderr_merge=merges,
+        python_path=runs,
     )
 
     # Report outdated actions when auto-fix repaired validation errors but
@@ -3762,9 +3899,11 @@ def _run_one_repository(
             allow_list,
             rate_limited=rate_limited,
             stderr_merge=merges,
+            python_path=runs,
         ),
         allow_list=allow_list,
         stderr_merge=merges,
+        python_path=runs,
         files_changed=sum(
             1
             for changes in autofix.fixed_files.values()
@@ -4304,6 +4443,7 @@ def _sweep_status(outcome: RunOutcome) -> str:
         or outcome.write_failures
         or outcome.autofix_error
         or (outcome.stderr_merge and outcome.stderr_merge.enforced())
+        or (outcome.python_path and outcome.python_path.enforced())
     ):
         return "[yellow]findings[/yellow]"
 
@@ -4820,6 +4960,7 @@ def build_json_results(
     error: str | None = None,
     check_modes: Mapping[str, dict[str, Any]] | None = None,
     stderr_merge: StderrMergeResult | None = None,
+    python_path: PythonPathResult | None = None,
 ) -> dict[str, Any]:
     """
     Build the JSON results document for one repository.
@@ -4847,6 +4988,9 @@ def build_json_results(
             no known mode rather than reporting nothing.
         stderr_merge: Result of the stderr-merge check. The
             ``stderr_merge`` key is always present, with
+            ``checked: false`` when the check did not run.
+        python_path: Result of the python-path check. The
+            ``python_path`` key is always present, with
             ``checked: false`` when the check did not run.
 
     Returns:
@@ -4893,6 +5037,7 @@ def build_json_results(
     if allow_list is not None:
         result.update(build_allow_list_json(allow_list, root=scan_path))
     result.update(stderr_merge_report.build_json(stderr_merge))
+    result.update(python_path_report.build_json(python_path))
 
     return result
 
@@ -4907,6 +5052,7 @@ def output_json_results(
     rate_limited: bool = False,
     check_modes: Mapping[str, dict[str, Any]] | None = None,
     stderr_merge: StderrMergeResult | None = None,
+    python_path: PythonPathResult | None = None,
 ) -> None:
     """
     Output results in JSON format.
@@ -4922,6 +5068,7 @@ def output_json_results(
             never ran
         check_modes: Each check's mode, by check name
         stderr_merge: Result of the stderr-merge check, when it ran
+        python_path: Result of the python-path check, when it ran
     """
     result = build_json_results(
         scan_summary,
@@ -4932,6 +5079,7 @@ def output_json_results(
         rate_limited=rate_limited,
         check_modes=check_modes,
         stderr_merge=stderr_merge,
+        python_path=python_path,
     )
 
     # Use plain print() to avoid Rich formatting/ANSI codes in JSON output

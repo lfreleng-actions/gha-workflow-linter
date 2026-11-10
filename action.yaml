@@ -146,6 +146,21 @@ inputs:
       only.
     required: false
     default: "false"
+  python-path:
+    description: >
+      What the python-path check does: off or report. Unset leaves the
+      choice to the configuration file, whose default is 'report'. The
+      check reads shell offline and annotates each finding: PPA001 to
+      PPA008 as a warning, or as an error under 'verify-python-path';
+      PPA009 and PPA010 as a notice.
+    required: false
+  verify-python-path:
+    description: >
+      Fail the run, with exit status 7, when a python-path finding of
+      PPA001 to PPA008 remains unsuppressed. PPA009 and PPA010 never fail
+      the run. Without this the findings are advisory only.
+    required: false
+    default: "false"
 
 outputs:
   errors-found:
@@ -305,6 +320,8 @@ runs:
         INPUT_ALLOW_LIST_ORG: ${{ inputs.allow-list-org }}
         INPUT_STDERR_MERGE: ${{ inputs.stderr-merge }}
         INPUT_VERIFY_STDERR_MERGE: ${{ inputs.verify-stderr-merge }}
+        INPUT_PYTHON_PATH: ${{ inputs.python-path }}
+        INPUT_VERIFY_PYTHON_PATH: ${{ inputs.verify-python-path }}
       run: |
         # The trusted interpreter, by path and isolated (-I): neither a
         # console script looked up on PATH nor PYTHONPATH, PYTHONHOME or
@@ -523,6 +540,22 @@ runs:
           args+=(--verify-stderr-merge)
         fi
 
+        case "$INPUT_PYTHON_PATH" in
+          "") ;;
+          off | report | fix | update)
+            args+=(--python-path "$INPUT_PYTHON_PATH")
+            ;;
+          *)
+            echo "::error title=Invalid input::'python-path' must be" \
+              "off or report, not '$(command_data "$INPUT_PYTHON_PATH")'"
+            exit 2
+            ;;
+        esac
+
+        if [[ "$INPUT_VERIFY_PYTHON_PATH" == "true" ]]; then
+          args+=(--verify-python-path)
+        fi
+
         # Run the linter, once. Its status is kept, not acted on at once:
         # under GitHub's 'bash -e' a failing invocation used to abort the
         # step right here, so the outputs and the summary below -- which
@@ -623,6 +656,43 @@ runs:
               + ("\(.confidence): \(.detail): \(.snippet)" | data)
           ' 2>/dev/null || true
 
+        # One annotation per unsuppressed python-path finding, escaped
+        # the same way. PPA009 and PPA010 say the scan could not prove a
+        # command safe, so they are notices whatever the verification.
+        # Verification is what the run enforced, which a configuration
+        # file can turn on without the input.
+        #
+        # The report names a file from the scanned directory, and GitHub
+        # reads an annotation's file from the workspace, so a scan of a
+        # subdirectory prefixes it. Both are resolved, so an absolute or
+        # symlinked 'path' input names the same place as a relative one.
+        python_path_prefix=""
+        if scan_root=$(cd -- "$INPUT_PATH" 2>/dev/null && pwd -P) \
+          && workspace=$(cd -- "${GITHUB_WORKSPACE:-.}" 2>/dev/null \
+            && pwd -P) \
+          && [[ "$scan_root" == "$workspace"/* ]]; then
+          python_path_prefix="${scan_root#"$workspace"/}/"
+        fi
+        echo "$json_output" | jq -r \
+          --arg verify "$INPUT_VERIFY_PYTHON_PATH" \
+          --arg prefix "$python_path_prefix" '
+            def data: gsub("%"; "%25") | gsub("\r"; "%0D")
+              | gsub("\n"; "%0A");
+            def property: data | gsub(":"; "%3A") | gsub(","; "%2C");
+            (if $verify == "true" or .python_path.verify == true
+             then "error" else "warning" end) as $level
+            | (.python_path.findings // [])[]
+            | select(.suppressed | not)
+            | (if .rule == "PPA009" or .rule == "PPA010"
+               then "notice" else $level end) as $kind
+            | (if .path | startswith("/") then .path
+               else $prefix + .path end) as $file
+            | "::\($kind) file=\($file | property),"
+              + "line=\(.line | tostring | property),"
+              + "title=\("python path " + .rule | property)::"
+              + ("\(.detail): \(.snippet)" | data)
+          ' 2>/dev/null || true
+
         # Set step summary. Consult what actually ran before claiming a
         # result: with 'action-calls: off', or under a rate limit, there
         # are no errors because nothing was examined, and "all valid"
@@ -679,6 +749,22 @@ runs:
                 " \(.by_confidence.medium) medium," +
                 " \(.by_confidence.low) low," +
                 " \(.suppressed) suppressed"
+            ' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+        fi
+
+        python_path_ran=$(echo "$summary_json" | \
+          jq -r '.python_path.checked // false' 2>/dev/null || echo "false")
+        if [[ "$have_document" == "true" &&
+              "$python_path_ran" == "true" ]]; then
+          echo "$summary_json" | jq -r '
+              .python_path.summary
+              | "\nPython path findings: \(.enforced) enforceable," +
+                " \(.total - .enforced) notices," +
+                " \(.suppressed) suppressed",
+                (select(.total > 0)
+                 | "\n| Rule | Findings |\n| ---- | -------- |",
+                   (.by_rule | to_entries[] | select(.value > 0)
+                    | "| \(.key) | \(.value) |"))
             ' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
         fi
 

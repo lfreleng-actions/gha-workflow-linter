@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from gha_workflow_linter.cli import _preprocess_args_for_default_command, app
 from gha_workflow_linter.models import (
     Config,
+    PythonPathConfig,
     StderrMergeConfig,
     ValidationMethod,
 )
@@ -135,6 +136,7 @@ class TestCLIDefaultLint:
         # Setup mocks
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.parallel_workers = 1
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
@@ -180,6 +182,7 @@ class TestCLIDefaultLint:
         # Setup mocks
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.exclude_patterns = []
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
@@ -227,6 +230,7 @@ class TestCLIDefaultLint:
         # Setup mocks
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.cache.enabled = True
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
@@ -272,6 +276,7 @@ class TestCLIDefaultLint:
         # Setup mocks
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.validation_method = None
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
@@ -319,6 +324,7 @@ class TestCLIDefaultLint:
         # Setup mocks
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.auto_fix = False
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}

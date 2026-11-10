@@ -191,11 +191,12 @@ should do:
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-| Option           | Modes                      | Default  | Check                                  |
-| ---------------- | -------------------------- | -------- | -------------------------------------- |
-| `--action-calls` | `off｜report｜fix｜update` | `fix`    | Action and workflow `uses:` references |
-| `--allow-list`   | `off｜report｜update`      | `report` | `harden-runner` allow-list pins        |
-| `--stderr-merge` | `off｜report`              | `report` | Stderr merged into output used as data |
+| Option           | Modes                      | Default  | Check                                    |
+| ---------------- | -------------------------- | -------- | ---------------------------------------- |
+| `--action-calls` | `off｜report｜fix｜update` | `fix`    | Action and workflow `uses:` references   |
+| `--allow-list`   | `off｜report｜update`      | `report` | `harden-runner` allow-list pins          |
+| `--stderr-merge` | `off｜report`              | `report` | Stderr merged into output used as data   |
+| `--python-path`  | `off｜report`              | `report` | Python runs that take in workspace files |
 
 <!-- markdownlint-enable MD013 MD060 -->
 
@@ -364,19 +365,20 @@ Example output (default behavior, test actions skipped):
 | `4`  | `--verify-allow-list` and the tool could not reach the latest release |
 | `5`  | `--verify-action-calls` and outdated action calls remain              |
 | `6`  | Rate-limited API, and the run asked it to verify or update            |
+| `7`  | `--verify-python-path` and a finding of `PPA001` to `PPA008` remains  |
 | `8`  | `--verify-stderr-merge` and a stderr merge used as data remains       |
 
 <!-- markdownlint-enable MD013 -->
 
 When more than one applies, the most significant wins: `6`, then `4`,
-then `3`, then `5`, then `8`, then `1`. Code `7` stays reserved for a
-planned `python-path` check. A check that could not run outranks a stale
-result, because enforcement reporting success when it never looked is
-worse than useless. A condition you asked about by name outranks the
-generic `1`, and nothing masks it.
+then `3`, then `5`, then `7`, then `8`, then `1`. A check that could
+not run outranks a stale result, because enforcement reporting success
+when it never looked is worse than useless. A condition you asked about
+by name outranks the generic `1`, and nothing masks it.
 
-Codes `3`, `4`, `5` and `8` require the matching `--verify-*` flag. Without
-it, the linter reports those findings and leaves the exit code alone.
+Codes `3`, `4`, `5`, `7` and `8` require the matching `--verify-*` flag.
+Without it, the linter reports those findings and leaves the exit code
+alone.
 
 #### Rate limiting
 
@@ -838,6 +840,121 @@ breaks every caller, and for workflows `workflow_call`,
 `pull_request_target`, `workflow_run`, `secrets`, `write-permissions`
 and `no-checkout`.
 
+### Python Path Checking
+
+A Python or uv run in CI that takes in files from the workspace runs
+whatever a pull request put there. `python -m tool` puts the working
+directory first on `sys.path`, so a `tool.py` or `json/` directory in
+the checkout replaces the module the step meant to run. `PYTHONPATH`
+naming the checkout, and uv reading the workspace's `.python-version`
+or `.venv`, do the same for the interpreter and its packages
+(lfreleng-actions/.github#337 fixed these patterns across the
+organisation).
+
+The check reads the `run:` steps of workflows and composite actions,
+and shell scripts, offline. It never calls the GitHub API, so it runs
+under a rate limit and when no action calls exist to check:
+
+```bash
+# Report findings (the default); never fails the run
+gha-workflow-linter lint --python-path report
+
+# Fail with exit status 7 on a finding of PPA001 to PPA008
+gha-workflow-linter lint --verify-python-path
+
+# Skip the check
+gha-workflow-linter lint --python-path off
+```
+
+It offers no `fix` or `update` mode: which interpreter a step should
+run, and with which flags, needs a person.
+
+#### Python path rules
+
+<!-- markdownlint-disable MD013 -->
+
+| Rule     | Reports                                                                  | Suggested fix                                                                                                      |
+| -------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `PPA001` | python -m without -I: the working directory leads sys.path               | Add `-I`: `python3 -I -m tool`                                                                                     |
+| `PPA002` | python -c without -I: the working directory leads sys.path               | Add `-I`: `python3 -I -c '…'`                                                                                      |
+| `PPA003` | python reading stdin without -I: the working directory leads sys.path    | Add `-I`: `python3 -I - <<'EOF'`                                                                                   |
+| `PPA004` | PYTHONPATH may hold an empty entry                                       | Join entries without a leading, trailing or doubled `:`                                                            |
+| `PPA005` | PYTHONPATH names the caller's checkout                                   | Point `PYTHONPATH` at the action's own files, not the workspace                                                    |
+| `PPA006` | uv reads .python-version from the workspace                              | Pass `--no-config`, or request an interpreter with `--python`                                                      |
+| `PPA007` | uv uses a .venv in the workspace                                         | `uv run`: pass `--no-project` and a `--python` path outside the workspace; `uv pip`: pass `--system` or `--python` |
+| `PPA008` | setup-uv works in the workspace                                          | Set `working-directory` to `${{ github.action_path }}` or `${{ runner.temp }}`                                     |
+| `PPA009` | unresolved: the command's effect depends on a value the scan cannot read | A notice: confirm the value by hand, or suppress it with a reason                                                  |
+| `PPA010` | not fully scanned: shell the parser could not read                       | A notice: simplify the shell, or suppress it with a reason                                                         |
+
+<!-- markdownlint-enable MD013 -->
+
+The rule identifiers and messages come from the scan engine and stay
+stable across releases. Each finding names its file's `kind`:
+`action` for composite action metadata, `workflow`, or `script`.
+
+#### Suppressing a deliberate run
+
+Both forms `stderr-merge-ok` accepts work here, on the line above the
+command or as a comment after it:
+
+```yaml
+    run: |
+      # gha-workflow-linter: python-path-ok -- the module ships in this repository
+      python3 -m tools.release
+      python3 -c 'import sys'  # python-path-ok
+```
+
+The check reads comments as the shell reads the step: a `#` inside a
+shell string, multi-line or ANSI-C (`$'...'`) included, is text, while
+one inside a quoted YAML `run:` value starts a shell comment. When a
+quoted one-line `run:` value carries a shell comment and a YAML comment
+follows it, a directive in either counts. A shell comment covers its
+own step and no other: where steps share a line, as in a flow
+sequence, a YAML comment after them covers each one, and a comment
+that ends one step's `run: |` block does not reach the next step's
+line. Outside
+the shell, a `#` inside any other YAML value, a block or quoted
+`name:` or `env:` value for one, is text. The form on the line above
+counts where a comment starts that line, and not where the line sits
+inside a shell string or a YAML value. A suppressed finding never
+fails the run. The text report counts suppressed findings,
+`--show-suppressed` lists them with their reasons, and the JSON document
+carries them with `"suppressed": true`. The engine's own
+`python-path-audit: ignore` mark still drops a finding entirely.
+
+#### Python path failures and exit codes
+
+Without `--verify-python-path` the check reports and leaves the exit
+code alone. With it, an unsuppressed finding of `PPA001` to `PPA008`
+makes the run exit `7`, and a file the check could not read makes it
+exit `1`: enforcement that never looked must not pass. A check that
+fails outright does the same under `--verify-python-path`, and
+otherwise logs the failure and lets the run continue.
+
+`PPA009` and `PPA010` never fail a run, with or without
+`--verify-python-path`. They mean "the scan could not prove this
+safe", not "this is unsafe": most are the hardened pattern itself,
+an interpreter held in a variable such as `"$PYTHON" -I script.py`.
+The text output labels them `notice`, and the Action annotates them
+as notices. The Action annotates the other rules as errors whenever
+the run enforces the check, whether the `verify-python-path` input or
+the configuration file turned it on, and as warnings otherwise. It
+names each file from the workspace root, so a scan of a subdirectory
+annotates the right file.
+
+#### Python path scope and limits
+
+1. **Notices never fail.** The check reports `PPA009` and `PPA010` but
+   never fails a run on them.
+2. **Unread values.** The check reports an interpreter reached
+   through a value it cannot read, such as a step output or an
+   unknown variable, as `PPA009`, without judging it.
+3. **The caller's environment.** The caller's environment choosing
+   the interpreter (`PATH`, `UV_PYTHON`, `VIRTUAL_ENV` and similar)
+   falls outside the current rules; #448 tracks it.
+4. **Out of scope.** The check does not read `.pth` files or Python
+   source files.
+
 ### What Gets Scanned
 
 The linter walks the tree below the path you give it, collecting
@@ -855,13 +972,13 @@ at a worktree scans that worktree. Pointing it at a directory that
 merely *contains* repositories finds nothing, since each child is a
 boundary.
 
-The stderr-merge check reads more: the `run:` steps of workflows and
-composite actions, and shell scripts (`*.sh`, `*.bash`, and files with
-no extension whose shebang names a shell). It honours `--exclude` and
-`.gitignore`, never entering an excluded or ignored directory, and
-skips virtual environments, caches and `node_modules`. A file named
-with `--files`, by a relative or absolute path or glob, gets scanned
-whatever its name.
+The stderr-merge and python-path checks read more: the `run:` steps of
+workflows and composite actions, and shell scripts (`*.sh`, `*.bash`,
+and files with no extension whose shebang names a shell). They honour
+`--exclude` and `.gitignore`, never entering an excluded or ignored
+directory, and skip virtual environments, caches and `node_modules`. A
+file named with `--files`, by a relative or absolute path or glob, gets
+scanned whatever its name.
 
 ### Multi-Repository Mode
 
@@ -1019,6 +1136,9 @@ repos:
       - id: gha-workflow-linter
       # Offline; fails the commit on a high or medium stderr merge
       - id: gha-stderr-merge
+      # Offline; fails the commit on a Python run that takes in
+      # workspace files (PPA001 to PPA008)
+      - id: gha-python-path
 ```
 
 ### As a GitHub Action
@@ -1439,7 +1559,8 @@ then reports none of what it repaired.
   "checks": {
     "action-calls": {"mode": "fix", "ran": true},
     "allow-list": {"mode": "report", "ran": true},
-    "stderr-merge": {"mode": "report", "ran": true}
+    "stderr-merge": {"mode": "report", "ran": true},
+    "python-path": {"mode": "report", "ran": true}
   },
   "error": null,
   "scan_summary": {
@@ -1540,6 +1661,43 @@ lists files the check could not read:
 }
 ```
 
+`python_path` is always present too, shaped the same way. Each finding
+names its `repo`, `path` (relative to the scanned directory), `line`,
+`kind` (`action`, `workflow` or `script`), `rule`, `detail`, the
+command as `snippet`, and whether a directive `suppressed` it.
+`summary` counts unsuppressed findings by rule and by kind; `enforced`
+counts those of `PPA001` to `PPA008`, which `--verify-python-path`
+fails on. `verify` says whether the run enforced the check, from the
+flag or from `python_path.verify` in the configuration file:
+
+```json
+"python_path": {
+  "checked": true,
+  "verify": false,
+  "findings": [
+    {
+      "repo": "my-action",
+      "path": "action.yaml",
+      "line": 21,
+      "kind": "action",
+      "rule": "PPA001",
+      "detail": "python -m without -I: the working directory leads sys.path",
+      "snippet": "python3 -m json.tool f",
+      "suppressed": false
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "suppressed": 0,
+    "enforced": 1,
+    "files_scanned": 3,
+    "by_rule": {"PPA001": 1, "PPA002": 0, "...": 0, "PPA010": 0},
+    "by_kind": {"action": 1, "workflow": 0, "script": 0}
+  },
+  "problems": []
+}
+```
+
 Argument parsing sits outside that guarantee, by design. The argument
 parser rejects an unreadable path or an out-of-range `--repo-depth`
 before the linter starts, exiting `2` — the code reserved for a usage
@@ -1585,6 +1743,8 @@ file given with `config-file` still decides it.
 | `allow-list-org`      | Org for the allow-list `@` shorthand                          | No       |         |
 | `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
 | `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
+| `python-path`         | Python-path check mode: `off` or `report`                     | No       |         |
+| `verify-python-path`  | Fail when a python-path finding PPA001 to PPA008 remains      | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1645,6 +1805,8 @@ Options:
   --stderr-merge-min-confidence LEVEL
                              Lowest confidence --verify-stderr-merge fails
                              on: low, medium or high (default: medium)
+  --python-path MODE         off|report (default: report)
+  --verify-python-path       Fail when a Python run takes in workspace files
   --show-suppressed          List findings silenced by a directive
   --allow-prerelease         Allow prerelease versions for latest
   --no-allow-prerelease      Disallow prerelease versions

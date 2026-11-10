@@ -675,6 +675,37 @@ class StderrMergeConfig(BaseModel):
     )
 
 
+class PythonPathConfig(BaseModel):
+    """Configuration for the python-path check.
+
+    Advisory by default: it reports findings but never changes the exit
+    code. ``verify`` opts in to enforcement of PPA001 to PPA008; PPA009
+    and PPA010 never fail a run.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=("Report Python and uv runs that take in workspace files"),
+    )
+    mode: CheckMode = Field(
+        default=CheckMode.REPORT,
+        # Excluded for the same reason as AllowListConfig.mode:
+        # _apply_check_modes derives it from 'enabled'.
+        exclude=True,
+        description=(
+            "Runtime view of what this check does, derived from 'enabled' "
+            "or set by --python-path. Not a configuration key"
+        ),
+    )
+    verify: bool = Field(
+        default=False,
+        description=(
+            "Treat unsuppressed findings of PPA001 to PPA008 as errors and "
+            "exit with the PYTHON_PATH_FOUND status"
+        ),
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -780,6 +811,10 @@ class Config(BaseModel):
     stderr_merge: StderrMergeConfig = Field(
         default_factory=StderrMergeConfig,
         description="stderr-merge check configuration",
+    )
+    python_path: PythonPathConfig = Field(
+        default_factory=PythonPathConfig,
+        description="python-path check configuration",
     )
 
     @property
@@ -918,7 +953,10 @@ class CLIOptions(BaseModel):
     )
     show_suppressed: bool = Field(
         default=False,
-        description="Report suppressed allow-list pins and stderr merges",
+        description=(
+            "Report suppressed allow-list pins, stderr merges and "
+            "python-path findings"
+        ),
     )
     allow_list_org: str | None = Field(
         default=None,
@@ -944,6 +982,14 @@ class CLIOptions(BaseModel):
     stderr_merge_min_confidence: StderrMergeConfidence | None = Field(
         default=None,
         description="Lowest stderr-merge confidence that verify enforces",
+    )
+    python_path_mode: CheckMode | None = Field(
+        default=None,
+        description="Mode given to --python-path, authoritative when present",
+    )
+    verify_python_path: bool = Field(
+        default=False,
+        description="Treat python-path findings of PPA001 to PPA008 as errors",
     )
     multi_repo: bool = Field(
         default=False,

@@ -36,6 +36,7 @@ from gha_workflow_linter.models import (
     Category,
     CLIOptions,
     Config,
+    PythonPathConfig,
     ReferenceType,
     Severity,
     StderrMergeConfidence,
@@ -43,6 +44,10 @@ from gha_workflow_linter.models import (
     ValidationError,
     ValidationResult,
     result_category,
+)
+from gha_workflow_linter.python_path_report import (
+    PythonPathFinding,
+    PythonPathResult,
 )
 from gha_workflow_linter.stderr_merge import (
     StderrMergeFinding,
@@ -64,6 +69,7 @@ class TestExitCodeConstants:
         assert exit_codes.ALLOW_LIST_UNRESOLVED == 4
         assert exit_codes.ACTIONS_OUTDATED == 5
         assert exit_codes.RATE_LIMITED == 6
+        assert exit_codes.PYTHON_PATH_FOUND == 7
         assert exit_codes.STDERR_MERGE_FOUND == 8
 
     def test_codes_are_unique(self) -> None:
@@ -75,6 +81,7 @@ class TestExitCodeConstants:
             exit_codes.ALLOW_LIST_UNRESOLVED,
             exit_codes.ACTIONS_OUTDATED,
             exit_codes.RATE_LIMITED,
+            exit_codes.PYTHON_PATH_FOUND,
             exit_codes.STDERR_MERGE_FOUND,
         ]
         assert len(codes) == len(set(codes))
@@ -86,7 +93,7 @@ class TestExitCodeConstants:
 
 
 class TestCombine:
-    """Precedence: 6 > 4 > 3 > 5 > 8 > 1 > 0."""
+    """Precedence: 6 > 4 > 3 > 5 > 7 > 8 > 1 > 0."""
 
     def test_empty_is_success(self) -> None:
         assert exit_codes.combine() == exit_codes.SUCCESS
@@ -139,6 +146,14 @@ class TestCombine:
                 exit_codes.STDERR_MERGE_FOUND,
             ),
             (
+                (exit_codes.STDERR_MERGE_FOUND, exit_codes.PYTHON_PATH_FOUND),
+                exit_codes.PYTHON_PATH_FOUND,
+            ),
+            (
+                (exit_codes.ACTIONS_OUTDATED, exit_codes.PYTHON_PATH_FOUND),
+                exit_codes.ACTIONS_OUTDATED,
+            ),
+            (
                 (exit_codes.ACTIONS_OUTDATED, exit_codes.STDERR_MERGE_FOUND),
                 exit_codes.ACTIONS_OUTDATED,
             ),
@@ -165,7 +180,7 @@ class TestCombine:
 
 class TestDescribe:
     def test_known_codes_have_descriptions(self) -> None:
-        for code in (0, 1, 2, 3, 4, 5, 6, 8):
+        for code in (0, 1, 2, 3, 4, 5, 6, 7, 8):
             assert "Unknown" not in exit_codes.describe(code)
 
     def test_unknown_code(self) -> None:
@@ -938,3 +953,68 @@ class TestStderrMerge:
             stderr_merge=self._result("SEM001"),
         )
         assert code == exit_codes.STDERR_MERGE_FOUND
+
+
+class TestPythonPath:
+    """--verify-python-path fails on PPA001 to PPA008, never PPA009/10."""
+
+    @staticmethod
+    def _result(rule: str, *, suppressed: bool = False) -> PythonPathResult:
+        finding = PythonPathFinding(
+            "repo",
+            "a.sh",
+            1,
+            "script",
+            rule,
+            "detail",
+            "snippet",
+            suppressed=suppressed,
+        )
+        return PythonPathResult([finding], files_scanned=1)
+
+    @staticmethod
+    def _code(result: PythonPathResult, **settings: Any) -> int:
+        config = Config(python_path=PythonPathConfig(**settings))
+        return _determine_exit_code(
+            _options(), _validation(), _autofix(), config, python_path=result
+        )
+
+    def test_advisory_by_default(self) -> None:
+        assert self._code(self._result("PPA001")) == exit_codes.SUCCESS
+
+    @pytest.mark.parametrize("rule", ["PPA001", "PPA005", "PPA008"])
+    def test_verify_fails_on_an_enforceable_rule(self, rule: str) -> None:
+        code = self._code(self._result(rule), verify=True)
+        assert code == exit_codes.PYTHON_PATH_FOUND
+
+    @pytest.mark.parametrize("rule", ["PPA009", "PPA010"])
+    def test_unresolved_and_unscanned_never_fail(self, rule: str) -> None:
+        """They say the scan could not prove safety, not that it is unsafe."""
+        assert self._code(self._result(rule), verify=True) == (
+            exit_codes.SUCCESS
+        )
+
+    def test_suppressed_findings_never_fail(self) -> None:
+        code = self._code(self._result("PPA001", suppressed=True), verify=True)
+        assert code == exit_codes.SUCCESS
+
+    def test_an_unread_file_fails_a_verifying_run(self) -> None:
+        """A check asked to enforce that could not look must not pass."""
+        result = PythonPathResult([], 1, ("bad.yml: not valid YAML",))
+        assert self._code(result) == exit_codes.SUCCESS
+        assert self._code(result, verify=True) == exit_codes.RUNTIME_ERROR
+
+    def test_it_outranks_stderr_merge(self) -> None:
+        config = Config(
+            python_path=PythonPathConfig(verify=True),
+            stderr_merge=StderrMergeConfig(verify=True),
+        )
+        code = _determine_exit_code(
+            _options(),
+            _validation(),
+            _autofix(),
+            config,
+            stderr_merge=TestStderrMerge._result("SEM001"),
+            python_path=self._result("PPA001"),
+        )
+        assert code == exit_codes.PYTHON_PATH_FOUND

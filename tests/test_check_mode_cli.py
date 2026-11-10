@@ -84,6 +84,8 @@ def _off(workspace: Path) -> list[str]:
         "off",
         "--stderr-merge",
         "off",
+        "--python-path",
+        "off",
     ]
 
 
@@ -196,6 +198,25 @@ class TestAModeSettlesTheWholeBehaviour:
         with pytest.raises(ConfigurationError, match="needs a person"):
             _apply_check_modes(
                 Config(), CLIOptions(stderr_merge_mode=CheckMode.FIX)
+            )
+
+    def test_python_path_off_disables_the_check(self) -> None:
+        config = Config()
+        _apply_check_modes(config, CLIOptions(python_path_mode=CheckMode.OFF))
+
+        assert config.python_path.enabled is False
+        assert config.python_path.mode is CheckMode.OFF
+
+    def test_python_path_follows_the_configuration_file(self) -> None:
+        config = Config.model_validate({"python_path": {"enabled": False}})
+        _apply_check_modes(config, CLIOptions())
+
+        assert config.python_path.mode is CheckMode.OFF
+
+    def test_python_path_fix_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError, match="needs a person"):
+            _apply_check_modes(
+                Config(), CLIOptions(python_path_mode=CheckMode.FIX)
             )
 
     def test_an_unsupported_rung_is_refused(self) -> None:
@@ -369,6 +390,7 @@ class TestOffMeansTheCheckDoesNotRun:
             "action-calls": {"mode": "off", "ran": False},
             "allow-list": {"mode": "off", "ran": False},
             "stderr-merge": {"mode": "off", "ran": False},
+            "python-path": {"mode": "off", "ran": False},
         }
 
     def test_a_setup_failure_still_names_every_check(
@@ -403,6 +425,7 @@ class TestOffMeansTheCheckDoesNotRun:
             "action-calls": {"mode": None, "ran": False},
             "allow-list": {"mode": None, "ran": False},
             "stderr-merge": {"mode": None, "ran": False},
+            "python-path": {"mode": None, "ran": False},
         }
 
     def test_a_settled_failure_reports_the_modes_it_settled(

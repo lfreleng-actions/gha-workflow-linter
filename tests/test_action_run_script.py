@@ -1017,3 +1017,231 @@ class TestStderrMerge:
         self, run_action: Any
     ) -> None:
         assert "Stderr merges" not in run_action().summary
+
+
+_PYTHON_PATH_RULES = [f"PPA{n:03d}" for n in range(1, 11)]
+
+
+def _with_python_paths(
+    *findings: dict[str, Any], verify: bool = False
+) -> dict[str, Any]:
+    """Return a clean document whose python-path check found these.
+
+    Args:
+        findings: Finding objects as the linter writes them.
+        verify: Whether the run enforced the check.
+
+    Returns:
+        The document.
+    """
+    document: dict[str, Any] = json.loads(json.dumps(CLEAN))
+    active = [f for f in findings if not f.get("suppressed")]
+    document["python_path"] = {
+        "checked": True,
+        "verify": verify,
+        "findings": list(findings),
+        "summary": {
+            "total": len(active),
+            "suppressed": len(findings) - len(active),
+            "enforced": sum(
+                1 for f in active if f["rule"] not in {"PPA009", "PPA010"}
+            ),
+            "files_scanned": 1,
+            "by_rule": {
+                rule: sum(1 for f in active if f["rule"] == rule)
+                for rule in _PYTHON_PATH_RULES
+            },
+            "by_kind": {"action": 0, "workflow": len(active), "script": 0},
+        },
+        "problems": [],
+    }
+    return document
+
+
+def _python_path_finding(
+    rule: str, *, suppressed: bool = False, path: str = "ci.yaml"
+) -> dict[str, Any]:
+    return {
+        "repo": "repo",
+        "path": path,
+        "line": 9,
+        "kind": "workflow",
+        "rule": rule,
+        "detail": "the working directory leads sys.path",
+        "snippet": "python3 -m json.tool f",
+        "suppressed": suppressed,
+    }
+
+
+class TestPythonPath:
+    """Inputs reach the linter; findings reach the reader."""
+
+    def test_unset_passes_nothing(self, run_action: Any) -> None:
+        result = run_action()
+
+        assert "--python-path" not in result.args
+        assert "--verify-python-path" not in result.args
+
+    @pytest.mark.parametrize("mode", ["off", "report", "fix"])
+    def test_a_mode_passes_through(self, run_action: Any, mode: str) -> None:
+        """'fix' too: the CLI refuses it with the reason.
+
+        Args:
+            mode: The mode requested.
+        """
+        result = run_action({"python-path": mode})
+
+        assert result.value_of("--python-path") == mode
+
+    def test_a_value_that_is_no_mode_is_refused(self, run_action: Any) -> None:
+        result = run_action({"python-path": "sometimes"})
+
+        assert result.returncode == 2
+        assert result.invocations == []
+        assert "'python-path' must be off or report" in result.stdout
+
+    def test_verify(self, run_action: Any) -> None:
+        result = run_action({"verify-python-path": "true"})
+
+        assert "--verify-python-path" in result.args
+
+    def test_findings_are_annotated(self, run_action: Any) -> None:
+        document = _with_python_paths(
+            _python_path_finding("PPA001"),
+            _python_path_finding("PPA009"),
+            _python_path_finding("PPA001", suppressed=True),
+        )
+
+        annotations = [
+            line
+            for line in run_action(document=document).stdout.splitlines()
+            if "title=python path" in line
+        ]
+
+        assert annotations == [
+            "::warning file=ci.yaml,line=9,title=python path PPA001::"
+            "the working directory leads sys.path: python3 -m json.tool f",
+            "::notice file=ci.yaml,line=9,title=python path PPA009::"
+            "the working directory leads sys.path: python3 -m json.tool f",
+        ]
+
+    def test_verify_makes_enforceable_rules_errors(
+        self, run_action: Any
+    ) -> None:
+        document = _with_python_paths(
+            _python_path_finding("PPA001"), _python_path_finding("PPA010")
+        )
+
+        stdout = run_action({"verify-python-path": "true"}, document).stdout
+
+        assert "::error file=ci.yaml,line=9,title=python path PPA001" in stdout
+        assert "::notice file=ci.yaml,line=9,title=python path PPA010" in (
+            stdout
+        )
+
+    def test_configured_verification_makes_errors(
+        self, run_action: Any
+    ) -> None:
+        """The configuration file can enforce the check without the input.
+
+        The run then exits 7, so its findings are errors, as under the
+        input; PPA009 and PPA010 stay notices.
+        """
+        document = _with_python_paths(
+            _python_path_finding("PPA001"),
+            _python_path_finding("PPA009"),
+            verify=True,
+        )
+
+        stdout = run_action(document=document).stdout
+
+        assert "::error file=ci.yaml,line=9,title=python path PPA001" in stdout
+        assert "::warning file=ci.yaml" not in stdout
+        assert "::notice file=ci.yaml,line=9,title=python path PPA009" in (
+            stdout
+        )
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_a_subdirectory_scan_annotates_from_the_workspace(
+        self, run_action: Any, tmp_path: Path, absolute: bool
+    ) -> None:
+        """GitHub reads an annotation's file from the workspace root.
+
+        Args:
+            run_action: Runs the script, from ``tmp_path``.
+            tmp_path: The workspace.
+            absolute: Name the scanned directory by its absolute path.
+        """
+        (tmp_path / "subproject").mkdir()
+        path = str(tmp_path / "subproject") if absolute else "subproject"
+        document = _with_python_paths(
+            _python_path_finding("PPA001", path="scripts/lint.sh")
+        )
+
+        stdout = run_action({"path": path}, document).stdout
+
+        assert (
+            "::warning file=subproject/scripts/lint.sh,line=9,"
+            "title=python path PPA001" in stdout
+        )
+
+    def test_a_scan_of_the_workspace_keeps_the_path(
+        self, run_action: Any, tmp_path: Path
+    ) -> None:
+        """Args:
+        run_action: Runs the script, from ``tmp_path``.
+        tmp_path: The workspace.
+        """
+        document = _with_python_paths(
+            _python_path_finding("PPA001", path="scripts/lint.sh")
+        )
+
+        stdout = run_action({"path": str(tmp_path)}, document).stdout
+
+        assert "::warning file=scripts/lint.sh,line=9," in stdout
+
+    def test_a_hostile_path_cannot_issue_a_command(
+        self, run_action: Any
+    ) -> None:
+        """A file name can hold a comma, a colon or a newline."""
+        document = _with_python_paths(
+            _python_path_finding("PPA001", path="a,b:c\n::error::injected")
+        )
+
+        lines = run_action(document=document).stdout.splitlines()
+
+        assert not any(line.startswith("::error::injected") for line in lines)
+        assert any(
+            "file=a%2Cb%3Ac%0A%3A%3Aerror%3A%3Ainjected,line=9" in line
+            for line in lines
+        )
+
+    def test_counts_reach_the_summary(self, run_action: Any) -> None:
+        document = _with_python_paths(
+            _python_path_finding("PPA001"),
+            _python_path_finding("PPA001"),
+            _python_path_finding("PPA009"),
+            _python_path_finding("PPA003", suppressed=True),
+        )
+
+        summary = run_action(document=document).summary
+
+        assert (
+            "Python path findings: 2 enforceable, 1 notices, 1 suppressed"
+            in summary
+        )
+        assert "| PPA001 | 2 |" in summary
+        assert "| PPA009 | 1 |" in summary
+        assert "| PPA003 |" not in summary
+        assert "All 7 action calls are valid" in summary
+
+    def test_a_clean_check_has_no_table(self, run_action: Any) -> None:
+        summary = run_action(document=_with_python_paths()).summary
+
+        assert "Python path findings: 0 enforceable" in summary
+        assert "| Rule | Findings |" not in summary
+
+    def test_a_check_that_did_not_run_has_no_counts(
+        self, run_action: Any
+    ) -> None:
+        assert "Python path findings" not in run_action().summary

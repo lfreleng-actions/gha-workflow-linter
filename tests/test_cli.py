@@ -32,6 +32,7 @@ from gha_workflow_linter.models import (
     ActionCallType,
     Config,
     LogLevel,
+    PythonPathConfig,
     ReferenceType,
     StderrMergeConfig,
     ValidationError,
@@ -434,6 +435,7 @@ class TestCLICommands:
         """Test lint command with workers option."""
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.parallel_workers = 4
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
@@ -473,6 +475,7 @@ class TestCLICommands:
         """Test lint command with exclude patterns."""
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.exclude_patterns = []
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
@@ -532,6 +535,7 @@ class TestCLICommands:
         """Test lint command with parallel processing disabled."""
         mock_config = Mock()
         mock_config.stderr_merge = StderrMergeConfig()
+        mock_config.python_path = PythonPathConfig()
         mock_config.parallel_workers = 4
         mock_config_manager.return_value.load_config.return_value = mock_config
         mock_scanner.return_value.scan_directory.return_value = {}
