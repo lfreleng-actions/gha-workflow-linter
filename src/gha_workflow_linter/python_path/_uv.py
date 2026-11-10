@@ -225,9 +225,10 @@ def uv_findings(
             found.append("PPA006")
         if not settings["system"]:
             found.append("PPA007")
-    elif head == ["pip"]:
-        if not (settings["system"] or settings["python_path"] or venv):
-            found.append("PPA007")
+    elif head == ["pip"] and not (
+        settings["system"] or settings["python_path"] or venv
+    ):
+        found.append("PPA007")
     return found
 
 
