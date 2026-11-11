@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from .scanner import WorkflowScanner
 
 __all__ = [
+    "ACTION_ENFORCEABLE_RULES",
     "ENFORCEABLE_RULES",
     "KINDS",
     "PythonPathFinding",
@@ -69,6 +70,13 @@ __all__ = [
 
 ENFORCEABLE_RULES = frozenset(f"PPA00{n}" for n in range(1, 9))
 """Rules ``--verify-python-path`` fails on. PPA009 and PPA010 are notices."""
+
+ACTION_ENFORCEABLE_RULES = frozenset({"PPA011", "PPA012"})
+"""Rules ``--verify-python-path`` fails on in a composite action alone.
+
+A workflow job sees its own environment, so in a workflow file they
+are reported but never fail the run.
+"""
 
 KINDS = ("action", "workflow", "script")
 """The kinds of file the engine reads, as the summary counts them."""
@@ -90,8 +98,10 @@ class PythonPathFinding:
 
     @property
     def enforceable(self) -> bool:
-        """Whether ``--verify-python-path`` fails on this rule."""
-        return self.rule in ENFORCEABLE_RULES
+        """Whether ``--verify-python-path`` fails on this finding."""
+        return self.rule in ENFORCEABLE_RULES or (
+            self.rule in ACTION_ENFORCEABLE_RULES and self.kind == "action"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """The finding as the JSON document reports it."""
@@ -117,7 +127,7 @@ class PythonPathResult:
     verify: bool = False
 
     def enforced(self) -> list[PythonPathFinding]:
-        """Unsuppressed findings of a rule from PPA001 to PPA008."""
+        """Unsuppressed findings ``--verify-python-path`` fails on."""
         return [f for f in self.findings if f.enforceable and not f.suppressed]
 
     def summary(self) -> dict[str, Any]:
@@ -425,7 +435,7 @@ def _origins(
     for block, ident in zip(yaml_file.blocks, ids, strict=True):
         for _offset, number in block.starts:
             covering[number].add(ident)
-    yaml_lines = {number for number, _word in yaml_file.setup_uv}
+    yaml_lines = {step.line for step in yaml_file.setup_uv}
     yaml_lines.update(number for number, _word in yaml_file.pythonpath)
     if all(
         len(keys) == 1 and number not in yaml_lines
@@ -659,6 +669,7 @@ def exit_code(config: Config, result: PythonPathResult | None) -> int:
     Returns:
         ``PYTHON_PATH_FOUND`` when enforcement was requested and an
         unsuppressed finding of a rule from PPA001 to PPA008 remains,
+        or of PPA011 or PPA012 in a composite action,
         and ``RUNTIME_ERROR`` when enforcement was requested and a file
         could not be read: a check that did not look must not pass.
         PPA009 and PPA010 never count. Without ``verify`` the check

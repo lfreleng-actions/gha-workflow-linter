@@ -347,6 +347,8 @@ def test_directives_on_yaml_lines_suppress(tmp_path: Path) -> None:
 
     assert [(f.rule, f.suppressed, f.reason) for f in result.findings] == [
         ("PPA008", True, "a"),
+        ("PPA011", True, "a"),
+        ("PPA012", True, "a"),
         ("PPA005", True, "b"),
     ]
 
@@ -366,7 +368,7 @@ AFTER_RUN = "    - shell: bash\n      run: |\n        echo hi\n"
                 AFTER_RUN
                 + "    - uses: astral-sh/setup-uv@v6  # python-path-ok\n"
             ),
-            [("PPA008", True)],
+            [("PPA008", True), ("PPA011", True), ("PPA012", True)],
         ),
         (
             _steps(
@@ -374,7 +376,7 @@ AFTER_RUN = "    - shell: bash\n      run: |\n        echo hi\n"
                 + "    # gha-workflow-linter: python-path-ok\n"
                 + "    - uses: astral-sh/setup-uv@v6\n"
             ),
-            [("PPA008", True)],
+            [("PPA008", True), ("PPA011", True), ("PPA012", True)],
         ),
         (
             _steps(
@@ -395,7 +397,7 @@ AFTER_RUN = "    - shell: bash\n      run: |\n        echo hi\n"
                 "        # gha-workflow-linter: python-path-ok\n"
                 "      uses: astral-sh/setup-uv@v6\n"
             ),
-            [("PPA008", False)],
+            [("PPA008", False), ("PPA011", False), ("PPA012", False)],
         ),
         (
             _steps(
@@ -403,14 +405,14 @@ AFTER_RUN = "    - shell: bash\n      run: |\n        echo hi\n"
                 "        # gha-workflow-linter: python-path-ok'\n"
                 "      uses: astral-sh/setup-uv@v6\n"
             ),
-            [("PPA008", False)],
+            [("PPA008", False), ("PPA011", False), ("PPA012", False)],
         ),
         (
             _steps(
                 "    - name: x  # python-path-ok\n"
                 "      uses: astral-sh/setup-uv@v6\n"
             ),
-            [("PPA008", False)],
+            [("PPA008", False), ("PPA011", False), ("PPA012", False)],
         ),
     ],
 )
@@ -646,7 +648,12 @@ def test_findings_match_the_standalone_engine(tmp_path: Path) -> None:
         (
             "[{uses: astral-sh/setup-uv@v6}, "
             "{run: 'python3 -m first # python-path-ok'}]",
-            [("PPA001", True), ("PPA008", False)],
+            [
+                ("PPA001", True),
+                ("PPA008", False),
+                ("PPA011", False),
+                ("PPA012", False),
+            ],
         ),
     ],
 )
@@ -802,7 +809,6 @@ def _workflow_with_default_setup_uv(root: Path) -> Path:
     return root
 
 
-@pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
 def test_default_setup_uv_fails_verify_in_an_action(tmp_path: Path) -> None:
     """A composite action inherits the caller's environment."""
     code, output = _lint(
@@ -825,7 +831,6 @@ def test_default_setup_uv_never_fails_verify_in_a_workflow(
     assert code == exit_codes.SUCCESS
 
 
-@pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
 def test_default_setup_uv_is_reported_in_a_workflow(tmp_path: Path) -> None:
     root = _workflow_with_default_setup_uv(tmp_path)
 

@@ -992,7 +992,6 @@ class TestPythonPath:
         code = self._code(self._result(rule), verify=True)
         assert code == exit_codes.PYTHON_PATH_FOUND
 
-    @pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
     @pytest.mark.parametrize("rule", ["PPA011", "PPA012"])
     def test_setup_uv_rules_fail_in_an_action(self, rule: str) -> None:
         code = self._code(self._result(rule, kind="action"), verify=True)

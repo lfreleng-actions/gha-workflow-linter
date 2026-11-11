@@ -1143,7 +1143,6 @@ class TestPythonPath:
             stdout
         )
 
-    @pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
     def test_setup_uv_rules_are_errors_in_an_action_alone(
         self, run_action: Any
     ) -> None:

@@ -30,6 +30,11 @@ def rules(text: str, kind: str = "script") -> list[str]:
     return [f.rule for f in audit.scan_text(text, kind, "repo", "file")]
 
 
+def rules_before_ppa011(text: str, kind: str = "script") -> list[str]:
+    """The rule of each finding in ``text``, PPA011 and PPA012 left out."""
+    return [r for r in rules(text, kind) if r not in ("PPA011", "PPA012")]
+
+
 def action_step(line: str) -> str:
     """An action whose one step runs ``line``."""
     return f"runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n        {line}\n"
@@ -1667,7 +1672,7 @@ class UvTest(unittest.TestCase):
             (step("with:", "  working-directory: src"), ["PPA008"]),
         ):
             with self.subTest(text=text):
-                self.assertEqual(rules(text, "action"), expected)
+                self.assertEqual(rules_before_ppa011(text, "action"), expected)
 
 
 class ContextTest(unittest.TestCase):
@@ -2904,7 +2909,10 @@ class ReviewRoundFourTest(unittest.TestCase):
         head = "on: push\njobs:\n  a:\n    steps:\n"
         uses = "      - uses: astral-sh/setup-uv@v1"
         mark = "# python-path-audit: ignore"
-        self.assertEqual(rules(head + uses + "\n", "workflow"), ["PPA008"])
+        self.assertEqual(
+            rules(head + uses + "\n", "workflow"),
+            ["PPA008", "PPA011", "PPA012"],
+        )
         self.assertEqual(rules(f"{head}{uses}  {mark}\n", "workflow"), [])
         self.assertEqual(rules(f"{head}      {mark}\n{uses}\n", "workflow"), [])
 
@@ -3471,9 +3479,9 @@ class ReviewRoundNineTest(unittest.TestCase):
     def test_setup_uv_owner_in_any_case(self) -> None:
         """GitHub resolves the action's owner and name in any case."""
         for uses, expected in (
-            ("Astral-Sh/setup-uv@abc", ["PPA008"]),
-            ("ASTRAL-SH/SETUP-UV@abc", ["PPA008"]),
-            ("astral-sh/setup-uv@abc", ["PPA008"]),
+            ("Astral-Sh/setup-uv@abc", ["PPA008", "PPA011", "PPA012"]),
+            ("ASTRAL-SH/SETUP-UV@abc", ["PPA008", "PPA011", "PPA012"]),
+            ("astral-sh/setup-uv@abc", ["PPA008", "PPA011", "PPA012"]),
             ("astral-sh/setup-uv-other@abc", []),
         ):
             with self.subTest(uses=uses):
@@ -4520,14 +4528,12 @@ class SetupUvCallerTest(unittest.TestCase):
             text = f.read()
         self.assertEqual(caller_findings(text), [])
 
-    @unittest.expectedFailure
     def test_default_step_reports_both(self) -> None:
         text = "runs:\n  steps:\n    - uses: astral-sh/setup-uv@v6\n"
         self.assertEqual(
             [rule for rule, _ in caller_findings(text)], ["PPA011", "PPA012"]
         )
 
-    @unittest.expectedFailure
     def test_each_failed_guard_is_named(self) -> None:
         """One guard broken at a time; the detail names it."""
         cases: tuple[
@@ -4586,7 +4592,6 @@ class SetupUvCallerTest(unittest.TestCase):
                     [("PPA011", detail)],
                 )
 
-    @unittest.expectedFailure
     def test_install_dir_from_the_caller(self) -> None:
         """setup-uv puts UV_PYTHON_INSTALL_DIR on PATH ahead of its uv."""
         detail = [("PPA011", "UV_PYTHON_INSTALL_DIR comes from the caller")]
@@ -4637,7 +4642,6 @@ class SetupUvCallerTest(unittest.TestCase):
             with self.subTest(inputs=inputs):
                 self.assertEqual(caller_findings(setup_uv_step(inputs)), [])
 
-    @unittest.expectedFailure
     def test_first_failed_guard_is_named(self) -> None:
         text = setup_uv_step({"enable-cache": DROP}, {"UV_PYTHON_ARCH": DROP})
         self.assertEqual(
@@ -4645,7 +4649,6 @@ class SetupUvCallerTest(unittest.TestCase):
             [("PPA011", "UV_PYTHON_ARCH is not set to ''")],
         )
 
-    @unittest.expectedFailure
     def test_python_version_exports_uv_python(self) -> None:
         text = setup_uv_step(
             {"python-version": "'3.12'"}, {"UV_PYTHON_PREFERENCE": DROP}
@@ -4660,7 +4663,6 @@ class SetupUvCallerTest(unittest.TestCase):
             ],
         )
 
-    @unittest.expectedFailure
     def test_uv_system_python_searches_path(self) -> None:
         text = setup_uv_step(
             {"enable-cache": DROP}, {"UV_SYSTEM_PYTHON": "'1'"}
@@ -4674,7 +4676,6 @@ class SetupUvCallerTest(unittest.TestCase):
             [],
         )
 
-    @unittest.expectedFailure
     def test_expressions_fail_their_guard(self) -> None:
         unread = "is an expression the scan cannot read"
         cases: tuple[
@@ -4719,7 +4720,6 @@ class SetupUvCallerTest(unittest.TestCase):
                 text = setup_uv_step({"tool-bin-dir": value})
                 self.assertEqual(caller_findings(text), [])
 
-    @unittest.expectedFailure
     def test_tool_bin_dir_elsewhere(self) -> None:
         outside = (
             "tool-bin-dir is outside the runner's temp directory and the "
@@ -4763,7 +4763,6 @@ class SetupUvCallerTest(unittest.TestCase):
                     caller_findings(text, kind), [("PPA012", detail)]
                 )
 
-    @unittest.expectedFailure
     def test_literal_paths_do_not_hold(self) -> None:
         """A drive-less path can land in the checkout on Windows.
 
@@ -4789,7 +4788,6 @@ class SetupUvCallerTest(unittest.TestCase):
                 text = setup_uv_step({}, {"UV_PYTHON_INSTALL_DIR": value})
                 self.assertEqual(caller_findings(text), install)
 
-    @unittest.expectedFailure
     def test_tool_bin_dir_path_separators(self) -> None:
         """core.addPath() adds each entry a separator or break makes."""
         detail = (
@@ -4807,7 +4805,6 @@ class SetupUvCallerTest(unittest.TestCase):
                 text = setup_uv_step({"tool-bin-dir": value})
                 self.assertEqual(caller_findings(text), [("PPA012", detail)])
 
-    @unittest.expectedFailure
     def test_with_values_are_trimmed(self) -> None:
         """setup-uv trims each input, as core.getInput() does."""
         outside = (
@@ -4833,7 +4830,6 @@ class SetupUvCallerTest(unittest.TestCase):
                     caller_findings(setup_uv_step(inputs)), expected
                 )
 
-    @unittest.expectedFailure
     def test_env_values_keep_their_whitespace(self) -> None:
         """uv reads a step env value as written; only inputs are trimmed."""
         text = setup_uv_step({}, {"UV_PYTHON_ARCH": "' '"})
@@ -4841,7 +4837,6 @@ class SetupUvCallerTest(unittest.TestCase):
             caller_findings(text), [("PPA011", "UV_PYTHON_ARCH is not ''")]
         )
 
-    @unittest.expectedFailure
     def test_input_names_in_any_case(self) -> None:
         """setup-uv reads its inputs as upper-cased INPUT_* variables."""
         for inputs, detail in (
@@ -4878,7 +4873,6 @@ class SetupUvCallerTest(unittest.TestCase):
             with self.subTest(inputs=inputs):
                 self.assertEqual(caller_findings(setup_uv_step(inputs)), detail)
 
-    @unittest.expectedFailure
     def test_env_names_in_any_case(self) -> None:
         """Windows reads environment names in any case; Linux does not.
 
@@ -4921,7 +4915,6 @@ class SetupUvCallerTest(unittest.TestCase):
                     [("PPA011", detail)],
                 )
 
-    @unittest.expectedFailure
     def test_ignore_mark_covers_them(self) -> None:
         text = "runs:\n  steps:\n    - uses: astral-sh/setup-uv@v6\n"
         mark = "  # python-path-audit: ignore"
@@ -4937,13 +4930,11 @@ class SetupUvInheritedModifyPathTest(unittest.TestCase):
     ``exit 1``, matched as text rather than analysed as shell.
     """
 
-    @unittest.expectedFailure
     def test_action_without_a_refusal_step(self) -> None:
         self.assertEqual(
             caller_findings(setup_uv_step(before="")), [("PPA011", INHERITED)]
         )
 
-    @unittest.expectedFailure
     def test_refusal_steps_that_do_not_count(self) -> None:
         later = setup_uv_step(before="") + REFUSAL_STEP
         no_exit = REFUSAL_STEP.replace("exit 1", "exit 0")
@@ -4970,7 +4961,21 @@ class SetupUvInheritedModifyPathTest(unittest.TestCase):
                     caller_findings(setup_uv_step(before=before)), []
                 )
 
-    @unittest.expectedFailure
+    def test_refusal_step_on_the_same_line(self) -> None:
+        """Earlier means earlier in the steps sequence, not on a line."""
+        refusal = "{run: 'echo UV_NO_MODIFY_PATH; exit 1'}"
+        setup_uv = (
+            f"{{uses: astral-sh/setup-uv@{'0' * 40}, with: {{"
+            "working-directory: '${{ github.action_path }}', "
+            "tool-bin-dir: '${{ runner.temp }}/bin', enable-cache: false}, "
+            "env: {UV_PYTHON_PREFERENCE: lookup-disabled, UV_PYTHON_ARCH: '', "
+            "UV_PYTHON_INSTALL_DIR: '${{ runner.temp }}/python'}}"
+        )
+        before = f"runs: {{using: composite, steps: [{refusal}, {setup_uv}]}}\n"
+        after = f"runs: {{using: composite, steps: [{setup_uv}, {refusal}]}}\n"
+        self.assertEqual(caller_findings(before), [])
+        self.assertEqual(caller_findings(after), [("PPA011", INHERITED)])
+
     def test_step_setting_it_still_fails_after_a_refusal(self) -> None:
         text = setup_uv_step({}, {"UV_NO_MODIFY_PATH": "'1'"})
         self.assertEqual(
@@ -4978,7 +4983,6 @@ class SetupUvInheritedModifyPathTest(unittest.TestCase):
             [("PPA011", "UV_NO_MODIFY_PATH is set on the step")],
         )
 
-    @unittest.expectedFailure
     def test_workflow_needs_no_refusal_step(self) -> None:
         """A job's environment is its own: only the step decides."""
         inputs = {
@@ -5013,7 +5017,6 @@ def corpus_rules(name: str) -> list[str]:
 class SetupUvCorpusTest(unittest.TestCase):
     """The lfreleng-actions setup-uv steps #448 pins, by commit."""
 
-    @unittest.expectedFailure
     def test_unguarded_steps_report_both(self) -> None:
         """tox-run-action's ``${{ env.UV_TOOL_BIN_DIR }}`` is the caller's."""
         names = (
@@ -5027,7 +5030,6 @@ class SetupUvCorpusTest(unittest.TestCase):
             dict.fromkeys(names, ["PPA011", "PPA012"]),
         )
 
-    @unittest.expectedFailure
     def test_step_without_a_refusal_reports_ppa011(self) -> None:
         """Its other guards hold, but an inherited UV_NO_MODIFY_PATH."""
         self.assertEqual(corpus_rules("pypi-version-check-action"), ["PPA011"])

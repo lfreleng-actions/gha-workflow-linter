@@ -576,7 +576,7 @@ class TestPythonPathIsAlwaysPresent:
         assert summary["enforced"] == 1
         assert summary["suppressed"] == 0
         assert summary["by_rule"]["PPA001"] == 1
-        assert set(summary["by_rule"]) == {f"PPA{n:03d}" for n in range(1, 11)}
+        assert set(summary["by_rule"]) == {f"PPA{n:03d}" for n in range(1, 13)}
         assert summary["by_kind"] == {"action": 0, "workflow": 0, "script": 1}
 
     def test_a_full_run_carries_it(
