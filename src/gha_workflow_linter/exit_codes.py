@@ -26,7 +26,8 @@ Code  Name                      Meaning
 6     RATE_LIMITED              Rate-limited API, and the run asked it to
                                 verify or update something.
 7     PYTHON_PATH_FOUND         ``--verify-python-path`` and a python-path
-                                finding of PPA001 to PPA008 remains.
+                                finding of PPA001 to PPA008, or of PPA011
+                                or PPA012 in a composite action, remains.
 8     STDERR_MERGE_FOUND        ``--verify-stderr-merge`` and stderr-merge
                                 findings at or above the floor remain.
 ===== ========================= ================================================
@@ -91,10 +92,12 @@ never managed to examine.
 
 PYTHON_PATH_FOUND: Final = 7
 """``--verify-python-path`` was requested and an unsuppressed finding of
-a rule from PPA001 to PPA008 remains.
+a rule from PPA001 to PPA008, or of PPA011 or PPA012 in a composite
+action, remains.
 
 PPA009 and PPA010 never set it: they say the scan could not prove a
-command safe, not that it is unsafe.
+command safe, not that it is unsafe. PPA011 and PPA012 in a workflow
+never set it either: a job sees its own environment.
 """
 
 STDERR_MERGE_FOUND: Final = 8

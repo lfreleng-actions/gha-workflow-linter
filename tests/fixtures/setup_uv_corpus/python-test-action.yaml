@@ -1,0 +1,52 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The setup-uv step of lfreleng-actions/python-test-action
+# action.yaml at f2e1a0961f75f785b5bc116f5b4d616ac9727864,
+# as #448 pins it, comments included.
+runs:
+  using: composite
+  steps:
+    - name: 'Install uv and provision Python'
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        # uv is the sole Python provisioner for this action. We do NOT
+        # use actions/setup-python alongside it, because doing so caused
+        # an interpreter / stdlib version skew that segfaulted CPython
+        # at runtime: setup-python installed Python 3.12.13 into the
+        # hostedtoolcache while setup-uv resolved 'python-version: 3.12'
+        # to a different patch (e.g. the system 3.12.3 on Ubuntu noble
+        # or its own python-build-standalone build). The resulting
+        # .venv/bin/python advertised one patch version while loading
+        # stdlib from another, mixing ABIs in a way CPython does not
+        # support.
+        #
+        # UV_PYTHON_PREFERENCE=only-managed (set on every step that
+        # invokes uv/uvx) forces uv to ignore any ambient Python on the
+        # runner and use exclusively a python-build-standalone build
+        # matching inputs.python_version. Combined with
+        # 'activate-environment: true', this gives a single source of
+        # truth: setup-uv downloads (or restores from cache) the
+        # managed interpreter, creates and activates .venv against it,
+        # prepends .venv/bin to PATH, and exports VIRTUAL_ENV. All
+        # subsequent 'uv pip install' calls (without --system) and the
+        # 'python -m pytest' invocation in the test step resolve to
+        # that same interpreter and its site-packages.
+        python-version: "${{ inputs.python_version }}"
+        activate-environment: true
+        enable-cache: true
+        # Scope dependency globs to inputs.path_prefix so monorepos with
+        # multiple Python projects do not invalidate this action's cache
+        # on changes to unrelated subprojects, and so distinct
+        # subprojects do not collide on the same cache key.
+        cache-dependency-glob: |
+          ${{ inputs.path_prefix }}/pyproject.toml
+          ${{ inputs.path_prefix }}/setup.py
+          ${{ inputs.path_prefix }}/setup.cfg
+          ${{ inputs.path_prefix }}/requirements*.txt
+          ${{ inputs.path_prefix }}/uv.lock
+          ${{ inputs.path_prefix }}/tox.ini
+      env:
+        UV_PYTHON_PREFERENCE: only-managed

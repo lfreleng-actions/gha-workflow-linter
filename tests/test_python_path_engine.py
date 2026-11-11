@@ -14,9 +14,13 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from typing import TYPE_CHECKING
 import unittest
 
 from gha_workflow_linter.python_path import _engine as audit
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 PLANTED_MARKER = "PLANTED-CODE-RAN"
 
@@ -24,6 +28,11 @@ PLANTED_MARKER = "PLANTED-CODE-RAN"
 def rules(text: str, kind: str = "script") -> list[str]:
     """The rule of each finding in ``text``."""
     return [f.rule for f in audit.scan_text(text, kind, "repo", "file")]
+
+
+def rules_before_ppa011(text: str, kind: str = "script") -> list[str]:
+    """The rule of each finding in ``text``, PPA011 and PPA012 left out."""
+    return [r for r in rules(text, kind) if r not in ("PPA011", "PPA012")]
 
 
 def action_step(line: str) -> str:
@@ -1663,7 +1672,7 @@ class UvTest(unittest.TestCase):
             (step("with:", "  working-directory: src"), ["PPA008"]),
         ):
             with self.subTest(text=text):
-                self.assertEqual(rules(text, "action"), expected)
+                self.assertEqual(rules_before_ppa011(text, "action"), expected)
 
 
 class ContextTest(unittest.TestCase):
@@ -2900,7 +2909,10 @@ class ReviewRoundFourTest(unittest.TestCase):
         head = "on: push\njobs:\n  a:\n    steps:\n"
         uses = "      - uses: astral-sh/setup-uv@v1"
         mark = "# python-path-audit: ignore"
-        self.assertEqual(rules(head + uses + "\n", "workflow"), ["PPA008"])
+        self.assertEqual(
+            rules(head + uses + "\n", "workflow"),
+            ["PPA008", "PPA011", "PPA012"],
+        )
         self.assertEqual(rules(f"{head}{uses}  {mark}\n", "workflow"), [])
         self.assertEqual(rules(f"{head}      {mark}\n{uses}\n", "workflow"), [])
 
@@ -3467,9 +3479,9 @@ class ReviewRoundNineTest(unittest.TestCase):
     def test_setup_uv_owner_in_any_case(self) -> None:
         """GitHub resolves the action's owner and name in any case."""
         for uses, expected in (
-            ("Astral-Sh/setup-uv@abc", ["PPA008"]),
-            ("ASTRAL-SH/SETUP-UV@abc", ["PPA008"]),
-            ("astral-sh/setup-uv@abc", ["PPA008"]),
+            ("Astral-Sh/setup-uv@abc", ["PPA008", "PPA011", "PPA012"]),
+            ("ASTRAL-SH/SETUP-UV@abc", ["PPA008", "PPA011", "PPA012"]),
+            ("astral-sh/setup-uv@abc", ["PPA008", "PPA011", "PPA012"]),
             ("astral-sh/setup-uv-other@abc", []),
         ):
             with self.subTest(uses=uses):
@@ -4419,3 +4431,609 @@ class ReviewRoundElevenTest(unittest.TestCase):
             ),
             [],
         )
+
+
+#: The guarded setup-uv inputs this repository's own action.yaml uses.
+GUARDED_WITH = {
+    "working-directory": "${{ github.action_path }}",
+    "tool-bin-dir": "${{ runner.temp }}/gha-workflow-linter/bin",
+    "enable-cache": "false",
+}
+#: The guarded setup-uv step environment, as action.yaml sets it.
+GUARDED_ENV = {
+    "UV_NO_CONFIG": "'1'",
+    "UV_NO_PROJECT": "'1'",
+    "UV_PYTHON_PREFERENCE": "lookup-disabled",
+    "UV_PYTHON_ARCH": "''",
+    "UV_PYTHON_INSTALL_DIR": "${{ runner.temp }}/gha-workflow-linter/python",
+}
+#: Leave a key out of the guarded step.
+DROP = None
+#: The step before setup-uv that refuses an inherited UV_NO_MODIFY_PATH,
+#: as action.yaml writes it.
+REFUSAL_STEP = (
+    "    - shell: bash\n"
+    "      run: |\n"
+    '        if [[ -n "${UV_NO_MODIFY_PATH+set}" ]]; then\n'
+    "          exit 1\n"
+    "        fi\n"
+)
+INHERITED = "UV_NO_MODIFY_PATH may be inherited; refuse it in an earlier step"
+
+
+def setup_uv_step(
+    inputs: Mapping[str, str | None] | None = None,
+    env: Mapping[str, str | None] | None = None,
+    kind: str = "action",
+    before: str = REFUSAL_STEP,
+) -> str:
+    """A file holding the guarded setup-uv step, changed.
+
+    Args:
+        inputs: ``with:`` values to set, or ``DROP`` to remove.
+        env: Step ``env:`` values to set, or ``DROP`` to remove.
+        kind: ``action`` or ``workflow``.
+        before: Steps to put ahead of it in an action; the refusal
+            step by default.
+
+    Returns:
+        The file's text; each value is written as given.
+    """
+
+    def merged(
+        base: dict[str, str], changes: Mapping[str, str | None] | None
+    ) -> dict[str, str]:
+        out = dict(base)
+        for key, value in (changes or {}).items():
+            if value is None:
+                out.pop(key, None)
+            else:
+                out[key] = value
+        return out
+
+    pad = "        " if kind == "workflow" else "      "
+    lines = [f"{pad[:-2]}- uses: astral-sh/setup-uv@{'0' * 40}"]
+    for name, values in (
+        ("with", merged(GUARDED_WITH, inputs)),
+        ("env", merged(GUARDED_ENV, env)),
+    ):
+        if values:
+            lines.append(f"{pad}{name}:")
+            lines += [f"{pad}  {key}: {value}" for key, value in values.items()]
+    body = "\n".join(lines) + "\n"
+    if kind == "workflow":
+        return "on: push\njobs:\n  a:\n    runs-on: x\n    steps:\n" + body
+    return "runs:\n  using: composite\n  steps:\n" + before + body
+
+
+def caller_findings(text: str, kind: str = "action") -> list[tuple[str, str]]:
+    """Each PPA011 and PPA012 finding in ``text``, with its detail."""
+    return [
+        (f.rule, f.detail)
+        for f in audit.scan_text(text, kind, "repo", "file")
+        if f.rule in ("PPA011", "PPA012")
+    ]
+
+
+class SetupUvCallerTest(unittest.TestCase):
+    """PPA011 and PPA012: a setup-uv step the caller's environment steers."""
+
+    def test_guarded_step_is_clean(self) -> None:
+        self.assertEqual(rules(setup_uv_step(), "action"), [])
+
+    def test_repository_action_is_clean(self) -> None:
+        """This repository's own action.yaml pins the guarded step."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "action.yaml"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(caller_findings(text), [])
+
+    def test_default_step_reports_both(self) -> None:
+        text = "runs:\n  steps:\n    - uses: astral-sh/setup-uv@v6\n"
+        self.assertEqual(
+            [rule for rule, _ in caller_findings(text)], ["PPA011", "PPA012"]
+        )
+
+    def test_each_failed_guard_is_named(self) -> None:
+        """One guard broken at a time; the detail names it."""
+        cases: tuple[
+            tuple[Mapping[str, str | None], Mapping[str, str | None], str],
+            ...,
+        ] = (
+            (
+                {},
+                {"UV_PYTHON_PREFERENCE": DROP},
+                "UV_PYTHON_PREFERENCE is not set to an invalid value",
+            ),
+            *(
+                (
+                    {},
+                    {"UV_PYTHON_PREFERENCE": valid},
+                    f"UV_PYTHON_PREFERENCE {valid!r} lets uv look up an "
+                    "interpreter",
+                )
+                for valid in (
+                    "only-managed",
+                    "managed",
+                    "system",
+                    "only-system",
+                )
+            ),
+            ({}, {"UV_PYTHON_ARCH": DROP}, "UV_PYTHON_ARCH is not set to ''"),
+            ({}, {"UV_PYTHON_ARCH": "x86_64"}, "UV_PYTHON_ARCH is not ''"),
+            (
+                {"python-arch": "x64"},
+                {},
+                "the python-arch input is set",
+            ),
+            ({"enable-cache": DROP}, {}, "enable-cache is not false"),
+            ({"enable-cache": "auto"}, {}, "enable-cache is not false"),
+            ({"enable-cache": "true"}, {}, "enable-cache is not false"),
+            (
+                {"activate-environment": "true"},
+                {},
+                "activate-environment is not false",
+            ),
+            (
+                {},
+                {"UV_NO_MODIFY_PATH": "'1'"},
+                "UV_NO_MODIFY_PATH is set on the step",
+            ),
+            (
+                {},
+                {"UV_NO_MODIFY_PATH": "''"},
+                "UV_NO_MODIFY_PATH is set on the step",
+            ),
+        )
+        for inputs, env, detail in cases:
+            with self.subTest(inputs=inputs, env=env):
+                self.assertEqual(
+                    caller_findings(setup_uv_step(inputs, env)),
+                    [("PPA011", detail)],
+                )
+
+    def test_install_dir_from_the_caller(self) -> None:
+        """setup-uv puts UV_PYTHON_INSTALL_DIR on PATH ahead of its uv."""
+        detail = [("PPA011", "UV_PYTHON_INSTALL_DIR comes from the caller")]
+        for value, kind in (
+            (DROP, "action"),
+            ("${{ env.UV_PYTHON_INSTALL_DIR }}", "action"),
+            ("${{ inputs.python-dir }}", "action"),
+            ("~/.local/share/uv/python", "action"),
+            ("python", "action"),
+            ("$RUNNER_TEMP/python", "action"),
+            ("${{ runner.temp }}/../python", "action"),
+            # Windows splits directories on a backslash too.
+            ("${{ runner.temp }}/..\\repo\\python", "action"),
+            ("${{ runner.temp }}/python:.", "action"),
+            ("${{ runner.temp }}/python;.", "action"),
+            ('"${{ runner.temp }}/python\\n."', "action"),
+            ('"${{ runner.temp }}/python\\r."', "action"),
+            ("' ${{ runner.temp }}/python'", "action"),
+            ("${{ github.action_path }}/python", "workflow"),
+        ):
+            with self.subTest(value=value, kind=kind):
+                inputs: dict[str, str | None] = {}
+                if kind == "workflow":
+                    inputs["working-directory"] = "${{ runner.temp }}"
+                    inputs["tool-bin-dir"] = "${{ runner.temp }}/bin"
+                text = setup_uv_step(
+                    inputs, {"UV_PYTHON_INSTALL_DIR": value}, kind
+                )
+                self.assertEqual(caller_findings(text, kind), detail)
+
+    def test_install_dir_in_an_accepted_place(self) -> None:
+        for value in (
+            "${{ runner.temp }}",
+            "${{ runner.temp }}/python",
+            "${{ github.action_path }}/python",
+            ">-\n          ${{ runner.temp }}/python",
+        ):
+            with self.subTest(value=value):
+                text = setup_uv_step({}, {"UV_PYTHON_INSTALL_DIR": value})
+                self.assertEqual(caller_findings(text), [])
+
+    def test_guards_that_hold(self) -> None:
+        for inputs in (
+            {"activate-environment": "false"},
+            {"enable-cache": "'false'"},
+            {"python-version": "'3.12'"},
+        ):
+            with self.subTest(inputs=inputs):
+                self.assertEqual(caller_findings(setup_uv_step(inputs)), [])
+
+    def test_first_failed_guard_is_named(self) -> None:
+        text = setup_uv_step({"enable-cache": DROP}, {"UV_PYTHON_ARCH": DROP})
+        self.assertEqual(
+            caller_findings(text),
+            [("PPA011", "UV_PYTHON_ARCH is not set to ''")],
+        )
+
+    def test_python_version_exports_uv_python(self) -> None:
+        text = setup_uv_step(
+            {"python-version": "'3.12'"}, {"UV_PYTHON_PREFERENCE": DROP}
+        )
+        self.assertEqual(
+            caller_findings(text),
+            [
+                (
+                    "PPA011",
+                    "exports UV_PYTHON to later steps of the caller's job",
+                )
+            ],
+        )
+
+    def test_uv_system_python_searches_path(self) -> None:
+        text = setup_uv_step(
+            {"enable-cache": DROP}, {"UV_SYSTEM_PYTHON": "'1'"}
+        )
+        self.assertEqual(
+            caller_findings(text),
+            [("PPA011", "enable-cache is not false; searches PATH")],
+        )
+        self.assertEqual(
+            caller_findings(setup_uv_step({}, {"UV_SYSTEM_PYTHON": "'1'"})),
+            [],
+        )
+
+    def test_expressions_fail_their_guard(self) -> None:
+        unread = "is an expression the scan cannot read"
+        cases: tuple[
+            tuple[Mapping[str, str | None], Mapping[str, str | None], str],
+            ...,
+        ] = (
+            (
+                {},
+                {"UV_PYTHON_PREFERENCE": "${{ inputs.preference }}"},
+                f"UV_PYTHON_PREFERENCE {unread}",
+            ),
+            (
+                {},
+                {"UV_PYTHON_ARCH": "${{ inputs.arch }}"},
+                f"UV_PYTHON_ARCH {unread}",
+            ),
+            (
+                {"enable-cache": "${{ inputs.cache }}"},
+                {},
+                f"enable-cache {unread}",
+            ),
+            (
+                {"activate-environment": "${{ inputs.activate }}"},
+                {},
+                f"activate-environment {unread}",
+            ),
+        )
+        for inputs, env, detail in cases:
+            with self.subTest(inputs=inputs, env=env):
+                self.assertEqual(
+                    caller_findings(setup_uv_step(inputs, env)),
+                    [("PPA011", detail)],
+                )
+
+    def test_tool_bin_dir_in_an_accepted_place(self) -> None:
+        for value in (
+            "${{ runner.temp }}",
+            "${{ runner.temp }}/bin",
+            "${{ github.action_path }}/bin",
+        ):
+            with self.subTest(value=value):
+                text = setup_uv_step({"tool-bin-dir": value})
+                self.assertEqual(caller_findings(text), [])
+
+    def test_tool_bin_dir_elsewhere(self) -> None:
+        outside = (
+            "tool-bin-dir is outside the runner's temp directory and the "
+            "action path"
+        )
+        for value, kind, detail in (
+            (
+                DROP,
+                "action",
+                "no tool-bin-dir: setup-uv adds a bin directory the caller's "
+                "HOME or XDG_* settings name to PATH",
+            ),
+            ("bin", "action", outside),
+            ("~/.local/bin", "action", outside),
+            ("${{ inputs.bin }}", "action", outside),
+            ("${{ runner.temp }}/../bin", "action", outside),
+            # Windows splits directories on a backslash too.
+            ("${{ runner.temp }}/..\\repo\\repo\\bin", "action", outside),
+            ("'${{ runner.temp }}/bin\\..\\..\\repo'", "action", outside),
+            ("${{ runner.temp }}/bin\\..", "action", outside),
+            ("${{ github.action_path }}\\..\\bin", "action", outside),
+            # setup-uv expands no shell variable, so these name
+            # directories under the working directory.
+            ("$RUNNER_TEMP/bin", "action", outside),
+            ("${RUNNER_TEMP}/bin", "action", outside),
+            ("$GITHUB_ACTION_PATH/bin", "action", outside),
+            ("$RUNNER_TEMPX/bin", "action", outside),
+            ("$HOME/bin", "action", outside),
+            # A composite action's env context is the caller job's.
+            ("${{ env.UV_TOOL_BIN_DIR }}", "action", outside),
+            # A workflow has no action path.
+            ("${{ github.action_path }}/bin", "workflow", outside),
+            ("$GITHUB_ACTION_PATH/bin", "workflow", outside),
+        ):
+            with self.subTest(value=value, kind=kind):
+                inputs: dict[str, str | None] = {"tool-bin-dir": value}
+                if kind == "workflow":
+                    inputs["working-directory"] = "${{ runner.temp }}"
+                text = setup_uv_step(inputs, kind=kind)
+                self.assertEqual(
+                    caller_findings(text, kind), [("PPA012", detail)]
+                )
+
+    def test_literal_paths_do_not_hold(self) -> None:
+        """A drive-less path can land in the checkout on Windows.
+
+        On a Windows runner, /a/repo/repo/bin resolves against the
+        working directory's drive, as D:\\a\\repo\\repo\\bin, inside
+        the caller's checkout, so only an expression root holds.
+        """
+        outside = (
+            "tool-bin-dir is outside the runner's temp directory and the "
+            "action path"
+        )
+        install = [("PPA011", "UV_PYTHON_INSTALL_DIR comes from the caller")]
+        for value in (
+            "/a/repo/repo/bin",
+            "/opt/uv/bin",
+            "\\a\\repo\\repo\\bin",
+            "'\\opt\\uv\\bin'",
+        ):
+            with self.subTest(guard="tool-bin-dir", value=value):
+                text = setup_uv_step({"tool-bin-dir": value})
+                self.assertEqual(caller_findings(text), [("PPA012", outside)])
+            with self.subTest(guard="UV_PYTHON_INSTALL_DIR", value=value):
+                text = setup_uv_step({}, {"UV_PYTHON_INSTALL_DIR": value})
+                self.assertEqual(caller_findings(text), install)
+
+    def test_tool_bin_dir_path_separators(self) -> None:
+        """core.addPath() adds each entry a separator or break makes."""
+        detail = (
+            "tool-bin-dir holds a PATH separator or line break, so "
+            "setup-uv adds more than one directory to PATH"
+        )
+        for value in (
+            "${{ runner.temp }}/bin:.",
+            "${{ runner.temp }}/bin;.",
+            '"${{ runner.temp }}/bin\\n."',
+            '"${{ runner.temp }}/bin\\r."',
+            "${{ github.action_path }}/bin:${{ runner.temp }}",
+        ):
+            with self.subTest(value=value):
+                text = setup_uv_step({"tool-bin-dir": value})
+                self.assertEqual(caller_findings(text), [("PPA012", detail)])
+
+    def test_with_values_are_trimmed(self) -> None:
+        """setup-uv trims each input, as core.getInput() does."""
+        outside = (
+            "tool-bin-dir is outside the runner's temp directory and the "
+            "action path"
+        )
+        block = "\n" + " " * 10
+        for inputs, expected in (
+            (
+                {"tool-bin-dir": "'${{ github.action_path }}/.. '"},
+                [("PPA012", outside)],
+            ),
+            ({"tool-bin-dir": "' ${{ runner.temp }}/bin '"}, []),
+            ({"tool-bin-dir": '"${{ runner.temp }}/bin\\t"'}, []),
+            ({"tool-bin-dir": f"|{block}${{{{ runner.temp }}}}/bin"}, []),
+            ({"tool-bin-dir": f">{block}${{{{ runner.temp }}}}/bin"}, []),
+            ({"enable-cache": "'false '"}, []),
+            ({"enable-cache": f"|{block}false"}, []),
+            ({"activate-environment": "' false'"}, []),
+        ):
+            with self.subTest(inputs=inputs):
+                self.assertEqual(
+                    caller_findings(setup_uv_step(inputs)), expected
+                )
+
+    def test_env_values_keep_their_whitespace(self) -> None:
+        """uv reads a step env value as written; only inputs are trimmed."""
+        text = setup_uv_step({}, {"UV_PYTHON_ARCH": "' '"})
+        self.assertEqual(
+            caller_findings(text), [("PPA011", "UV_PYTHON_ARCH is not ''")]
+        )
+
+    def test_input_names_in_any_case(self) -> None:
+        """setup-uv reads its inputs as upper-cased INPUT_* variables."""
+        for inputs, detail in (
+            (
+                {"ACTIVATE-ENVIRONMENT": "true"},
+                [("PPA011", "activate-environment is not false")],
+            ),
+            (
+                {"Python-Arch": "x64"},
+                [("PPA011", "the python-arch input is set")],
+            ),
+            (
+                {"enable-cache": DROP, "ENABLE-CACHE": "false"},
+                [],
+            ),
+            (
+                {
+                    "tool-bin-dir": DROP,
+                    "TOOL-BIN-DIR": "${{ runner.temp }}/bin",
+                },
+                [],
+            ),
+            (
+                {"tool-bin-dir": DROP, "TOOL-BIN-DIR": "bin"},
+                [
+                    (
+                        "PPA012",
+                        "tool-bin-dir is outside the runner's temp "
+                        "directory and the action path",
+                    )
+                ],
+            ),
+        ):
+            with self.subTest(inputs=inputs):
+                self.assertEqual(caller_findings(setup_uv_step(inputs)), detail)
+
+    def test_env_names_in_any_case(self) -> None:
+        """Windows reads environment names in any case; Linux does not.
+
+        A name that weakens the step counts in any case. A guard holds
+        only under its exact name, and fails when the step also sets
+        it in another case, since Windows then keeps one of the two.
+        """
+        twice = "is set in more than one case"
+        for inputs, env, detail in (
+            (
+                {},
+                {"uv_no_modify_path": "'1'"},
+                "UV_NO_MODIFY_PATH is set on the step",
+            ),
+            (
+                {"enable-cache": DROP},
+                {"uv_system_python": "'1'"},
+                "enable-cache is not false; searches PATH",
+            ),
+            (
+                {},
+                {"UV_PYTHON_ARCH": DROP, "uv_python_arch": "''"},
+                "UV_PYTHON_ARCH is not set to ''",
+            ),
+            (
+                {},
+                {"uv_python_preference": "managed"},
+                f"UV_PYTHON_PREFERENCE {twice}",
+            ),
+            ({}, {"Uv_Python_Arch": "x64"}, f"UV_PYTHON_ARCH {twice}"),
+            (
+                {},
+                {"uv_python_install_dir": "/home/user/python"},
+                f"UV_PYTHON_INSTALL_DIR {twice}",
+            ),
+        ):
+            with self.subTest(env=env):
+                self.assertEqual(
+                    caller_findings(setup_uv_step(inputs, env)),
+                    [("PPA011", detail)],
+                )
+
+    def test_ignore_mark_covers_them(self) -> None:
+        text = "runs:\n  steps:\n    - uses: astral-sh/setup-uv@v6\n"
+        mark = "  # python-path-audit: ignore"
+        self.assertEqual(caller_findings(text.rstrip("\n") + mark + "\n"), [])
+        self.assertNotEqual(caller_findings(text), [])
+
+
+class SetupUvInheritedModifyPathTest(unittest.TestCase):
+    """A composite action inherits its caller's UV_NO_MODIFY_PATH.
+
+    setup-uv honours it at any value, and a step cannot unset it, so an
+    earlier run: step must refuse it: one whose text names it and holds
+    ``exit 1``, matched as text rather than analysed as shell.
+    """
+
+    def test_action_without_a_refusal_step(self) -> None:
+        self.assertEqual(
+            caller_findings(setup_uv_step(before="")), [("PPA011", INHERITED)]
+        )
+
+    def test_refusal_steps_that_do_not_count(self) -> None:
+        later = setup_uv_step(before="") + REFUSAL_STEP
+        no_exit = REFUSAL_STEP.replace("exit 1", "exit 0")
+        unnamed = REFUSAL_STEP.replace("UV_NO_MODIFY_PATH", "UV_OTHER")
+        exit_ten = REFUSAL_STEP.replace("exit 1", "exit 10")
+        for name, text in (
+            ("after setup-uv", later),
+            ("no exit 1", setup_uv_step(before=no_exit)),
+            ("names another variable", setup_uv_step(before=unnamed)),
+            ("exit 10", setup_uv_step(before=exit_ten)),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(caller_findings(text), [("PPA011", INHERITED)])
+
+    def test_refusal_step_matched_as_text(self) -> None:
+        """Any shell's step counts, and nothing proves the step works."""
+        for before in (
+            REFUSAL_STEP.replace("shell: bash", "shell: pwsh"),
+            "    - run: echo UV_NO_MODIFY_PATH; exit 1\n",
+            "    - run: 'test -z \"$UV_NO_MODIFY_PATH\" || exit 1'\n",
+        ):
+            with self.subTest(before=before):
+                self.assertEqual(
+                    caller_findings(setup_uv_step(before=before)), []
+                )
+
+    def test_refusal_step_on_the_same_line(self) -> None:
+        """Earlier means earlier in the steps sequence, not on a line."""
+        refusal = "{run: 'echo UV_NO_MODIFY_PATH; exit 1'}"
+        setup_uv = (
+            f"{{uses: astral-sh/setup-uv@{'0' * 40}, with: {{"
+            "working-directory: '${{ github.action_path }}', "
+            "tool-bin-dir: '${{ runner.temp }}/bin', enable-cache: false}, "
+            "env: {UV_PYTHON_PREFERENCE: lookup-disabled, UV_PYTHON_ARCH: '', "
+            "UV_PYTHON_INSTALL_DIR: '${{ runner.temp }}/python'}}"
+        )
+        before = f"runs: {{using: composite, steps: [{refusal}, {setup_uv}]}}\n"
+        after = f"runs: {{using: composite, steps: [{setup_uv}, {refusal}]}}\n"
+        self.assertEqual(caller_findings(before), [])
+        self.assertEqual(caller_findings(after), [("PPA011", INHERITED)])
+
+    def test_step_setting_it_still_fails_after_a_refusal(self) -> None:
+        text = setup_uv_step({}, {"UV_NO_MODIFY_PATH": "'1'"})
+        self.assertEqual(
+            caller_findings(text),
+            [("PPA011", "UV_NO_MODIFY_PATH is set on the step")],
+        )
+
+    def test_workflow_needs_no_refusal_step(self) -> None:
+        """A job's environment is its own: only the step decides."""
+        inputs = {
+            "working-directory": "${{ runner.temp }}",
+            "tool-bin-dir": "${{ runner.temp }}/bin",
+        }
+        env = {"UV_PYTHON_INSTALL_DIR": "${{ runner.temp }}/python"}
+        self.assertEqual(
+            caller_findings(setup_uv_step(inputs, env, "workflow"), "workflow"),
+            [],
+        )
+        env["UV_NO_MODIFY_PATH"] = "'1'"
+        self.assertEqual(
+            caller_findings(setup_uv_step(inputs, env, "workflow"), "workflow"),
+            [("PPA011", "UV_NO_MODIFY_PATH is set on the step")],
+        )
+
+
+#: Composite actions holding the setup-uv steps #448 pins, one each.
+SETUP_UV_CORPUS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "setup_uv_corpus"
+)
+
+
+def corpus_rules(name: str) -> list[str]:
+    """The PPA011 and PPA012 rules the corpus action ``name`` reports."""
+    path = os.path.join(SETUP_UV_CORPUS, f"{name}.yaml")
+    with open(path, encoding="utf-8") as handle:
+        return [rule for rule, _ in caller_findings(handle.read())]
+
+
+class SetupUvCorpusTest(unittest.TestCase):
+    """The lfreleng-actions setup-uv steps #448 pins, by commit."""
+
+    def test_unguarded_steps_report_both(self) -> None:
+        """tox-run-action's ``${{ env.UV_TOOL_BIN_DIR }}`` is the caller's."""
+        names = (
+            "dependamerge",
+            "python-test-action",
+            "standalone-linting-action",
+            "tox-run-action",
+        )
+        self.assertEqual(
+            {name: corpus_rules(name) for name in names},
+            dict.fromkeys(names, ["PPA011", "PPA012"]),
+        )
+
+    def test_step_without_a_refusal_reports_ppa011(self) -> None:
+        """Its other guards hold, but an inherited UV_NO_MODIFY_PATH."""
+        self.assertEqual(corpus_rules("pypi-version-check-action"), ["PPA011"])
+
+    def test_guarded_step_reports_neither(self) -> None:
+        """This repository's action.yaml refuses UV_NO_MODIFY_PATH first."""
+        self.assertEqual(corpus_rules("gha-workflow-linter"), [])

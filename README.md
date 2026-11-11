@@ -879,7 +879,8 @@ under a rate limit and when no action calls exist to check:
 # Report findings (the default); never fails the run
 gha-workflow-linter lint --python-path report
 
-# Fail with exit status 7 on a finding of PPA001 to PPA008
+# Fail with exit status 7 on a finding of PPA001 to PPA008, or of
+# PPA011 or PPA012 in a composite action
 gha-workflow-linter lint --verify-python-path
 
 # Skip the check
@@ -905,12 +906,129 @@ run, and with which flags, needs a person.
 | `PPA008` | setup-uv works in the workspace                                          | Set `working-directory` to `${{ github.action_path }}` or `${{ runner.temp }}`                                     |
 | `PPA009` | unresolved: the command's effect depends on a value the scan cannot read | A notice: confirm the value by hand, or suppress it with a reason                                                  |
 | `PPA010` | not fully scanned: shell the parser could not read                       | A notice: simplify the shell, or suppress it with a reason                                                         |
+| `PPA011` | setup-uv runs an interpreter the caller's environment chooses            | Use the guarded step in [setup-uv and the caller's environment](#setup-uv-and-the-callers-environment)             |
+| `PPA012` | setup-uv adds a directory from the caller's environment to PATH          | Set `tool-bin-dir` under `${{ runner.temp }}` or `${{ github.action_path }}`, as the guarded step does             |
 
 <!-- markdownlint-enable MD013 -->
 
 The rule identifiers and messages come from the scan engine and stay
 stable across releases. Each finding names its file's `kind`:
 `action` for composite action metadata, `workflow`, or `script`.
+
+#### setup-uv and the caller's environment
+
+A composite action inherits its caller's job environment, so an
+earlier step of that job, through `$GITHUB_ENV` or `$GITHUB_PATH`, can
+choose what an `astral-sh/setup-uv` step in the action runs. `PPA011`
+and `PPA012` judge each setup-uv step from its own `with:` inputs and
+step `env:`, and, in a composite action, from the text of the earlier
+`run:` steps, with no shell analysis.
+
+uv 0.13.5 reads these variables to choose an interpreter, as the
+Evidence section of #448 records them:
+
+- `PATH`
+- `UV_PYTHON`
+- `UV_PYTHON_SEARCH_PATH`
+- `VIRTUAL_ENV`
+- `CONDA_PREFIX`
+- `CONDA_DEFAULT_ENV`
+- `CONDA_ROOT`
+- `UV_INTERNAL__PARENT_INTERPRETER`
+- `UV_INTERNAL__TEST_PYTHON_MANAGED`
+- `PYTHONEXECUTABLE`
+- `__PYVENV_LAUNCHER__`
+- `UV_SYSTEM_PYTHON`
+- `UV_MANAGED_PYTHON`
+- `UV_PYTHON_PREFERENCE`
+- `UV_PROJECT_ENVIRONMENT`
+
+Check this list against the uv release a step installs: a later
+release can read more.
+
+The rules rest on these facts about setup-uv v10.3.3, which a reader
+can check against later uv and setup-uv releases:
+
+1. With the inputs below, `uv python find` is the one uv call
+   setup-uv makes, and it executes the interpreter that call
+   returns. A `UV_PYTHON_PREFERENCE` value uv does not accept makes
+   uv refuse its arguments before any lookup; setup-uv then reports
+   the Python version as `unknown`.
+2. An inherited `UV_PYTHON_ARCH` makes setup-uv probe uv, so the step
+   sets it to `''`; the `python-arch` input does the same.
+3. With the cache on, the post-step runs `uv cache prune`.
+4. `activate-environment` creates and activates a virtual environment
+   with uv, and `python-version` exports `UV_PYTHON` to later steps of
+   the caller's job.
+5. With `UV_NO_MODIFY_PATH` set, to any value, setup-uv leaves its own
+   uv off `PATH` but still starts a bare `uv python find`, so the
+   caller's `PATH` picks the uv that runs. A step cannot unset an
+   inherited variable: this repository's Action refuses to run.
+6. Without `tool-bin-dir`, setup-uv adds a bin directory from the
+   caller's `HOME` or `XDG_*` settings to `PATH`.
+7. setup-uv adds `UV_PYTHON_INSTALL_DIR` to `PATH` after its own uv,
+   and `core.addPath` prepends, so an inherited directory sits ahead
+   of the downloaded uv when setup-uv starts a bare `uv python find`.
+
+The guarded step, with the refusal step ahead of it, as this
+repository's own `action.yaml` writes them:
+
+```yaml
+- name: "Refuse an inherited UV_NO_MODIFY_PATH"
+  shell: bash
+  run: |
+    if [[ -n "${UV_NO_MODIFY_PATH+set}" ]]; then
+      echo "::error::Unset UV_NO_MODIFY_PATH before this action"
+      exit 1
+    fi
+- uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+  with:
+    working-directory: ${{ github.action_path }}
+    tool-bin-dir: ${{ runner.temp }}/my-action/bin
+    enable-cache: false
+  env:
+    UV_NO_CONFIG: "1"
+    UV_NO_PROJECT: "1"
+    UV_PYTHON_PREFERENCE: "lookup-disabled"
+    UV_PYTHON_ARCH: ""
+    UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/my-action/python
+```
+
+`PPA011` reports a setup-uv step unless each of these holds, and names
+the first that fails:
+
+- step `env` sets `UV_PYTHON_PREFERENCE` to a literal outside the four
+  valid values;
+- step `env` sets `UV_PYTHON_ARCH: ''`, and the `python-arch` input is
+  absent;
+- `enable-cache` is the literal `false`;
+- `activate-environment` is absent or `false`;
+- the step does not set `UV_NO_MODIFY_PATH`, and, in a composite
+  action, an earlier `run:` step of the same file refuses an inherited
+  one: its text names `UV_NO_MODIFY_PATH` and contains `exit 1`.
+  Otherwise the finding says the caller may pass it. In a workflow the
+  step alone decides, since a job's environment is its own;
+- step `env` sets `UV_PYTHON_INSTALL_DIR` under `${{ runner.temp }}`
+  or, in a composite action, `${{ github.action_path }}`, with no
+  `PATH` separator or line break; otherwise the finding says it comes
+  from the caller.
+
+A step with `python-version` in place of the invalid preference
+reports that it exports `UV_PYTHON` to later steps of the caller's
+job, and one that sets `UV_SYSTEM_PYTHON` adds that uv searches
+`PATH`. A `${{ }}` expression fails its condition, since the scan
+cannot read it, and the finding says so.
+
+`PPA012` reports a setup-uv step whose `tool-bin-dir` is absent, holds
+a `PATH` separator or a line break, or does not lie under
+`${{ runner.temp }}` or, in a composite action,
+`${{ github.action_path }}`. setup-uv expands no shell variable in
+the input, so `$RUNNER_TEMP/bin` names a directory below the working
+directory and the check reports it, as it does any other expression,
+such as `${{ env.UV_TOOL_BIN_DIR }}`: a composite action's `env`
+context is the caller job's. The check matches `with:` input names in
+any case, as setup-uv reads them; see **Scope and limits** for how
+it reads step `env:` names.
 
 #### Suppressing a deliberate run
 
@@ -945,8 +1063,9 @@ carries them with `"suppressed": true`. The engine's own
 #### Python path failures and exit codes
 
 Without `--verify-python-path` the check reports and leaves the exit
-code alone. With it, an unsuppressed finding of `PPA001` to `PPA008`
-makes the run exit `7`, and a file the check could not read makes it
+code alone. With it, an unsuppressed finding of `PPA001` to `PPA008`,
+or of `PPA011` or `PPA012` in a composite action, makes the run exit
+`7`, and a file the check could not read makes it
 exit `1`: enforcement that never looked must not pass. A check that
 fails outright does the same under `--verify-python-path`, and
 otherwise logs the failure and lets the run continue.
@@ -969,10 +1088,48 @@ annotates the right file.
 2. **Unread values.** The check reports an interpreter reached
    through a value it cannot read, such as a step output or an
    unknown variable, as `PPA009`, without judging it.
-3. **The caller's environment.** The caller's environment choosing
-   the interpreter (`PATH`, `UV_PYTHON`, `VIRTUAL_ENV` and similar)
-   falls outside the current rules; #448 tracks it.
-4. **Out of scope.** The check does not read `.pth` files or Python
+3. **The caller's environment.** `PPA011` and `PPA012` cover a
+   setup-uv step the caller's environment can steer. #448 tracks the
+   rest: the uv command rule and the bare-`python` rule. The `PPA011`
+   guard list follows the source of setup-uv v10.3.3 and may need
+   revisiting for a later release. The rules read a step's values
+   this way:
+   - **Trimming.** A `with:` value loses its leading and trailing
+     white space and line breaks, as `core.getInput()` trims it, so
+     `'false '` and a block scalar's final newline count as setup-uv
+     reads them. A step `env:` value stays as written: uv reads it so.
+   - **Separators.** A `tool-bin-dir` whose literal text holds `:`,
+     `;` or a line break is a `PPA012` finding wherever it starts:
+     setup-uv would add more than one directory to `PATH`. Such a
+     `UV_PYTHON_INSTALL_DIR` fails its `PPA011` guard the same way.
+   - **Expressions.** A `${{ }}` value is one the scan cannot read, so
+     it fails its condition; `tool-bin-dir` and
+     `UV_PYTHON_INSTALL_DIR` must start with `${{ runner.temp }}` or
+     `${{ github.action_path }}`.
+   - **Literal paths.** A literal `tool-bin-dir` or
+     `UV_PYTHON_INSTALL_DIR` fails these two guards even when absolute:
+     on Windows `/a/repo/repo/bin` lands in the checkout.
+   - **Windows paths.** A step may run on Windows, which
+     splits a path on `\` as well as `/`, so a `tool-bin-dir` or
+     `UV_PYTHON_INSTALL_DIR` with a `..` component between either
+     slash, such as `${{ runner.temp }}/..\repo\bin`, counts as
+     outside.
+   - **Refusal step.** The check matches the step that refuses an
+     inherited `UV_NO_MODIFY_PATH` by its text alone: a `run:` step
+     before the setup-uv step, in any shell, that names the variable
+     and contains `exit 1`. It does not prove that the step refuses
+     the variable, or that it runs.
+   - **Name case.** Windows reads environment names in any case,
+     Linux as written. A step `env:` name that weakens the step,
+     `UV_NO_MODIFY_PATH` or `UV_SYSTEM_PYTHON`, counts in any case. A
+     guard needs its exact name, and fails when the step also sets it
+     in another case, since the platform then decides which value uv
+     reads.
+4. **Workflow findings do not gate.** In a workflow file the linter
+   reports `PPA011` and `PPA012` but they never fail a run: a job
+   sees its own environment, and a `$GITHUB_ENV` write earlier in the
+   same job falls outside these rules.
+5. **Out of scope.** The check does not read `.pth` files or Python
    source files.
 
 ### What Gets Scanned
@@ -1161,7 +1318,8 @@ repos:
       # Offline; fails the commit on a high or medium stderr merge
       - id: gha-stderr-merge
       # Offline; fails the commit on a Python run that takes in
-      # workspace files (PPA001 to PPA008)
+      # workspace files (PPA001 to PPA008, and PPA011 and PPA012
+      # in a composite action)
       - id: gha-python-path
 ```
 
@@ -1768,7 +1926,7 @@ file given with `config-file` still decides it.
 | `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
 | `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
 | `python-path`         | Python-path check mode: `off` or `report`                     | No       |         |
-| `verify-python-path`  | Fail when a python-path finding PPA001 to PPA008 remains      | No       | `false` |
+| `verify-python-path`  | Fail on PPA001 to PPA008, or PPA011/PPA012 in an action       | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 

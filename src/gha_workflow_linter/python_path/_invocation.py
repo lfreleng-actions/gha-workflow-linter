@@ -20,6 +20,8 @@ RULES = {
     "PPA008": "setup-uv works in the workspace",
     "PPA009": "unresolved: the command's effect depends on a value the scan cannot read",
     "PPA010": "not fully scanned: shell the parser could not read",
+    "PPA011": "setup-uv runs an interpreter the caller's environment chooses",
+    "PPA012": "setup-uv adds a directory from the caller's environment to PATH",
 }
 INTERPRETER = re.compile(r"^(?:.*/)?python(?:3(?:\.\d+t?)?)?$")
 # Each ${{ }} expression in a run: block reaches the parser as a word

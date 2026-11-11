@@ -1059,13 +1059,17 @@ def _with_python_paths(
 
 
 def _python_path_finding(
-    rule: str, *, suppressed: bool = False, path: str = "ci.yaml"
+    rule: str,
+    *,
+    suppressed: bool = False,
+    path: str = "ci.yaml",
+    kind: str = "workflow",
 ) -> dict[str, Any]:
     return {
         "repo": "repo",
         "path": path,
         "line": 9,
-        "kind": "workflow",
+        "kind": kind,
         "rule": rule,
         "detail": "the working directory leads sys.path",
         "snippet": "python3 -m json.tool f",
@@ -1136,6 +1140,24 @@ class TestPythonPath:
 
         assert "::error file=ci.yaml,line=9,title=python path PPA001" in stdout
         assert "::notice file=ci.yaml,line=9,title=python path PPA010" in (
+            stdout
+        )
+
+    def test_setup_uv_rules_are_errors_in_an_action_alone(
+        self, run_action: Any
+    ) -> None:
+        """PPA011 and PPA012 fail a run only in a composite action."""
+        document = _with_python_paths(
+            _python_path_finding("PPA011"),
+            _python_path_finding("PPA012", path="action.yaml", kind="action"),
+        )
+
+        stdout = run_action({"verify-python-path": "true"}, document).stdout
+
+        assert "::warning file=ci.yaml,line=9,title=python path PPA011" in (
+            stdout
+        )
+        assert "::error file=action.yaml,line=9,title=python path PPA012" in (
             stdout
         )
 

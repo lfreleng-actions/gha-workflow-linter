@@ -52,7 +52,8 @@ design accepts false positives and handles them with the ignore mark
 (`python-path-audit: ignore`) or the linter's allowlist; it does not
 accept a silent pass on a construct the tool did not model, short of
 the known limits listed below. The ignore mark applies to every rule,
-PPA008 included, on the finding's line or the line above. Where a case
+PPA008, PPA011 and PPA012 included, on the finding's line or the line
+above. Where a case
 raises a question, the answer that reports PPA009 is the right one.
 
 Rules:
@@ -156,7 +157,24 @@ Rules:
    case, as GitHub does. A `setup-uv` `working-directory` lies outside
    when it names such a path, or `${{ runner.temp }}` (or, in an action,
    `${{ github.action_path }}`) alone or followed by a `/` subpath
-   that does not climb.
+   that does not climb. PPA012 judges its `tool-bin-dir` the same way,
+   after reporting one whose literal text holds `:`, `;` or a line
+   break, except that it needs the expression root: a literal path,
+   even an absolute one, is outside, since a drive-less one such as
+   `/a/repo/repo/bin` lands in the checkout on a Windows runner.
+   setup-uv expands no shell variable there, so `$RUNNER_TEMP` is a
+   literal. PPA011 reads its `with:` inputs, by lower-cased name
+   and trimmed as `core.getInput()` trims them, and step `env:`
+   alone, as written; it judges the step's `UV_PYTHON_INSTALL_DIR`
+   as PPA012 judges `tool-bin-dir`. Since a step may run on
+   Windows, both also report a `..` component split on `\`,
+   and PPA011 counts `UV_NO_MODIFY_PATH` and `UV_SYSTEM_PYTHON` in
+   any case while a guard needs its exact name, set once. In an
+   action, PPA011 also needs an earlier `run:` step, in any shell,
+   whose text names `UV_NO_MODIFY_PATH` and contains `exit 1`, since
+   the action inherits the caller's; the reader keeps every step's
+   `run:` text for this literal match, which proves nothing about
+   the step.
 7. **A parse error anywhere in a block is PPA010 "not fully
    scanned"** on that block, never a clean result, and so is a command
    nested past the walk's depth limit. The reader replaces `${{ }}`

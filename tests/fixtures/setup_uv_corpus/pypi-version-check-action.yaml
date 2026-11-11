@@ -1,0 +1,34 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The setup-uv step of lfreleng-actions/pypi-version-check-action
+# action.yaml at 60b2b9df2ed134670d4975743b196be0ed8aef16,
+# as #448 pins it, comments included.
+runs:
+  using: composite
+  steps:
+    - name: "Install uv"
+      id: setup-uv
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        version-file: "${{ github.action_path }}/requirements/uv.txt"
+        working-directory: "${{ github.action_path }}"
+        tool-bin-dir: "${{ runner.temp }}/pypi-version-check-action/bin"
+        enable-cache: false
+      env:
+        UV_NO_CONFIG: '1'
+        UV_NO_PROJECT: '1'
+        UV_PYTHON_PREFERENCE: 'lookup-disabled'
+        UV_PYTHON_ARCH: ''
+        UV_PYTHON_INSTALL_DIR: >-
+          ${{ runner.temp }}/pypi-version-check-action/python
+
+    # The interpreter is one uv installs, from its own pinned and
+    # hash-checked builds, into a directory outside the workspace. uv
+    # runs with an empty environment plus what it needs, so no caller
+    # setting (PATH, VIRTUAL_ENV, CONDA_PREFIX, UV_*, PYTHON*) can pick
+    # the interpreter; proxy and certificate settings pass through for
+    # self-hosted runners. The path found must lie in the install
+    # directory all the same.

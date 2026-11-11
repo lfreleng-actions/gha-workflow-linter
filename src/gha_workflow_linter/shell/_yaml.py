@@ -152,12 +152,37 @@ def line_starts(text: str, first: int) -> list[tuple[int, int]]:
 
 
 @dataclass
+class SetupUv:
+    """One ``astral-sh/setup-uv`` step: its ``uses:`` line and settings.
+
+    ``inputs`` holds its ``with:`` values, by lower-cased name and
+    trimmed as setup-uv reads them, and ``env`` its own step ``env:``,
+    by name and value as written, each scalar as a word; ``directory``
+    is the ``working-directory`` input, or None when it is not set.
+    ``step`` is the step's position among the file's steps.
+    """
+
+    line: int
+    directory: Word | None
+    inputs: dict[str, Word] = field(default_factory=dict)
+    env: dict[str, Word] = field(default_factory=dict)
+    step: int = 0
+
+
+@dataclass
 class YamlFile:
-    """What the scan reads from one workflow or action file."""
+    """What the scan reads from one workflow or action file.
+
+    ``runs`` holds every step's ``run:`` text with the step's position
+    among the file's steps, whatever its shell; ``blocks`` only the
+    POSIX-style ones. Positions follow the file's order, so one step
+    comes before another even when flow style puts both on one line.
+    """
 
     blocks: list[Block] = field(default_factory=list)
     pythonpath: list[tuple[int, Word]] = field(default_factory=list)
-    setup_uv: list[tuple[int, Word | None]] = field(default_factory=list)
+    setup_uv: list[SetupUv] = field(default_factory=list)
+    runs: list[tuple[int, str]] = field(default_factory=list)
     expressions: list[Expression] = field(default_factory=list)
 
 
@@ -276,6 +301,37 @@ def child(node: yaml.Node | None, key: str) -> yaml.Node | None:
     return found
 
 
+# What JavaScript's String.prototype.trim() strips: ECMAScript white
+# space (Unicode Zs, tab, vertical tab, form feed, BOM) and line
+# terminators. core.getInput() trims every action input with it.
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005"
+    "\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def scalar_words(
+    node: yaml.Node | None, table: list[Expression], *, inputs: bool = False
+) -> dict[str, Word]:
+    """A mapping's scalar values as words, by key; later keys win.
+
+    ``inputs`` reads the mapping as action inputs, the way
+    ``core.getInput()`` does: it lower-cases the keys, which reach the
+    action as upper-cased ``INPUT_*`` variables whatever their case,
+    and trims each value as JavaScript's ``trim()`` does.
+    """
+    words: dict[str, Word] = {}
+    if isinstance(node, yaml.MappingNode):
+        for name, value in node.value:
+            key, text = scalar(name), scalar(value)
+            if key is None or text is None:
+                continue
+            if inputs:
+                key, text = key.lower(), text.strip(JS_WHITESPACE)
+            words[key] = literal_word(text, table)
+    return words
+
+
 def key_line(node: yaml.MappingNode, key: str) -> int:
     """The 1-based line of ``key`` in a mapping node."""
     for name, _value in node.value:
@@ -293,6 +349,7 @@ class _Reader:
         self.found = found
         self.active: set[int] = set()
         self.visits = 0
+        self.steps = 0
 
     def visit(
         self,
@@ -350,15 +407,26 @@ class _Reader:
                     )
         if not step:
             return
+        self.steps += 1
         # GitHub matches an action's owner and name in any case.
         action, at, _ref = (scalar(child(node, "uses")) or "").partition("@")
         if at and action.lower() == "astral-sh/setup-uv":
-            directory = scalar(child(child(node, "with"), "working-directory"))
-            word = None if directory is None else literal_word(directory, table)
-            self.found.setup_uv.append((key_line(node, "uses"), word))
+            inputs = scalar_words(child(node, "with"), table, inputs=True)
+            self.found.setup_uv.append(
+                SetupUv(
+                    key_line(node, "uses"),
+                    inputs.get("working-directory"),
+                    inputs,
+                    scalar_words(env, table),
+                    self.steps,
+                )
+            )
         run = child(node, "run")
-        if isinstance(run, yaml.ScalarNode) and self.is_shell(node, ancestors):
-            self.found.blocks.append(self.block(node, run, ancestors))
+        if isinstance(run, yaml.ScalarNode):
+            # Every step's text, whatever its shell, for literal matches.
+            self.found.runs.append((self.steps, str(run.value)))
+            if self.is_shell(node, ancestors):
+                self.found.blocks.append(self.block(node, run, ancestors))
 
     def scopes(
         self, node: yaml.MappingNode, ancestors: list[yaml.MappingNode]
