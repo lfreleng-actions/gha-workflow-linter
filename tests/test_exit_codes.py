@@ -956,15 +956,20 @@ class TestStderrMerge:
 
 
 class TestPythonPath:
-    """--verify-python-path fails on PPA001 to PPA008, never PPA009/10."""
+    """--verify-python-path fails on PPA001 to PPA008, never PPA009/10.
+
+    PPA011 and PPA012 fail it in a composite action alone.
+    """
 
     @staticmethod
-    def _result(rule: str, *, suppressed: bool = False) -> PythonPathResult:
+    def _result(
+        rule: str, *, suppressed: bool = False, kind: str = "script"
+    ) -> PythonPathResult:
         finding = PythonPathFinding(
             "repo",
             "a.sh",
             1,
-            "script",
+            kind,
             rule,
             "detail",
             "snippet",
@@ -986,6 +991,18 @@ class TestPythonPath:
     def test_verify_fails_on_an_enforceable_rule(self, rule: str) -> None:
         code = self._code(self._result(rule), verify=True)
         assert code == exit_codes.PYTHON_PATH_FOUND
+
+    @pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
+    @pytest.mark.parametrize("rule", ["PPA011", "PPA012"])
+    def test_setup_uv_rules_fail_in_an_action(self, rule: str) -> None:
+        code = self._code(self._result(rule, kind="action"), verify=True)
+        assert code == exit_codes.PYTHON_PATH_FOUND
+
+    @pytest.mark.parametrize("rule", ["PPA011", "PPA012"])
+    def test_setup_uv_rules_never_fail_in_a_workflow(self, rule: str) -> None:
+        """A job sees its own environment."""
+        code = self._code(self._result(rule, kind="workflow"), verify=True)
+        assert code == exit_codes.SUCCESS
 
     @pytest.mark.parametrize("rule", ["PPA009", "PPA010"])
     def test_unresolved_and_unscanned_never_fail(self, rule: str) -> None:

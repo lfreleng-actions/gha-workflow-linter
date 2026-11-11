@@ -1,0 +1,36 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The setup-uv step of lfreleng-actions/dependamerge
+# action.yaml at af020a26b4d8668340b1ebfb820a9a66296e7698,
+# as #448 pins it, comments included.
+runs:
+  using: composite
+  steps:
+    - name: "Set up uv"
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      # No step sees a token it does not use: tokens inherited from the
+      # caller's job are masked here, as on every step below. So are
+      # BASH_ENV, which bash sources before a step's first line, and
+      # SHELLOPTS, which could switch on xtrace and log the token.
+      env:
+        GITHUB_TOKEN: ""
+        GH_TOKEN: ""
+        BASH_ENV: ""
+        SHELLOPTS: ""
+      with:
+        # An exact uv, so the commit a caller pins decides the uv that
+        # runs too. Left unset, setup-uv reads a version from the
+        # caller's workspace or installs the latest release.
+        version: "0.12.21"
+        working-directory: ${{ github.action_path }}
+        # Only a download from github.com would use it; the default is
+        # the Astral mirror.
+        github-token: ""
+        # The project lives in the action's directory, not the caller's
+        # workspace, and a shared cache is a poisoning risk for a step
+        # holding a write token.
+        enable-cache: false
+        ignore-empty-workdir: true

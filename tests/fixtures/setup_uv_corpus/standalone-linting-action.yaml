@@ -1,0 +1,44 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The setup-uv step of lfreleng-actions/standalone-linting-action
+# action.yaml at 1efe7e278d0874ae91e5c668adec92350f7db76e,
+# as #448 pins it, comments included.
+runs:
+  using: composite
+  steps:
+    - name: 'Set up uv'
+      # Located by this name in tests/test-no-checkout.sh, which
+      # checks that cache_hooks gates its cache. 'auto' is setup-uv's
+      # own default, so cache_hooks 'true' keeps its usual behaviour.
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      # setup-uv runs 'uv python find' in working-directory to report
+      # a Python version, and runs the interpreter it finds. In the
+      # workspace that would be a .venv in the checkout or any parent
+      # of it; the action directory holds no .venv, and for a
+      # published action neither do its parents. UV_NO_CONFIG, on
+      # this step only, also keeps a .python-version out of the
+      # lookup. Unlike the python-version input, which would set
+      # UV_PYTHON for every later step of the caller's job,
+      # working-directory exports nothing of its own. UV_SYSTEM_PYTHON,
+      # also on this step only, skips virtual environments, including
+      # a workspace .venv above an action checked out inside the
+      # workspace (a caller using 'uses: ./'). UV_NO_PROJECT does the
+      # same for the requires-python of a pyproject.toml there.
+      #
+      # It is also where setup-uv reads a uv required-version and
+      # cache-dir, and where the cache glob is rooted. The action pins
+      # the version itself, and what it caches (pyyaml, prek) follows
+      # action.yaml, so the cache, when cache_hooks enables it, is
+      # keyed on that file rather than on the caller's project files.
+      env:
+        UV_NO_CONFIG: '1'
+        UV_SYSTEM_PYTHON: '1'
+        UV_NO_PROJECT: '1'
+      with:
+        version: '0.13.4'
+        enable-cache: ${{ inputs.cache_hooks == 'true' && 'auto' || 'false' }}
+        working-directory: ${{ github.action_path }}
+        cache-dependency-glob: 'action.yaml'

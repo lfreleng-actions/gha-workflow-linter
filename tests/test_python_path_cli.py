@@ -767,3 +767,70 @@ def test_block_keys_are_built_once_per_block(
 
     assert [f.rule for f in result.findings] == ["PPA001"]
     assert len(built) <= 2
+
+
+#: A setup-uv step with every input left at its default but the
+#: working directory, so PPA011 and PPA012 alone apply.
+DEFAULT_SETUP_UV = (
+    "- uses: astral-sh/setup-uv@v6\n"
+    "  with:\n"
+    "    working-directory: ${{ runner.temp }}\n"
+)
+
+
+def _indented(text: str, depth: int) -> str:
+    return "".join(" " * depth + line for line in text.splitlines(True))
+
+
+def _action_with_default_setup_uv(root: Path) -> Path:
+    (root / ".git").mkdir()
+    (root / "action.yaml").write_text(
+        "---\nruns:\n  using: composite\n  steps:\n"
+        + _indented(DEFAULT_SETUP_UV, 4)
+    )
+    return root
+
+
+def _workflow_with_default_setup_uv(root: Path) -> Path:
+    workflows = root / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (root / ".git").mkdir()
+    (workflows / "ci.yaml").write_text(
+        "---\non: push\njobs:\n  a:\n    runs-on: x\n    steps:\n"
+        + _indented(DEFAULT_SETUP_UV, 6)
+    )
+    return root
+
+
+@pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
+def test_default_setup_uv_fails_verify_in_an_action(tmp_path: Path) -> None:
+    """A composite action inherits the caller's environment."""
+    code, output = _lint(
+        _action_with_default_setup_uv(tmp_path), "--verify-python-path"
+    )
+
+    assert code == exit_codes.PYTHON_PATH_FOUND
+    assert "PPA011  " in output
+    assert "PPA012  " in output
+
+
+def test_default_setup_uv_never_fails_verify_in_a_workflow(
+    tmp_path: Path,
+) -> None:
+    """A job sees its own environment: the findings never gate."""
+    code, _ = _lint(
+        _workflow_with_default_setup_uv(tmp_path), "--verify-python-path"
+    )
+
+    assert code == exit_codes.SUCCESS
+
+
+@pytest.mark.xfail(strict=True, reason="PPA011 and PPA012 not yet added")
+def test_default_setup_uv_is_reported_in_a_workflow(tmp_path: Path) -> None:
+    root = _workflow_with_default_setup_uv(tmp_path)
+
+    _, output = _lint(root, "--verify-python-path")
+    rules = [f.rule for f in scan_repository(root).findings]
+
+    assert rules == ["PPA011", "PPA012"]
+    assert "PPA011 notice" in output
