@@ -1161,7 +1161,6 @@ class TestPythonPath:
             stdout
         )
 
-    @pytest.mark.xfail(strict=True, reason="PPA013 lands with #467")
     def test_steered_uv_is_an_error_in_an_action_alone(
         self, run_action: Any
     ) -> None:

@@ -7,7 +7,9 @@ The block is a step's ``run:`` text or a whole script. The scan parses
 it with tree-sitter-bash and hands each command to the per-command
 judgement in ``_commands``. No fact is carried from one command to
 another: no directory trust from a ``cd`` or the step's
-``working-directory``, and no variable values.
+``working-directory``. Variable values count in one place:
+``_trust.ShellFacts`` reads a name assigned once that holds a trusted
+interpreter (PPA013).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from gha_workflow_linter.shell._tree import node_text as _node_text
 
 from ._commands import CommandChecks
 from ._invocation import IGNORE_MARK, RULES
+from ._trust import ShellFacts
 from ._words import Finding
 
 if TYPE_CHECKING:
@@ -50,6 +53,7 @@ class BlockScan(CommandChecks):
         self.out = out
         self.src = block.text.encode()
         self.tree = Parser(BASH).parse(self.src)
+        self.facts = ShellFacts(self.src, self.tree.root_node, block.env)
         self.seen: set[tuple[int, str, str]] = set()
 
     # -- reporting

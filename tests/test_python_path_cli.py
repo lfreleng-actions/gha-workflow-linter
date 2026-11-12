@@ -738,8 +738,11 @@ def test_equal_steps_with_different_env_are_told_apart(
 
     result = scan_repository(tmp_path)
 
+    # PPA013 holds for both steps; PPA006 only for the second.
     assert [(f.rule, f.suppressed) for f in result.findings] == [
-        ("PPA006", True)
+        ("PPA013", True),
+        ("PPA006", True),
+        ("PPA013", True),
     ]
     assert result.enforced() == []
 

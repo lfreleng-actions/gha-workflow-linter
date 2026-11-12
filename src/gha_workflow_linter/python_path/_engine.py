@@ -20,6 +20,8 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
+from tree_sitter import Parser
+
 from gha_workflow_linter.shell import _yaml
 from gha_workflow_linter.shell._discovery import (
     candidate_files,
@@ -27,16 +29,21 @@ from gha_workflow_linter.shell._discovery import (
     explicit_kind,
     shebang_names_shell,
 )
+from gha_workflow_linter.shell._tree import BASH
 from gha_workflow_linter.shell._yaml import Expr, Lit, swapped_text
 
 from ._block import BlockScan
 from ._invocation import (
     IGNORE_MARK,
     RULES,
+    TRUSTED_PYTHON,
+    TRUSTED_UV,
     expression_marker,
     is_outside_path,
 )
 from ._pythonpath import SELF, TEXT, UNKNOWN, WORKSPACE, Token
+from ._trust import ACTION_OUTPUTS, ShellFacts, Trust
+from ._uv import uv_env_problem
 from ._words import Block, Finding
 
 if TYPE_CHECKING:
@@ -119,9 +126,25 @@ def _scan_text(text: str, kind: str, repo: str, relpath: str) -> list[Finding]:
         return out
     lines = _yaml.split_lines(text)
     found = _yaml.read(text, kind)
+    trust = file_trust(found, kind)
     for yblock in found.blocks:
-        block = yaml_block(yblock, found.expressions, kind)
+        block = yaml_block(yblock, found.expressions, kind, trust)
         BlockScan(block, repo, relpath, lines, out).run()
+    for setting in found.uv_env:
+        marks = lines[max(setting.line - 2, 0) : setting.line]
+        detail = uv_env_problem(
+            setting.name,
+            env_value(setting.value, found.expressions, trust, setting),
+            setting.scope,
+        )
+        if detail is None or any(IGNORE_MARK in line for line in marks):
+            continue
+        snippet = lines[setting.line - 1].strip()
+        out.append(
+            Finding(
+                repo, relpath, setting.line, kind, "PPA013", detail, snippet
+            )
+        )
     for step in found.setup_uv:
         marks = lines[max(step.line - 2, 0) : step.line]
         if any(IGNORE_MARK in line for line in marks):
@@ -419,25 +442,95 @@ def install_dir_guard(step: _yaml.SetupUv, kind: str) -> str | None:
     return None
 
 
+def file_trust(found: _yaml.YamlFile, kind: str) -> Trust:
+    """The step outputs each later step of the file may trust.
+
+    Read in step order, so a ``run:`` step's outputs may come from
+    an earlier step's trusted output. A step with an ``if:`` or
+    ``continue-on-error:`` may leave its outputs empty, so it gives
+    none.
+    """
+    trust = Trust()
+    for step in found.steps:
+        if not step.id:
+            continue
+        outputs = dict(ACTION_OUTPUTS.get(step.action, {}))
+        if step.conditional:
+            outputs = {}
+        elif step.block >= 0:
+            block = yaml_block(
+                found.blocks[step.block], found.expressions, kind, trust
+            )
+            outputs = {}
+            if "GITHUB_OUTPUT" in block.text:
+                src = block.text.encode()
+                root = Parser(BASH).parse(src).root_node
+                facts = ShellFacts(src, root, block.env)
+                outputs = facts.outputs()
+        trust.add(step.job, step.id, step.step, outputs)
+    return trust
+
+
+def env_value(
+    word: _yaml.Word,
+    expressions: list[_yaml.Expression],
+    trust: Trust | None,
+    where: _yaml.Block | _yaml.UvEnv,
+) -> str | None:
+    """A YAML env value as the engine reads it; None for an expression.
+
+    A whole value that is one trusted step output is its marker.
+    """
+    if all(isinstance(p, Lit) for p in word.parts):
+        return "".join(p.text for p in word.parts if isinstance(p, Lit))
+    head = word.parts[0]
+    if trust is not None and len(word.parts) == 1 and isinstance(head, Expr):
+        return trust.resolve(
+            expressions[head.index].text, where.job, where.step
+        )
+    return None
+
+
 def yaml_block(
     yblock: _yaml.Block,
     expressions: list[_yaml.Expression],
     kind: str,
+    trust: Trust | None = None,
 ) -> Block:
     """A run: step as a block: expressions marked and env read.
 
     Each ``${{ }}`` expression becomes a word the parser reads as
     plain text, named for what it is when that matters, between
-    private-use characters no text in the file can be taken for.
+    private-use characters no text in the file can be taken for. A
+    step output ``trust`` traces is marked trusted; one that stands
+    for a literal path is that path, its offset kept in ``traced``.
     """
+    traced_at: dict[int, tuple[int, str]] = {}
+    shift = 0  # swapped text's bytes minus the marked text's, so far
 
     def swap(m: re.Match[str]) -> str:
+        nonlocal shift
+        name = choose(m)
+        shift += len(name.encode()) - len(m.group(0).encode())
+        return name
+
+    def choose(m: re.Match[str]) -> str:
         name = MARKER_NAMES.get(m.group(1))
         if m.group(1) == "action_path" and kind == "workflow":
             # A workflow has no action path: the expression is empty.
             name = expression_marker("OTHER")
         if name is None:
             expr = expressions[int(m.group(2))].text
+            traced = (
+                None
+                if trust is None
+                else trust.resolve(expr, yblock.job, yblock.step)
+            )
+            if traced is not None:
+                if traced not in (TRUSTED_PYTHON, TRUSTED_UV):
+                    at = len(yblock.text[: m.start()].encode()) + shift
+                    traced_at[at] = (at + len(traced.encode()), expr)
+                return traced
             if PYTHON_EXPRESSION.search(expr):
                 marker = "PYTHON"
             elif UV_EXPRESSION.search(expr):
@@ -447,16 +540,12 @@ def yaml_block(
             name = expression_marker(marker)
         return name
 
-    env: dict[str, str | None] = {}
-    for name, word in yblock.env.items():
-        literal = all(isinstance(p, Lit) for p in word.parts)
-        env[name] = (
-            "".join(p.text for p in word.parts if isinstance(p, Lit))
-            if literal
-            else None
-        )
+    env = {
+        name: env_value(word, expressions, trust, yblock)
+        for name, word in yblock.env.items()
+    }
     text, starts = swapped_text(yblock, expressions, swap)
-    return Block(text, yblock.starts[0][1], starts, kind, env)
+    return Block(text, yblock.starts[0][1], starts, kind, env, traced_at)
 
 
 def yaml_tokens(word: _yaml.Word, kind: str) -> list[Token]:

@@ -40,7 +40,13 @@ from . import exit_codes
 from .console import console
 from .directives import Directive, Suppression, find_suppression
 from .python_path._block import BlockScan
-from .python_path._engine import RULES, repo_root_of, scan_text, yaml_block
+from .python_path._engine import (
+    RULES,
+    file_trust,
+    repo_root_of,
+    scan_text,
+    yaml_block,
+)
 from .shell import _yaml
 from .shell._discovery import candidate_files, explicit_kind
 from .shell._tree import BASH, node_text
@@ -71,7 +77,7 @@ __all__ = [
 ENFORCEABLE_RULES = frozenset(f"PPA00{n}" for n in range(1, 9))
 """Rules ``--verify-python-path`` fails on. PPA009 and PPA010 are notices."""
 
-ACTION_ENFORCEABLE_RULES = frozenset({"PPA011", "PPA012"})
+ACTION_ENFORCEABLE_RULES = frozenset({"PPA011", "PPA012", "PPA013"})
 """Rules ``--verify-python-path`` fails on in a composite action alone.
 
 A workflow job sees its own environment, so in a workflow file they
@@ -437,6 +443,7 @@ def _origins(
             covering[number].add(ident)
     yaml_lines = {step.line for step in yaml_file.setup_uv}
     yaml_lines.update(number for number, _word in yaml_file.pythonpath)
+    yaml_lines.update(setting.line for setting in yaml_file.uv_env)
     if all(
         len(keys) == 1 and number not in yaml_lines
         for number, keys in covering.items()
@@ -449,12 +456,17 @@ def _origins(
         return []
     lines = _yaml.split_lines(text)
     scanned: dict[
-        tuple[int, tuple[tuple[str, str | None], ...]], list[Finding]
+        tuple[int, str, tuple[tuple[str, str | None], ...]], list[Finding]
     ] = {}
     queued: dict[tuple[str, ...], deque[int]] = defaultdict(deque)
+    trust = file_trust(yaml_file, kind)
     for block, ident in zip(yaml_file.blocks, ids, strict=True):
-        engine_block = yaml_block(block, yaml_file.expressions, kind)
-        key = (ident, tuple(sorted(engine_block.env.items())))
+        engine_block = yaml_block(block, yaml_file.expressions, kind, trust)
+        key = (
+            ident,
+            engine_block.text,
+            tuple(sorted(engine_block.env.items())),
+        )
         if key not in scanned:
             out: list[Finding] = []
             BlockScan(
@@ -669,7 +681,7 @@ def exit_code(config: Config, result: PythonPathResult | None) -> int:
     Returns:
         ``PYTHON_PATH_FOUND`` when enforcement was requested and an
         unsuppressed finding of a rule from PPA001 to PPA008 remains,
-        or of PPA011 or PPA012 in a composite action,
+        or of PPA011 to PPA013 in a composite action,
         and ``RUNTIME_ERROR`` when enforcement was requested and a file
         could not be read: a check that did not look must not pass.
         PPA009 and PPA010 never count. Without ``verify`` the check

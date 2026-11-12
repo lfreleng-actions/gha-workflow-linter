@@ -39,6 +39,8 @@ from ._invocation import (
     POSITIONAL,
     RULES,
     RUNNERS,
+    TRUSTED_PYTHON,
+    TRUSTED_UV,
     UNKNOWN_EXPRESSION,
     UNREAD_WRAPPER,
     WRAPPERS,
@@ -54,8 +56,10 @@ from ._invocation import (
     wrapper_option,
 )
 from ._pythonpath import TEXT
+from ._trust import plain_name, sole_child
 from ._uv import UvChecks
-from ._words import Word, command_words
+from ._uv import shown as shown_value
+from ._words import Finding, Word, command_words
 
 if TYPE_CHECKING:
     from tree_sitter import Node
@@ -63,6 +67,8 @@ if TYPE_CHECKING:
 
 class CommandChecks(UvChecks):
     """Per-command judgement, mixed into the block scan."""
+
+    out: list[Finding]
 
     def stdout_to_env(self, redirects: list[Node], out: bool) -> bool:
         """Whether standard output reaches $GITHUB_ENV after ``redirects``.
@@ -252,13 +258,23 @@ class CommandChecks(UvChecks):
 
         Returns (texts, origin words); an unknown word is kept as its
         source with a leading marker. ``"$(command -v X)"`` stands for
-        the program X.
+        the program X. A variable the trusted-interpreter model traces
+        stands for its value, and ``"${arr[@]}"`` for its words, each
+        with the word as its origin.
         """
         texts: list[str] = []
+        origins: list[Word] = []
         for word in words:
             if word.literal:
                 texts.append(word.text or "")
+                origins.append(word)
                 continue
+            expanded = self.facts.expand(word.node)
+            if expanded is not None:
+                texts.extend(expanded)
+                origins.extend([word] * len(expanded))
+                continue
+            origins.append(word)
             node = word.node
             inner = node
             if (
@@ -269,7 +285,7 @@ class CommandChecks(UvChecks):
                 inner = node.children[1]
             lookup = self.command_lookup(inner)
             texts.append("\x00" + word.source if lookup is None else lookup)
-        return texts, list(words)
+        return texts, origins
 
     def command_lookup(self, node: Node) -> str | None:
         """The program ``$(command -v X)``, ``$(which X)`` or ``$(type -P X)`` finds."""
@@ -365,19 +381,50 @@ class CommandChecks(UvChecks):
 
         A program name the scan cannot read is PPA009 only when the
         command looks like Python or uv; a path whose last segment it
-        can read is judged by that segment.
+        can read is judged by that segment. A scalar the trusted model
+        expands to a path the scan does not know as Python or uv
+        (``/opt/pypy3``) stays unread, as written, and so does a
+        substituted step output holding one; an array's words are
+        the author's, as if written inline.
         """
         name = texts[start]
+        word = origins[start]
+        substituted = self.substituted(word.node)
+        traced = substituted is not None or (
+            not word.literal
+            and plain_name(self.src, sole_child(word.node)) is not None
+        )
+        if (
+            traced
+            and name not in (TRUSTED_PYTHON, TRUSTED_UV)
+            and not name.startswith("\x00")
+            and not known_program(name)
+        ):
+            name = "\x00" + (substituted or word.source)
         arguments, origin = texts[start + 1 :], origins[start + 1 :]
         unread = name.startswith("\x00")
         written = name[1:] if unread else name
         tail = os.path.basename(written.strip("\"'"))
-        if tail in ("uv", "uvx"):
+        if tail in ("uv", "uvx") or name == TRUSTED_UV:
             self.uv(node, texts, start, assigns, origins)
-        elif INTERPRETER.match(tail) or written.startswith(
-            expression_marker("PYTHON")
+        elif (
+            INTERPRETER.match(tail)
+            or name == TRUSTED_PYTHON
+            or written.startswith(expression_marker("PYTHON"))
         ):
+            found = len(self.out)
             self.python(node, arguments, origin, assigns)
+            # A Python-named expression no trusted step produces is
+            # unresolved, even when its invocation is safe.
+            if len(self.out) == found and written.startswith(
+                expression_marker("PYTHON")
+            ):
+                self.report(
+                    node,
+                    "PPA009",
+                    f"program is {shown_value(written)}, which no trusted step "
+                    "produces; the scan cannot resolve it",
+                )
         elif unread or EXPR_OPEN in written:
             shown = [
                 a[1:].strip("\"'") if a[:1] == "\x00" else a for a in arguments
@@ -389,6 +436,20 @@ class CommandChecks(UvChecks):
                     "PPA009",
                     f"program is {written!r}, which the scan cannot resolve",
                 )
+
+    def substituted(self, node: Node) -> str | None:
+        """A word's source with each traced step output as written.
+
+        None when the word holds no step output the scan substituted.
+        """
+        spans = self.block.traced_within(node.start_byte, node.end_byte)
+        if not spans:
+            return None
+        out = self.src[node.start_byte : node.end_byte]
+        for at, end, expression in reversed(spans):
+            begin, stop = at - node.start_byte, end - node.start_byte
+            out = out[:begin] + expression.encode() + out[stop:]
+        return out.decode("utf-8", "replace")
 
     def dash_before_heredoc(self, node: Node) -> bool:
         """Whether a ``-`` stands last before a heredoc (``"$X" - <<EOF``).
@@ -458,3 +519,9 @@ class CommandChecks(UvChecks):
             else ""
         )
         self.report(node, rule, detail)
+
+
+def known_program(path: str) -> bool:
+    """Whether the last segment of ``path`` names Python or uv."""
+    tail = os.path.basename(path)
+    return tail in ("uv", "uvx") or INTERPRETER.match(tail) is not None

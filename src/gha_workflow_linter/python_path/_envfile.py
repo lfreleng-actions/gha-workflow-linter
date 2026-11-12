@@ -94,6 +94,8 @@ class PythonpathChecks:
     report: Callable[..., None]
     skip_wrappers: Callable[[list[str], list[str]], int]
     dash_before_heredoc: Callable[[Node], bool]
+    uv_env_lines: Callable[[Node, list[list[Token]]], None]
+    uv_env_unread: Callable[[Node, list[str]], None]
 
     def check_pythonpath(
         self, value: Node, at: Node, prefix_self: bool
@@ -335,6 +337,7 @@ class PythonpathChecks:
                 lines.extend(self.heredoc_redirect_lines(stdin))
             elif stdin is not None and stdin.type == "herestring_redirect":
                 lines.extend(self.herestring_lines(stdin))
+        self.uv_env_lines(node, lines)
         self.judge_env_lines(node, lines)
 
     def effective_stdin(self, node: Node, redirects: list[Node]) -> Node | None:
@@ -397,6 +400,7 @@ class PythonpathChecks:
                     "PPA009",
                     ENV_PREFIX + "printf format the scan cannot read",
                 )
+            self.uv_env_unread(node, [word.source for word in args])
             return None
         fmt = args[0].text or ""
         values = list(args[1:])

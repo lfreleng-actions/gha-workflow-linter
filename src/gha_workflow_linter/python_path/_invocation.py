@@ -22,6 +22,7 @@ RULES = {
     "PPA010": "not fully scanned: shell the parser could not read",
     "PPA011": "setup-uv runs an interpreter the caller's environment chooses",
     "PPA012": "setup-uv adds a directory from the caller's environment to PATH",
+    "PPA013": "uv chooses its interpreter from the caller's environment",
 }
 INTERPRETER = re.compile(r"^(?:.*/)?python(?:3(?:\.\d+t?)?)?$")
 # Each ${{ }} expression in a run: block reaches the parser as a word
@@ -34,6 +35,18 @@ EXPR_CLOSE = "\ue003"
 def expression_marker(kind: str) -> str:
     """The word a ``${{ }}`` expression of ``kind`` becomes."""
     return f"{EXPR_OPEN}{kind}{EXPR_CLOSE}"
+
+
+# A value the trusted-interpreter model traces to setup-python's
+# python-path output, a step output written from ``env -i … uv python
+# find``, or setup-uv's uv-path output (``_trust``).
+TRUSTED_PYTHON = expression_marker("TRUSTED_PYTHON")
+TRUSTED_UV = expression_marker("TRUSTED_UV")
+
+
+def is_trusted_python(value: str) -> bool:
+    """A trusted interpreter: a traced value or a literal path outside."""
+    return value == TRUSTED_PYTHON or is_outside_path(value)
 
 
 # A ${{ }} expression whose text the scan cannot know (not a path).
@@ -262,7 +275,7 @@ UNREAD_WRAPPER = (
     "scan does not know)"
 )
 UNSETTLED_ENV = (
-    "env -i, -u, - or a NAME= word the scan cannot read changes the uv settings"
+    "env -u or a NAME= word the scan cannot read changes the uv settings"
 )
 # A NAME=value word the scan cannot read keeps its source, quotes and
 # all, behind a leading NUL.
@@ -346,6 +359,13 @@ class EnvOptions:
     # Those the shell itself assigns (after time or coproc): it
     # expands a leading ~ in them, as in any assignment.
     shell_words: frozenset[int] = frozenset()
+    cleared: bool = False
+
+    def clear(self) -> None:
+        """``env -i`` or ``env -``: only the NAME=value words after it pass."""
+        self.cleared = True
+        self.names.clear()
+        self.kept = frozenset()
 
 
 def env_long(option: str) -> str | None:
@@ -373,7 +393,7 @@ def parse_env(
             i += 1
             break
         if t == "-":
-            out.unsettled = True
+            out.clear()
             i += 1
             continue
         if not t.startswith("-"):
@@ -386,7 +406,9 @@ def parse_env(
                 return out
             if letter in ("C", "u") and "=" not in t:
                 i += 1
-            out.unsettled |= letter in ("i", "u")
+            out.unsettled |= letter == "u"
+            if letter == "i":
+                out.clear()
             continue
         for position, letter in enumerate(t[1:], start=1):
             if letter in ENV_VALUES:
@@ -399,7 +421,8 @@ def parse_env(
             if letter not in ENV_FLAGS:
                 out.end = -1
                 return out
-            out.unsettled |= letter == "i"
+            if letter == "i":
+                out.clear()
     while i < len(texts):
         found = assigned_name(texts[i])
         if found is None:
