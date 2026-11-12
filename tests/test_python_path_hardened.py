@@ -27,7 +27,6 @@ RULES = ("PPA009", "PPA013")
 TEMP_ROOT = expression_marker("TEMP")
 SETUP_PYTHON = "    - id: py\n      uses: actions/setup-python@v5\n"
 PYTHON_PATH = "${{ steps.py.outputs.python-path }}"
-XFAIL = pytest.mark.xfail(strict=True, reason="#469: not yet trusted")
 CORPUS_NAMES = [
     "info-yaml-validate-action",
     "pypi-version-check-action",
@@ -80,27 +79,20 @@ def consumer(script: str) -> str:
 # -- the corpus
 
 
-@pytest.mark.parametrize(
-    "name",
-    [pytest.param(n, marks=XFAIL) for n in CORPUS_NAMES],
-)
+@pytest.mark.parametrize("name", CORPUS_NAMES)
 def test_hardened_consumers_resolve(name: str) -> None:
     """No pinned step reads as PPA009 or PPA013."""
     text = (CORPUS / f"{name}.yaml").read_text()
     assert found(text) == []
 
 
-@pytest.mark.parametrize(
-    "name",
-    [pytest.param(n, marks=XFAIL) for n in CORPUS_NAMES],
-)
+@pytest.mark.parametrize("name", CORPUS_NAMES)
 def test_hardened_corpus_reports_what_main_did(name: str) -> None:
     """Only the setup-uv step's PPA011, which main reports too, remains."""
     text = (CORPUS / f"{name}.yaml").read_text()
     assert {f.split()[0] for f in found(text, None)} == {"PPA011"}
 
 
-@XFAIL
 def test_pypi_output_is_trusted() -> None:
     """pypi-version-check-action's own consumer runs the step's path output.
 
@@ -120,7 +112,6 @@ def test_pypi_output_is_trusted() -> None:
 # -- unset
 
 
-@XFAIL
 def test_literal_unset_keeps_other_names() -> None:
     """``unset NAME`` changes NAME alone."""
     assert found(consumer("unset PYTHONEXECUTABLE __PYVENV_LAUNCHER__")) == []
@@ -133,17 +124,12 @@ CASE = 'for name in $(compgen -e); do\n  case "$name" in\n{arms}  esac\ndone'
 @pytest.mark.parametrize(
     ("arms", "trusted"),
     [
-        pytest.param(
+        (
             "    PYTHON) ;;\n"
             '    PYTHON*|__PYVENV_LAUNCHER__) unset "$name" ;;\n',
             True,
-            marks=XFAIL,
         ),
-        pytest.param(
-            '    PYTHON?*|__PYVENV_LAUNCHER__) unset "$name" ;;\n',
-            True,
-            marks=XFAIL,
-        ),
+        ('    PYTHON?*|__PYVENV_LAUNCHER__) unset "$name" ;;\n', True),
         # The arm matches the interpreter's own name.
         ('    PYTHON*|__PYVENV_LAUNCHER__) unset "$name" ;;\n', False),
         # ;& falls through from PYTHON into the unset.
@@ -155,7 +141,7 @@ CASE = 'for name in $(compgen -e); do\n  case "$name" in\n{arms}  esac\ndone'
         ('    PY[T]HON*) unset "$name" ;;\n', False),
         ('    PYTHON?*) echo; unset "$name" ;;\n', False),
         ('    PYTHON?*) unset "$other" ;;\n', False),
-        pytest.param('    PYTHON?*) unset "${name}" ;;\n', True, marks=XFAIL),
+        ('    PYTHON?*) unset "${name}" ;;\n', True),
         # Unquoted, the name splits on IFS: PYTHONX unsets PYTHON.
         ("    PYTHON?*) unset $name ;;\n", False),
         ("    PYTHON?*) unset ${name} ;;\n", False),
@@ -183,12 +169,8 @@ GREP = (
 @pytest.mark.parametrize(
     ("feed", "trusted"),
     [
-        pytest.param(
-            "grep -E '^(PYTHON.+|__PYVENV_LAUNCHER__)$' || true",
-            True,
-            marks=XFAIL,
-        ),
-        pytest.param("grep -E '^PYTHON.+$'", True, marks=XFAIL),
+        ("grep -E '^(PYTHON.+|__PYVENV_LAUNCHER__)$' || true", True),
+        ("grep -E '^PYTHON.+$'", True),
         ("grep -E '^(PYTHON.*|__PYVENV_LAUNCHER__)$' || true", False),
         ("grep -E '^PYTHON.+$' || echo PYTHON", False),
         ("grep -vE '^X$'", False),
@@ -207,8 +189,8 @@ IFS_GREP = GREP.format(feed="grep -E '^PYTHONX$'")
 @pytest.mark.parametrize(
     ("script", "trusted"),
     [
-        pytest.param(IFS_GREP, True, marks=XFAIL),
-        pytest.param("IFS=X\n" + IFS_GREP, True, marks=XFAIL),
+        (IFS_GREP, True),
+        ("IFS=X\n" + IFS_GREP, True),
         ("IFS=X\n" + IFS_GREP.replace("IFS= ", ""), False),
         # Unquoted, the name read splits on IFS: PYTHONX unsets PYTHON.
         ("IFS=X\n" + IFS_GREP.replace('"${name}"', "$name"), False),
@@ -226,8 +208,11 @@ BACKSLASH_GREP = GREP.format(feed="grep -E '^PY.THON$'")
 @pytest.mark.parametrize(
     ("script", "trusted"),
     [
-        pytest.param(BACKSLASH_GREP, True, marks=XFAIL),
-        (BACKSLASH_GREP.replace("read -r", "read"), False),
+        (BACKSLASH_GREP, True),
+        (
+            BACKSLASH_GREP.replace("read -r", "read"),
+            False,
+        ),
     ],
 )
 def test_grep_filter_needs_read_r(script: str, trusted: bool) -> None:
@@ -294,9 +279,7 @@ def lookup(
 @pytest.mark.parametrize(
     ("appended", "trusted"),
     [
-        pytest.param(
-            "HTTP_PROXY HTTPS_PROXY NO_PROXY SSL_CERT_FILE", True, marks=XFAIL
-        ),
+        ("HTTP_PROXY HTTPS_PROXY NO_PROXY SSL_CERT_FILE", True),
         # Selectors, or allowed names, with the caller's value.
         ("HTTP_PROXY PATH", False),
         ("UV_PYTHON", False),
@@ -344,7 +327,6 @@ def test_forwarded_array_before_an_unread_program(
     assert out == rules
 
 
-@XFAIL
 def test_indirect_read_keeps_step_env_bindings() -> None:
     """``${!name}`` reads: it neither assigns nor makes the step opaque."""
     text = lookup("HTTP_PROXY").replace(
@@ -360,7 +342,7 @@ def test_indirect_read_keeps_step_env_bindings() -> None:
         ("--managed-python --system", []),
         ("--managed-python", []),
         ("--system", []),
-        pytest.param("", ["PPA007"], marks=XFAIL),
+        ("", ["PPA007"]),
     ],
 )
 def test_lookup_workspace_verdict(flags: str, rules: list[str]) -> None:
@@ -374,10 +356,7 @@ EXPORT = '"$UV" export --no-config --locked --python "$PYTHON"'
 
 @pytest.mark.parametrize(
     ("script", "rules"),
-    [
-        pytest.param(f"{EXPORT} --script s.py", [], marks=XFAIL),
-        (EXPORT, ["PPA007"]),
-    ],
+    [(f"{EXPORT} --script s.py", []), (EXPORT, ["PPA007"])],
 )
 def test_script_export_uses_no_project(script: str, rules: list[str]) -> None:
     """``uv export --script`` exports the script's lock, not a project's."""
@@ -395,7 +374,6 @@ def test_script_export_uses_no_project(script: str, rules: list[str]) -> None:
     assert [f.split()[0] for f in found(text, ("PPA007",))] == rules
 
 
-@XFAIL
 def test_runner_temp_values_may_pass() -> None:
     """``${{ runner.temp }}/…`` is outside the workspace; ``..`` is not."""
     assert is_outside_path(f"{TEMP_ROOT}/a/python")
@@ -424,17 +402,12 @@ def venv(bin_value: str, env_dir: str = "${{ runner.temp }}/v") -> str:
 @pytest.mark.parametrize(
     ("bin_value", "trusted"),
     [
-        pytest.param(
+        (
             ">-\n          ${{ runner.os == 'Windows' && 'Scripts/python.exe'"
             " || 'bin/python' }}",
             True,
-            marks=XFAIL,
         ),
-        pytest.param(
-            "${{ runner.os == 'Windows' && 'python.exe' || 'python3' }}",
-            True,
-            marks=XFAIL,
-        ),
+        ("${{ runner.os == 'Windows' && 'python.exe' || 'python3' }}", True),
         (
             "${{ runner.os == 'Windows' && 'Scripts/sh' || 'bin/python' }}",
             False,
@@ -469,7 +442,6 @@ def test_composed_paths_keep_line_breaks() -> None:
     assert found(text) != []
 
 
-@XFAIL
 def test_composed_words_as_command_arguments() -> None:
     """A composed word reads the same used directly or assigned first."""
     choice = "${{ runner.os == 'Windows' && 'python.exe' || 'python3' }}"
@@ -490,7 +462,6 @@ def test_composed_programs_stay_unresolved(script: str) -> None:
     assert [f.split()[0] for f in found(text)] == ["PPA009"]
 
 
-@pytest.mark.xfail(strict=True)
 @pytest.mark.parametrize(
     "script",
     [
@@ -516,7 +487,6 @@ def test_composed_python_programs_read_as_python() -> None:
     assert [f.split()[0] for f in found(text, None)] == ["PPA001"]
 
 
-@XFAIL
 def test_quoted_path_expressions_read_as_inline() -> None:
     """``"$ACTION_PATH"`` reads as ``${{ github.action_path }}`` would."""
     text = action(
@@ -534,7 +504,6 @@ def test_quoted_path_expressions_read_as_inline() -> None:
     assert found(text.replace("github.action_path", "inputs.path")) != []
 
 
-@XFAIL
 def test_leaf_subcommand_operands_are_not_subcommands() -> None:
     """``uv venv DIR``: DIR is an operand, whatever it holds."""
     text = action(
@@ -582,7 +551,6 @@ def test_leaf_operands_quoted_in_part() -> None:
     assert [f.split()[0] for f in found(text)] == ["PPA009"]
 
 
-@XFAIL
 def test_workflow_action_path_is_no_path() -> None:
     """A workflow's ``${{ github.action_path }}`` is empty: no exemption."""
     script = 'uv venv --no-config "${ACTION_PATH}${OPT}"'
@@ -601,7 +569,6 @@ def test_workflow_action_path_is_no_path() -> None:
     assert found(action(step(script, env))) == []
 
 
-@XFAIL
 def test_leaf_operands_under_a_path_expression() -> None:
     """``"${DIR}/v"`` under ``${{ runner.temp }}`` starts with a path."""
     text = action(
@@ -619,11 +586,11 @@ def test_leaf_operands_under_a_path_expression() -> None:
 @pytest.mark.parametrize(
     "wrapper",
     [
-        pytest.param("env -u UV_PYTHON", marks=XFAIL),
-        pytest.param("env --unset=UV_PYTHON", marks=XFAIL),
-        pytest.param("env --unset UV_PYTHON", marks=XFAIL),
-        pytest.param("env --uns=UV_PYTHON", marks=XFAIL),
-        pytest.param("env -uUV_PYTHON", marks=XFAIL),
+        "env -u UV_PYTHON",
+        "env --unset=UV_PYTHON",
+        "env --unset UV_PYTHON",
+        "env --uns=UV_PYTHON",
+        "env -uUV_PYTHON",
     ],
 )
 def test_env_unset_removes_an_inherited_uv_python(wrapper: str) -> None:
@@ -651,7 +618,6 @@ def test_env_unset_then_set_keeps_the_value() -> None:
     assert found(text, ("PPA013",)) == []
 
 
-@XFAIL
 def test_env_unset_unread_drops_wrapper_values() -> None:
     """An unread -u operand may remove an earlier wrapper's UV_PYTHON."""
     texts = ["env", "UV_PYTHON=/usr/bin/python3", "env", "-u", '\x00"$N"']
@@ -660,7 +626,6 @@ def test_env_unset_unread_drops_wrapper_values() -> None:
     assert env_of(texts, texts).names == {"UV_PYTHON": "/usr/bin/python3"}
 
 
-@XFAIL
 @pytest.mark.parametrize("operand", ['"$NAME"', "${{ inputs.name }}"])
 def test_env_unset_unread_drops_a_wrapper_safe_path(operand: str) -> None:
     """PYTHONSAFEPATH set before an unread -u operand may not reach Python."""
@@ -681,28 +646,15 @@ def env_write(script: str) -> str:
         ('echo UV_PYTHON="$PY" >> "$GITHUB_ENV"', True),
         ('printf \'UV_PYTHON=%s\\n\' "$PY" >> "$GITHUB_ENV"', True),
         ('X=/usr/bin/python3\necho UV_PYTHON=$X >> "$GITHUB_ENV"', True),
-        pytest.param('echo UV_PYTHON=$PY >> "$GITHUB_ENV"', False, marks=XFAIL),
-        pytest.param(
-            "printf 'UV_PYTHON=%s\\n' $PY >> \"$GITHUB_ENV\"",
-            False,
-            marks=XFAIL,
-        ),
-        pytest.param(
-            "X='/opt/a b/python'\necho UV_PYTHON=$X >> \"$GITHUB_ENV\"",
-            False,
-            marks=XFAIL,
-        ),
-        pytest.param(
-            "X='/opt/py*'\necho UV_PYTHON=${X} >> \"$GITHUB_ENV\"",
-            False,
-            marks=XFAIL,
-        ),
+        ('echo UV_PYTHON=$PY >> "$GITHUB_ENV"', False),
+        ("printf 'UV_PYTHON=%s\\n' $PY >> \"$GITHUB_ENV\"", False),
+        ("X='/opt/a b/python'\necho UV_PYTHON=$X >> \"$GITHUB_ENV\"", False),
+        ("X='/opt/py*'\necho UV_PYTHON=${X} >> \"$GITHUB_ENV\"", False),
         # ${{ runner.temp }} may hold a blank on a self-hosted runner.
-        pytest.param(
+        (
             'X="${{ runner.temp }}/v/bin/python"\n'
             'printf \'UV_PYTHON=%s\\n\' "$X" >> "$GITHUB_ENV"',
             True,
-            marks=XFAIL,
         ),
         (
             'X="${{ runner.temp }}/v/bin/python"\n'
@@ -731,17 +683,15 @@ def test_unquoted_env_file_values_that_may_split(
             "printf 'UV_PYTHON=%s\\n' $PYTHONPATH >> \"$GITHUB_ENV\"",
             True,
         ),
-        pytest.param(
+        (
             "'/opt/a b/python'",
             "printf 'UV_PYTHON=%s\\n' $PYTHONPATH >> \"$GITHUB_ENV\"",
             False,
-            marks=XFAIL,
         ),
-        pytest.param(
+        (
             "'/opt/a b/python'",
             'echo UV_PYTHON=${PYTHONPATH} >> "$GITHUB_ENV"',
             False,
-            marks=XFAIL,
         ),
     ],
 )
@@ -753,7 +703,6 @@ def test_unquoted_pythonpath_in_env_file_writes(
     assert (found(text, ("PPA013",)) == []) is trusted
 
 
-@XFAIL
 def test_install_output_is_not_an_interpreter() -> None:
     """``uv python install`` prints a path on some uv versions only."""
     text = action(

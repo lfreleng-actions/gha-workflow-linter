@@ -53,7 +53,9 @@ class BlockScan(CommandChecks):
         self.out = out
         self.src = block.text.encode()
         self.tree = Parser(BASH).parse(self.src)
-        self.facts = ShellFacts(self.src, self.tree.root_node, block.env)
+        self.facts = ShellFacts(
+            self.src, self.tree.root_node, block.env, block.choices
+        )
         self.seen: set[tuple[int, str, str]] = set()
 
     # -- reporting

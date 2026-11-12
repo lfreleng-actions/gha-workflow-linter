@@ -42,6 +42,8 @@ def expression_marker(kind: str) -> str:
 # find``, or setup-uv's uv-path output (``_trust``).
 TRUSTED_PYTHON = expression_marker("TRUSTED_PYTHON")
 TRUSTED_UV = expression_marker("TRUSTED_UV")
+# ${{ runner.temp }}: an absolute directory outside the workspace.
+TEMP_ROOT = expression_marker("TEMP")
 
 
 def is_trusted_python(value: str) -> bool:
@@ -360,12 +362,30 @@ class EnvOptions:
     # expands a leading ~ in them, as in any assignment.
     shell_words: frozenset[int] = frozenset()
     cleared: bool = False
+    # Names env -u or --unset removes, unless a later NAME=value sets
+    # them again; ``unset_unread`` when an operand the scan cannot read
+    # may remove any name.
+    removed: set[str] = field(default_factory=set)
+    unset_unread: bool = False
 
     def clear(self) -> None:
         """``env -i`` or ``env -``: only the NAME=value words after it pass."""
         self.cleared = True
         self.names.clear()
         self.kept = frozenset()
+
+    def remove(self, name: str) -> None:
+        """``env -u NAME``: the program does not get NAME.
+
+        An operand the scan cannot read may name any setting, the
+        wrappers' own NAME=value words too, so none keeps its value.
+        """
+        if name.startswith("\x00") or EXPR_OPEN in name:
+            self.unset_unread = True
+            self.names = dict.fromkeys(self.names)
+            return
+        self.removed.add(name)
+        self.names.pop(name, None)
 
 
 def env_long(option: str) -> str | None:
@@ -404,6 +424,12 @@ def parse_env(
             if letter is None or letter == "S":
                 out.end = -1
                 return out
+            if letter == "u":
+                operand = t.partition("=")[2] if "=" in t else None
+                if operand is None and i < len(texts):
+                    operand = texts[i]
+                if operand is not None:
+                    out.remove(operand)
             if letter in ("C", "u") and "=" not in t:
                 i += 1
             out.unsettled |= letter == "u"
@@ -416,7 +442,10 @@ def parse_env(
                     out.end = -1
                     return out
                 out.unsettled |= letter == "u"
-                i += 0 if t[position + 1 :] else 1
+                attached = t[position + 1 :]
+                if letter == "u" and (attached or i < len(texts)):
+                    out.remove(attached or texts[i])
+                i += 0 if attached else 1
                 break
             if letter not in ENV_FLAGS:
                 out.end = -1
@@ -430,6 +459,7 @@ def parse_env(
         unread = texts[i].startswith("\x00")
         out.unsettled |= unread
         out.names[found] = None if unread else texts[i].partition("=")[2]
+        out.removed.discard(found)
         out.words.append(i)
         i += 1
     out.end = i
@@ -589,9 +619,16 @@ def is_outside_path(value: str) -> bool:
 
     It starts with one ``/``, ``posixpath.normpath`` leaves it as it
     is (no ``//``, ``.`` or ``..`` parts), and it is not under a
-    workspace root. An expansion or a ``${{ }}`` expression is not
-    literal, whatever it names.
+    workspace root. ``${{ runner.temp }}`` followed by a literal
+    subpath with no empty, ``.`` or ``..`` part between either slash
+    is one too, as for setup-uv's directories. Any other expansion or
+    ``${{ }}`` expression is not literal, whatever it names.
     """
+    if value.startswith(TEMP_ROOT + "/"):
+        rest = value[len(TEMP_ROOT) + 1 :]
+        return EXPR_OPEN not in rest and not any(
+            part in ("", ".", "..") for part in re.split(r"[/\\]", rest)
+        )
     if not value.startswith("/") or value.startswith("//"):
         return False
     if posixpath.normpath(value) != value.rstrip("/") or EXPR_OPEN in value:

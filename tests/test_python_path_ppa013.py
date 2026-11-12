@@ -526,7 +526,7 @@ def test_lookup_must_pass_the_workspace_rules() -> None:
         ("env -i PATH=/usr/bin uv python find --system --no-config", True),
         ("env -i PATH=/usr/bin uv python find --managed-python 3.12", True),
         ("env -i UV_NO_CONFIG=1 uv python find --system", True),
-        ("env -i uv python install --managed-python 3.12", True),
+        ("env -i uv python install --managed-python 3.12", False),
         ("env -i PATH=/usr/bin uv python find --no-config 3.12", False),
         ("env -i PATH=/usr/bin uv python find --system", False),
         ("env -i VIRTUAL_ENV=/v uv python find --system --no-config", False),

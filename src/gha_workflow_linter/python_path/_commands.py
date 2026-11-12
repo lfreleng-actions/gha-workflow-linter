@@ -56,7 +56,7 @@ from ._invocation import (
     wrapper_option,
 )
 from ._pythonpath import TEXT
-from ._trust import plain_name, sole_child
+from ._trust import array_name, sole_child
 from ._uv import UvChecks
 from ._uv import shown as shown_value
 from ._words import Finding, Word, command_words
@@ -253,14 +253,17 @@ class CommandChecks(UvChecks):
                 return i
         return i
 
-    def expand(self, words: list[Word]) -> tuple[list[str], list[Word]]:
+    def expand(
+        self, words: list[Word], forwarded: bool = True
+    ) -> tuple[list[str], list[Word]]:
         """Literal texts of the words.
 
         Returns (texts, origin words); an unknown word is kept as its
         source with a leading marker. ``"$(command -v X)"`` stands for
         the program X. A variable the trusted-interpreter model traces
         stands for its value, and ``"${arr[@]}"`` for its words, each
-        with the word as its origin.
+        with the word as its origin; unless ``forwarded`` is False, an
+        array a loop extends by indirect read included.
         """
         texts: list[str] = []
         origins: list[Word] = []
@@ -269,7 +272,11 @@ class CommandChecks(UvChecks):
                 texts.append(word.text or "")
                 origins.append(word)
                 continue
-            expanded = self.facts.expand(word.node)
+            expanded = (
+                None
+                if not forwarded and self.facts.forwards(word.node)
+                else self.facts.expand(word.node)
+            )
             if expanded is not None:
                 texts.extend(expanded)
                 origins.extend([word] * len(expanded))
@@ -313,8 +320,19 @@ class CommandChecks(UvChecks):
             return
         texts, origins = self.expand(words)
         sources = [w.source for w in origins]
-        self.env_writes(node, texts, origins, redirects, sink)
         start = self.skip_wrappers(texts, sources)
+        if (
+            0 <= start < len(texts)
+            and texts[start].startswith("\x00")
+            and any(self.facts.forwards(w.node) for w in origins[:start])
+        ):
+            # An array that forwards the caller's values only serves to
+            # trust what runs after it: a program the scan cannot read
+            # there is judged as if the array were unread too.
+            texts, origins = self.expand(words, forwarded=False)
+            sources = [w.source for w in origins]
+            start = self.skip_wrappers(texts, sources)
+        self.env_writes(node, texts, origins, redirects, sink)
         if start == -1:
             self.report(node, "PPA009", UNREAD_WRAPPER)
             return
@@ -383,16 +401,20 @@ class CommandChecks(UvChecks):
         command looks like Python or uv; a path whose last segment it
         can read is judged by that segment. A scalar the trusted model
         expands to a path the scan does not know as Python or uv
-        (``/opt/pypy3``) stays unread, as written, and so does a
-        substituted step output holding one; an array's words are
-        the author's, as if written inline.
+        (``/opt/pypy3``) stays unread, as written, and so do a
+        composed word (``"${ROOT}/pypy3"``) and a substituted step
+        output holding one; an array's words are the author's, as if
+        written inline, and so is the program ``$(command -v X)``
+        names.
         """
         name = texts[start]
         word = origins[start]
         substituted = self.substituted(word.node)
+        inner = sole_child(word.node)
         traced = substituted is not None or (
             not word.literal
-            and plain_name(self.src, sole_child(word.node)) is not None
+            and inner.type != "command_substitution"
+            and array_name(self.src, inner) is None
         )
         if (
             traced

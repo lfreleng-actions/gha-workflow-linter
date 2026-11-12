@@ -58,6 +58,9 @@ class Block:
     # Where a traced step output's literal path replaced its
     # expression: start byte -> (end byte, the expression).
     traced: dict[int, tuple[int, str]] = field(default_factory=dict)
+    # The literals a YAML env value may hold, by name, when it is one
+    # ${{ COND && 'A' || 'B' }} expression.
+    choices: dict[str, list[str]] = field(default_factory=dict)
 
     @cached_property
     def traced_starts(self) -> list[int]:

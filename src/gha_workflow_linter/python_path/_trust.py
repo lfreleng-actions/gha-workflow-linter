@@ -13,24 +13,32 @@ A value is trusted when it is one of:
   its standard output, from a trusted shell variable;
 - a shell variable the step's YAML ``env:`` binds to one of those, or
   that one top-level assignment sets from one of them, or from
-  ``env -i … uv python find`` or ``env -i … uv python install`` with
-  ``--managed-python``, or ``--system`` and ``--no-config``;
-- a literal absolute path that ``is_outside_path()`` accepts.
+  ``env -i … uv python find`` with ``--managed-python``, or
+  ``--system`` and ``--no-config`` (``uv python install`` prints a
+  path on some uv versions and nothing on others);
+- a literal absolute path that ``is_outside_path()`` accepts, or a
+  double-quoted word of literal text and such values whose every
+  value is one, or names a Python interpreter (``values()``).
 
 A producer step with ``if:`` or ``continue-on-error:`` gives none: its
 output may be empty. A value holding a control character is no path.
 
 The model is lexical. A variable counts only when it is assigned at
 most once anywhere in the block, at top level, before the word that
-reads it; a block that runs ``eval``, ``source`` or ``.``, or sets a
-``trap`` action, trusts no variable. ``"${arr[@]}"`` expands when one
-top-level assignment sets ``arr`` to literal or trusted words.
+reads it, or unset by a filter that cannot match it
+(``unset_filter``); a block that runs ``eval``, ``source`` or ``.``,
+or sets a ``trap`` action, trusts no variable. ``"${arr[@]}"``
+expands when one top-level assignment sets ``arr`` to literal,
+trusted or composed words, plus what a literal-name loop appends
+(``loop_append``).
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import fnmatch
+import itertools
 import os
 import re
 from typing import TYPE_CHECKING
@@ -38,8 +46,11 @@ from typing import TYPE_CHECKING
 from gha_workflow_linter.shell._tree import node_text as _node_text
 
 from ._invocation import (
+    EXPR_OPEN,
+    INTERPRETER,
     TRUSTED_PYTHON,
     TRUSTED_UV,
+    expression_marker,
     is_trusted_python,
     parse_env,
 )
@@ -47,10 +58,24 @@ from ._uv import is_truthy, parse_uv, passed_selectors
 from ._words import command_words, literal_of
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tree_sitter import Node
 
 
 IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+# A case pattern fnmatch reads as bash does: no quote, bracket,
+# escape or extglob operator.
+CASE_GLOB = re.compile(r"[A-Za-z0-9_*?]+")
+# A grep -E pattern Python's re reads as POSIX ERE does.
+GREP_RE = re.compile(r"[A-Za-z0-9_.+*?|()^$]+")
+# Two quantifiers in a row: Python reads ``++`` as possessive and ``+?``
+# as lazy, where ERE repeats the repetition (``X+?`` is ``(X+)?``).
+STACKED_QUANTIFIERS = re.compile(r"[+*?]{2}")
+# The value a loop append passes: the caller's, which the scan cannot read.
+CALLER_VALUE = expression_marker("OTHER")
+# The most alternatives a word's values may multiply to.
+MAX_CHOICES = 16
 # Builtins that assign to the names they are given.
 ASSIGNING = frozenset(
     {"read", "mapfile", "readarray", "getopts", "printf", "let", "unset"}
@@ -88,7 +113,7 @@ OUTPUT_NAME = re.compile(r"([A-Za-z_][\w-]*)=")
 # Unnumbered redirect operators that point fd 1 at their target.
 STDOUT_OPS = frozenset({">", ">>", ">|", "&>", "&>>", ">&"})
 # uv's subcommands whose output is the interpreter they found.
-FINDING = (["python", "find"], ["python", "install"])
+FINDING = (["python", "find"],)
 MAX_DEPTH = 32
 
 
@@ -121,18 +146,32 @@ class ShellFacts:
     """
 
     def __init__(
-        self, src: bytes, root: Node, env: dict[str, str | None]
+        self,
+        src: bytes,
+        root: Node,
+        env: dict[str, str | None],
+        choices: dict[str, list[str]] | None = None,
     ) -> None:
         self.src = src
         self.env = env
+        self.choices = choices or {}
         self.counts: Counter[str] = Counter()
         self.top: dict[str, Node] = {}
         # Set by eval, source, a trap action or an assigning builtin
         # whose target the scan cannot read: no variable of the block
         # keeps its trust.
         self.opaque = False
+        # What each filtered unset "$NAME" may remove (unset_filter).
+        self.filters: list[Callable[[str], bool]] = []
+        # Each array a literal-name loop appends to: the loop, its
+        # variable and its names, per append (loop_append).
+        self.appends: dict[str, list[tuple[Node, str, list[str]]]] = {}
         self.writes: list[tuple[Node, Node]] = []  # (command, redirect)
         self.walk(root)
+
+    def count(self, name: str) -> int:
+        """How many times the block may assign or unset ``name``."""
+        return self.counts[name] + any(f(name) for f in self.filters)
 
     def text(self, node: Node) -> str:
         return _node_text(self.src, node)
@@ -163,11 +202,207 @@ class ShellFacts:
             self.counts["REPLY"] += 1
 
     def unset(self, node: Node) -> None:
-        for c in node.children[1:]:
-            if c.is_named and literal_of(self.src, c) is None:
-                self.opaque = True
-            for found in assigned_names(self.word_text(c)):
-                self.counts[found] += 1
+        args = [c for c in node.children[1:] if c.is_named]
+        for c in args:
+            if (
+                c.is_named
+                and c.type != "variable_name"
+                and literal_of(self.src, c) is None
+            ):
+                found = None if len(args) != 1 else self.unset_filter(c)
+                if found is None:
+                    self.opaque = True
+                else:
+                    self.filters.append(found)
+                continue
+            for name in assigned_names(self.word_text(c)):
+                self.counts[name] += 1
+
+    def unset_filter(self, arg: Node) -> Callable[[str], bool] | None:
+        """What ``unset "$N"`` may remove, when a filter bounds N.
+
+        Either the unset is the whole of a ``case "$N" in`` arm whose
+        patterns are plain globs, so it removes the names those match
+        and no earlier ``;;`` arm takes; or it is the whole body of
+        ``while [IFS=] read [-r] N; do …; done < <(… | grep -E 'RE'
+        [|| true])``, so it removes the names RE matches, or any name
+        when no ``IFS=`` leads the read and the step sets IFS. None
+        for any other shape, and for an unquoted ``$N``: bash splits
+        it on IFS and globs it, so it may name a name the filter
+        excludes (``PYTHONX`` under ``IFS=X`` unsets ``PYTHON``).
+        """
+        if arg.type != "string":
+            return None
+        name = plain_name(self.src, sole_child(arg))
+        unset = arg.parent
+        parent = None if unset is None else unset.parent
+        if name is None or unset is None or parent is None:
+            return None
+        if parent.type == "case_item":
+            return self.case_filter(name, unset, parent)
+        if parent.type == "do_group":
+            return self.grep_filter(name, unset, parent)
+        return None
+
+    def case_filter(
+        self, name: str, unset: Node, item: Node
+    ) -> Callable[[str], bool] | None:
+        statement = item.parent
+        subject = (
+            None
+            if statement is None or b"nocasematch" in self.src
+            else next((c for c in statement.children if c.is_named), None)
+        )
+        if (
+            statement is None
+            or subject is None
+            or (plain_name(self.src, sole_child(subject)) != name)
+        ):
+            return None
+        earlier: list[str] = []
+        for c in statement.children:
+            if c.type != "case_item":
+                continue
+            patterns, body, end = self.case_parts(c)
+            if patterns is None:
+                return None
+            if c == item:
+                return None if body != [unset] else globs(patterns, earlier)
+            if end != ";;":
+                return None
+            earlier.extend(patterns)
+        return None
+
+    def case_parts(
+        self, item: Node
+    ) -> tuple[list[str] | None, list[Node], str | None]:
+        """A case arm's plain glob patterns, statements and terminator."""
+        patterns: list[str] = []
+        body: list[Node] = []
+        end = None
+        in_body = False
+        for c in item.children:
+            if c.type == ")":
+                in_body = True
+            elif c.type in (";;", ";&", ";;&"):
+                end = c.type
+            elif in_body:
+                if c.is_named and c.type != "comment":
+                    body.append(c)
+            elif c.is_named:
+                text = self.text(c)
+                if CASE_GLOB.fullmatch(text) is None:
+                    return None, body, end
+                patterns.append(text)
+        return patterns, body, end
+
+    def grep_filter(
+        self, name: str, unset: Node, group: Node
+    ) -> Callable[[str], bool] | None:
+        body = [c for c in group.children if c.is_named and c.type != "comment"]
+        loop = group.parent
+        outer = None if loop is None else loop.parent
+        if (
+            body != [unset]
+            or loop is None
+            or loop.type != "while_statement"
+            or outer is None
+            or outer.type != "redirected_statement"
+        ):
+            return None
+        condition = [
+            c for c in loop.children if c.is_named and c.type != "do_group"
+        ]
+        read = None if len(condition) != 1 else self.reads_into(condition[0])
+        if read is None or read[0] != name:
+            return None
+        redirects = [c for c in outer.children[1:] if c.is_named]
+        redirect = redirects[0] if len(redirects) == 1 else None
+        source = (
+            None
+            if redirect is None or redirect.type != "file_redirect"
+            else redirect.child_by_field_name("destination")
+        )
+        if (
+            source is None
+            or redirect is None
+            or [self.text(o) for o in redirect.children if not o.is_named]
+            != ["<"]
+            or source.type != "process_substitution"
+        ):
+            return None
+        pattern = self.grep_pattern(source)
+        if pattern is None:
+            return None
+        if read[1]:
+            return lambda n: pattern.search(n) is not None
+        # read strips IFS characters from the line grep matched: once
+        # the step sets IFS, the name read may be any other.
+        return lambda n: (
+            pattern.search(n) is not None
+            or self.counts["IFS"] != 0
+            or "IFS" in self.env
+        )
+
+    def reads_into(self, node: Node) -> tuple[str, bool] | None:
+        """N for ``[IFS=] read -r N``, and whether ``IFS=`` leads it.
+
+        Without -r, read drops backslashes, so the name it reads need
+        not be the line grep matched.
+        """
+        if node.type != "command":
+            return None
+        assigns, words = command_words(self.src, node)
+        if any(self.text(a) != "IFS=" for a in assigns):
+            return None
+        texts = [w.text for w in words]
+        if texts[:2] != ["read", "-r"]:
+            return None
+        texts = texts[2:]
+        if len(texts) != 1 or texts[0] is None:
+            return None
+        if IDENTIFIER.fullmatch(texts[0]) is None:
+            return None
+        return texts[0], bool(assigns)
+
+    def grep_pattern(self, source: Node) -> re.Pattern[str] | None:
+        """RE of ``<(… | grep -E 'RE' [|| true])``; else None."""
+        inner = [c for c in source.children if c.is_named]
+        if len(inner) != 1:
+            return None
+        node = inner[0]
+        if node.type == "list":
+            parts = node.children
+            if (
+                len(parts) != 3
+                or parts[1].type != "||"
+                or parts[2].type != "command"
+                or self.text(parts[2]) not in ("true", ":")
+            ):
+                return None
+            node = parts[0]
+        if node.type == "pipeline":
+            node = [c for c in node.children if c.is_named][-1]
+        if node.type != "command":
+            return None
+        assigns, words = command_words(self.src, node)
+        texts = [w.text for w in words]
+        text = (
+            texts[2]
+            if not assigns and len(texts) == 3 and texts[:2] == ["grep", "-E"]
+            else None
+        )
+        if (
+            text is None
+            or GREP_RE.fullmatch(text) is None
+            or STACKED_QUANTIFIERS.search(text) is not None
+            or "(?" in text
+        ):
+            return None
+        try:
+            return re.compile(text)
+        except re.error:
+            return None
 
     def declared(self, node: Node) -> None:
         """Count the names a declaration builtin sets.
@@ -247,6 +482,8 @@ class ShellFacts:
         found = IDENTIFIER.match(self.text(name))
         if found is None:
             return
+        if self.loop_append(node, found.group(0)):
+            return
         self.counts[found.group(0)] += 1
         if name.type != "variable_name":
             return
@@ -255,6 +492,60 @@ class ShellFacts:
             parent = parent.parent
         if parent is not None and parent.type == "program":
             self.top[found.group(0)] = node
+
+    def loop_append(self, node: Node, name: str) -> bool:
+        """Record ``name+=("$N=…")`` in a top-level ``for N in NAMES``.
+
+        NAMES are literal identifiers, so each append adds one
+        ``NAME=value`` word with NAME among them and a value the scan
+        cannot read; ``array()`` adds those words. Any other ``+=`` is
+        an ordinary assignment.
+        """
+        value = node.child_by_field_name("value")
+        if (
+            not any(c.type == "+=" for c in node.children)
+            or value is None
+            or value.type != "array"
+        ):
+            return False
+        variables = set()
+        for c in value.children:
+            if not c.is_named:
+                continue
+            parts = [p for p in c.children if p.type != '"']
+            if (
+                c.type != "string"
+                or len(parts) < 2
+                or parts[1].type != "string_content"
+                or not self.text(parts[1]).startswith("=")
+            ):
+                return False
+            variables.add(plain_name(self.src, parts[0]))
+        loop = node.parent
+        while loop is not None and loop.type != "for_statement":
+            loop = loop.parent
+        if (
+            len(variables) != 1
+            or loop is None
+            or loop.parent is None
+            or loop.parent.type != "program"
+        ):
+            return False
+        variable = loop.child_by_field_name("variable")
+        if variable is None or self.text(variable) not in variables:
+            return False
+        names = [
+            self.text(c)
+            for c in loop.children
+            if c.is_named and c.type not in ("variable_name", "do_group")
+        ]
+        in_list = any(c.type == "in" for c in loop.children)
+        if not in_list or not all(IDENTIFIER.fullmatch(n) for n in names):
+            return False
+        self.appends.setdefault(name, []).append(
+            (loop, self.text(variable), names)
+        )
+        return True
 
     def command(self, node: Node) -> None:
         if node.child_by_field_name("name") is None:
@@ -287,7 +578,7 @@ class ShellFacts:
         node = self.top.get(name)
         if (
             self.opaque
-            or self.counts[name] != 1
+            or self.count(name) != 1
             or node is None
             or node.end_byte > at
             or any(c.type == "+=" for c in node.children)
@@ -299,7 +590,7 @@ class ShellFacts:
         """The trusted value ``$name`` has at byte ``at``; None if untrusted."""
         if self.opaque or depth > MAX_DEPTH:
             return None
-        if self.counts[name] == 0:
+        if self.count(name) == 0:
             bound = self.env.get(name)
             return bound if trusted_text(bound) else None
         node = self.binding(name, at)
@@ -312,7 +603,9 @@ class ShellFacts:
         """The words ``"${name[@]}"`` expands to at ``at``; None if unknown."""
         node = self.binding(name, at)
         value = None if node is None else node.child_by_field_name("value")
-        if value is None or value.type != "array" or depth > MAX_DEPTH:
+        if node is None or value is None or value.type != "array":
+            return None
+        if depth > MAX_DEPTH:
             return None
         words: list[str] = []
         for c in value.children:
@@ -321,18 +614,89 @@ class ShellFacts:
             text = literal_of(self.src, c)
             if text is None:
                 text = self.word(c, value.start_byte, depth + 1)
+            if text is None:
+                text = self.composed(c, value.start_byte, depth + 1)
             if text is None or not self.stays_one_word(c, text):
                 return None
             words.append(text)
+        for loop, variable, names in self.appends.get(name, []):
+            if loop.end_byte <= node.start_byte or loop.start_byte >= at:
+                continue
+            if loop.end_byte > at or self.count(variable) != 1:
+                return None
+            words.extend(f"{n}={CALLER_VALUE}" for n in names)
         return words
+
+    def forwards(self, node: Node) -> bool:
+        """Whether ``node`` is ``"${arr[@]}"`` for an array a loop extends.
+
+        Such a loop forwards the caller's values by indirect read
+        (``loop_append``).
+        """
+        inner = sole_child(node)
+        array = None if inner is node else array_name(self.src, inner)
+        return array is not None and bool(self.appends.get(array))
+
+    def composed(self, node: Node, at: int, depth: int) -> str | None:
+        """A double-quoted word of literal text and trusted references.
+
+        ``"UV_CACHE_DIR=$CACHE_DIR"`` gives its text with each value in
+        place; None when any part is something else.
+        """
+        values = self.values(node, at, depth)
+        return values[0] if values is not None and len(values) == 1 else None
+
+    def values(self, node: Node, at: int, depth: int) -> list[str] | None:
+        """Every value a double-quoted word of text and references may take.
+
+        A reference gives its trusted value, or, for a name the block
+        never sets, each literal its step env's ``${{ COND && 'A' ||
+        'B' }}`` may give. Text no child covers, such as a line break,
+        is part of every value, as ``literal_of()`` reads it. None for
+        any other part, or past ``MAX_CHOICES`` values.
+        """
+        if node.type != "string" or depth > MAX_DEPTH or self.opaque:
+            return None
+        parts: list[list[str]] = []
+        pos = node.start_byte
+        for c in node.children:
+            gap = self.src[pos : c.start_byte].decode("utf-8", "replace")
+            pos = c.end_byte
+            if gap:
+                parts.append([gap])
+            if c.type == '"':
+                continue
+            if c.type == "string_content":
+                text = self.text(c)
+                if "\\" in text or "$" in text or "`" in text:
+                    return None
+                parts.append([text])
+                continue
+            name = plain_name(self.src, c)
+            if name is None:
+                return None
+            value = self.scalar(name, at, depth + 1)
+            if value is not None:
+                parts.append([value])
+            elif self.count(name) == 0 and name in self.choices:
+                parts.append(self.choices[name])
+            else:
+                return None
+        total = 1
+        for p in parts:
+            total *= len(p)
+        if total > MAX_CHOICES:
+            return None
+        return ["".join(v) for v in itertools.product(*parts)]
 
     def stays_one_word(self, node: Node, value: str) -> bool:
         """Whether a word reading ``value`` expands to that one word.
 
         A quoted or literal word does. An unquoted expansion does only
         when the value is literal text with no default-IFS or glob
-        character and the block never sets ``IFS``: a traced marker
-        stands for a path the scan cannot see.
+        character and the block never sets ``IFS``: a traced marker,
+        or a path under ``${{ runner.temp }}`` or another expression,
+        stands for text the scan cannot see.
         """
         if (
             node.type in ("string", "raw_string")
@@ -344,9 +708,9 @@ class ShellFacts:
     def unsplit(self, value: str) -> bool:
         """Whether an unquoted expansion of ``value`` stays one word."""
         return (
-            value not in (TRUSTED_PYTHON, TRUSTED_UV)
+            EXPR_OPEN not in value
             and SPLITS.search(value) is None
-            and self.counts["IFS"] == 0
+            and self.count("IFS") == 0
             and "IFS" not in self.env
         )
 
@@ -363,20 +727,42 @@ class ShellFacts:
             inner, at, depth
         ):
             return TRUSTED_PYTHON
+        return self.chosen(node, at, depth)
+
+    def chosen(self, node: Node, at: int, depth: int) -> str | None:
+        """A trusted value of a composed word, as ``values()`` reads it.
+
+        Every value must be trusted: values that each name a Python
+        interpreter are ``TRUSTED_PYTHON`` when there are several or one
+        ends ``.exe``, and one other value is itself.
+        """
+        values = self.values(node, at, depth)
+        if not values or not all(trusted_text(v) for v in values):
+            return None
+        if (len(set(values)) > 1 or values[0].endswith(".exe")) and all(
+            INTERPRETER.match(v.removesuffix(".exe")) for v in values
+        ):
+            return TRUSTED_PYTHON
+        if len(set(values)) == 1:
+            return values[0]
         return None
 
     def expand(self, node: Node) -> list[str] | None:
         """What a command word expands to when it reads a trusted variable.
 
         ``$V``, ``${V}`` or ``"$V"`` give the trusted value; a quoted
-        ``"${arr[@]}"`` gives the array's words. None for anything else,
-        and for an unquoted value that may split or glob.
+        ``"${arr[@]}"`` gives the array's words, and any other quoted
+        word its trusted value as ``chosen()`` reads it, as it would
+        assigned to a variable first. None for anything else, and for
+        an unquoted value that may split or glob.
         """
         at = node.start_byte
         inner = sole_child(node)
         name = plain_name(self.src, inner)
         if name is not None:
             value = self.scalar(name, at)
+            if value is None and node.type == "string":
+                value = self.inline(name)
             if value is None or not self.stays_one_word(node, value):
                 return None
             return [value]
@@ -384,10 +770,51 @@ class ShellFacts:
             array = array_name(self.src, inner)
             if array is not None:
                 return self.array(array, at)
+        if node.type == "string":
+            value = self.chosen(node, at, 0)
+            if value is not None:
+                return [value]
         return None
 
+    def env_literal(self, node: Node) -> list[str] | None:
+        """``"$V"`` for a V the block never sets and step env binds to text.
+
+        The lookup's version request is such a word: a literal the
+        YAML spells out, as one word however it reads.
+        """
+        inner = sole_child(node)
+        name = plain_name(self.src, inner)
+        if node.type != "string" or name is None or self.opaque:
+            return None
+        bound = self.env.get(name)
+        if (
+            self.count(name) != 0
+            or bound is None
+            or EXPR_OPEN in bound
+            or CONTROL.search(bound) is not None
+        ):
+            return None
+        return [bound]
+
+    def inline(self, name: str) -> str | None:
+        """The marker ``"$name"`` stands for, as if its expression were inline.
+
+        Only for a name the block never sets whose step env is one
+        ``${{ github.action_path }}``, ``${{ github.workspace }}`` or
+        ``${{ runner.temp }}``: quoted, it is that one word.
+        """
+        found = self.choices.get(name, [])
+        if (
+            self.opaque
+            or self.count(name) != 0
+            or len(found) != 1
+            or not found[0].startswith(EXPR_OPEN)
+        ):
+            return None
+        return found[0]
+
     def finds_python(self, node: Node, at: int, depth: int) -> bool:
-        """``$(env -i … uv python find|install …)``, every word known.
+        """``$(env -i … uv python find …)``, every word known.
 
         The lookup must pass the workspace rules of ``uv_findings()``
         itself, with ``--managed-python`` or ``--system`` and
@@ -407,6 +834,8 @@ class ShellFacts:
                 texts.append(w.text)
                 continue
             expanded = self.expand(w.node)
+            if expanded is None:
+                expanded = self.env_literal(w.node)
             if expanded is None or depth > MAX_DEPTH:
                 return False
             texts.extend(expanded)
@@ -509,8 +938,17 @@ class ShellFacts:
         return out
 
 
+def globs(patterns: list[str], earlier: list[str]) -> Callable[[str], bool]:
+    """Whether a name matches ``patterns`` and none of ``earlier``."""
+    ours, before = tuple(patterns), tuple(earlier)
+    return lambda n: (
+        any(fnmatch.fnmatchcase(n, p) for p in ours)
+        and not any(fnmatch.fnmatchcase(n, p) for p in before)
+    )
+
+
 def pinned_lookup(texts: list[str]) -> bool:
-    """Whether ``env -i … uv python find|install …`` pins its result.
+    """Whether ``env -i … uv python find …`` pins its result.
 
     ``texts`` starts at ``env``.
     """

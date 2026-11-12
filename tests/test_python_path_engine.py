@@ -1403,7 +1403,7 @@ class UvTest(unittest.TestCase):
             ("uv run python s.py", []),
             (
                 "env -u UV_NO_CONFIG -u UV_NO_PROJECT -u UV_PYTHON uv run python s.py",
-                ["PPA009"],
+                ["PPA009", "PPA013"],
             ),
             ("env -u UV_NO_PROJECT uv run python s.py", ["PPA009"]),
             ("env --unset=UV_NO_PROJECT uv run python s.py", ["PPA009"]),
@@ -1460,11 +1460,12 @@ class UvTest(unittest.TestCase):
                 self.assertEqual(rules(text), ["PPA009"])
 
     def test_expressions_in_uv_paths(self) -> None:
-        """Only a literal absolute path is outside; no expression counts (R1).
+        """Only a literal absolute path, or one under runner.temp, is outside (R1).
 
         PPA013 also asks the --python value to be trusted: a known
         place that is not one is PPA013, an expression the scan cannot
-        trace PPA009.
+        trace PPA009. ``${{ runner.temp }}`` with a subpath that does
+        not climb counts as outside, as setup-uv's guards read it.
         """
         safe = "uv run --no-config --no-project --python {} python s.py"
         for path, kind, expected in (
@@ -1479,15 +1480,16 @@ class UvTest(unittest.TestCase):
                 "workflow",
                 ["PPA007", "PPA009"],
             ),
-            (
-                "${{ runner.temp }}/py/bin/python",
-                "workflow",
-                ["PPA007", "PPA013"],
-            ),
+            ("${{ runner.temp }}/py/bin/python", "workflow", []),
             (
                 "${{ runner.temp }}/../w/.venv/bin/python",
                 "workflow",
                 ["PPA007", "PPA013"],
+            ),
+            (
+                "${{ runner.temp }}/${{ inputs.python }}",
+                "workflow",
+                ["PPA007", "PPA009"],
             ),
             # No setup-python step named py: not traced.
             (

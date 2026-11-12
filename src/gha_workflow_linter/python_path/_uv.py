@@ -100,6 +100,30 @@ UV_VALUE = frozenset(
     }
 )
 UV_INFO = frozenset({"-h", "--help", "-V", "--version"})
+# Subcommands with none of their own: the next positional word is an
+# operand (uv venv DIR, uv add PACKAGE).
+UV_LEAVES = frozenset(
+    {
+        "init",
+        "add",
+        "remove",
+        "version",
+        "sync",
+        "lock",
+        "export",
+        "tree",
+        "format",
+        "venv",
+        "build",
+        "publish",
+    }
+)
+# The end of a finding for a word that may expand to uv options.
+HIDDEN_OPTIONS = "may hold uv options; the scan cannot read it"
+# One double-quoted word that opens with "$NAME" or "${NAME}".
+LEADING_REFERENCE = re.compile(
+    r'"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))[^"]*"'
+)
 # Subcommands that find an interpreter by discovery (PPA013).
 UV_DISCOVERS = (["run"], ["venv"], ["sync"], ["export"], ["pip"])
 # Subcommands that look one up and print or install it (PPA013).
@@ -194,15 +218,19 @@ def python_value_problem(source: str, value: str) -> str | None:
 def passed_selectors(names: dict[str, str | None]) -> list[str]:
     """The interpreter selectors a wrapper passes outside the allow list.
 
-    The allow list covers a literal value alone: an allowed name whose
-    value the scan cannot read (``PATH="$PATH"``, an expression) counts
-    as a passed selector, failing closed.
+    The allow list covers a literal value alone, or a path under
+    ``${{ runner.temp }}`` that ``is_outside_path()`` accepts: an
+    allowed name whose value the scan cannot read (``PATH="$PATH"``,
+    any other expression) counts as a passed selector, failing closed.
     """
     return sorted(
         n
         for n, v in names.items()
         if (n in INTERPRETER_SELECTORS and n not in CLEARED_ALLOWED)
-        or (n in CLEARED_ALLOWED and (v is None or EXPR_OPEN in v))
+        or (
+            n in CLEARED_ALLOWED
+            and (v is None or (EXPR_OPEN in v and not is_outside_path(v)))
+        )
     )
 
 
@@ -335,8 +363,10 @@ def uv_findings(
     .python-version unless --no-config or any --python; 'uv run' uses
     a workspace .venv unless --python names a path outside it and
     project mode is off (or the project environment is elsewhere), or
-    VIRTUAL_ENV is active; 'uv python find' needs --no-config and
-    --system; 'uv pip' needs --system, a --python path or VIRTUAL_ENV.
+    VIRTUAL_ENV is active; 'uv python find' needs --no-config, and
+    --system or --managed-python, which keeps it to uv's own installs;
+    'uv export --script' exports the script's requirements, not a
+    project's; 'uv pip' needs --system, a --python path or VIRTUAL_ENV.
     VIRTUAL_ENV counts only with no Python request (--python or
     UV_PYTHON), which wins over it. uvx and 'uv tool' use neither.
     """
@@ -358,12 +388,14 @@ def uv_findings(
         )
         if not (isolated or active):
             found.append("PPA007")
-    elif head == ["export"] and not settings["project_env"]:
+    elif head == ["export"] and not (
+        settings["project_env"] or "--script" in options
+    ):
         found.append("PPA007")
     elif head == ["python"] and command.subcommand[1:2] == ["find"]:
         if not settings["no_config"]:
             found.append("PPA006")
-        if not settings["system"]:
+        if not (settings["system"] or "--managed-python" in options):
             found.append("PPA007")
     elif head == ["pip"] and not (
         settings["system"] or settings["python_path"] or venv
@@ -402,11 +434,26 @@ class UvChecks(PythonpathChecks):
         prefix assignments (the last one winning), then the step's
         env; the last two only when sudo or ``exec -c`` keeps them. A
         prefix ``NAME+=value`` appends to a value the scan does not
-        follow, so its value is not literal.
+        follow, so its value is not literal. ``env -u NAME`` removes
+        what the last two give; an ``env -u`` operand the scan cannot
+        read leaves any of the three present with no value the scan
+        can read, until a later NAME=value sets it again.
         """
         wrapper = self.wrapper_env
         if wrapper is not None and name in wrapper.names:
             return True, wrapper.names[name]
+        if wrapper is not None and name in wrapper.removed:
+            return False, None
+        present, value = self.outer_lookup(name, assigns)
+        if present and wrapper is not None and wrapper.unset_unread:
+            return True, None
+        return present, value
+
+    def outer_lookup(
+        self, name: str, assigns: list[Node]
+    ) -> tuple[bool, str | None]:
+        """``env_lookup`` past the wrappers' own NAME=value words."""
+        wrapper = self.wrapper_env
         if (
             wrapper is not None
             and wrapper.kept is not None
@@ -435,7 +482,7 @@ class UvChecks(PythonpathChecks):
         scan can read.
         """
         if name == "UV_PYTHON" and (
-            self.facts.opaque or self.facts.counts[name]
+            self.facts.opaque or self.facts.count(name)
         ):
             return True, None
         return name in self.block.env, self.block.env.get(name)
@@ -645,11 +692,22 @@ class UvChecks(PythonpathChecks):
             self.report(node, "PPA013", detail)
 
     def reference_value(self, node: Node, token: Token) -> str | None:
-        """The trusted value of a token that reads one variable; else None."""
+        """The trusted value of a token that reads one variable; else None.
+
+        Unquoted, the reference splits and globs as a command argument
+        does, so it resolves only to a value that stays one word.
+        """
         ref = REFERENCE.match(token.text)
         if ref is None:
             return None
-        return self.facts.scalar(ref.group(1) or ref.group(2), node.start_byte)
+        value = self.facts.scalar(ref.group(1) or ref.group(2), node.start_byte)
+        if (
+            value is not None
+            and token.op == "unquoted"
+            and not self.facts.unsplit(value)
+        ):
+            return None
+        return value
 
     def record_value(self, node: Node, body: list[list[Token]]) -> str | None:
         """A record's value: its lines of text, or one variable's value."""
@@ -691,7 +749,12 @@ class UvChecks(PythonpathChecks):
         self.wrapper_env = env_of(
             rest[:inner],
             rest_sources,
-            replace(base, names=dict(base.names), words=[]),
+            replace(
+                base,
+                names=dict(base.names),
+                words=[],
+                removed=set(base.removed),
+            ),
         )
         try:
             if inner < len(rest):
@@ -773,23 +836,47 @@ class UvChecks(PythonpathChecks):
             self.report(
                 node,
                 "PPA009",
-                f"{shown} may hold uv options; the scan cannot read it",
+                f"{shown} {HIDDEN_OPTIONS}",
             )
             return False
-        # A ${{ }} expression may stand for any subcommand, too.
-        unknown = [
-            w if w.startswith("\x00") else "\x00" + w
-            for w in command.subcommand
-            if w.startswith("\x00") or EXPR_OPEN in w
-        ]
-        if not is_uvx and unknown:
-            self.report(
-                node,
-                "PPA009",
-                f"uv subcommand is {unknown[0][1:]}, which the scan cannot read",
-            )
+        # A ${{ }} expression may stand for any subcommand, too. A
+        # command with no subcommands of its own takes its next
+        # positional word as an operand (uv venv DIR); one the scan
+        # cannot read, or an expression that is no known path, may
+        # still expand to an option such as --python=...
+        named = command.subcommand
+        problems: list[str] = []
+        if named[:1] and named[0] in UV_LEAVES:
+            for w in named[1:]:
+                if w.startswith("\x00") and not self.path_operand(w):
+                    problems.append(f"{w[1:]} {HIDDEN_OPTIONS}")
+                elif UNKNOWN_EXPRESSION.match(w):
+                    problems.append("${{ ... }} " + HIDDEN_OPTIONS)
+            named = named[:1]
+        for w in named:
+            if w.startswith("\x00") or EXPR_OPEN in w:
+                shown = w.removeprefix("\x00")
+                problems.append(
+                    f"uv subcommand is {shown}, which the scan cannot read"
+                )
+        if not is_uvx and problems:
+            self.report(node, "PPA009", problems[0])
             return False
         return True
+
+    def path_operand(self, word: str) -> bool:
+        """An unread operand quoted whole that opens with a path expression.
+
+        ``"${ACTION_PATH}/x.py"``, its step env one
+        ``${{ github.action_path }}`` in an action, starts with an
+        absolute path and stays one word, so it cannot expand to an
+        option. ``"${DIR}/v"$EXTRA`` may split off another word.
+        """
+        found = LEADING_REFERENCE.fullmatch(word[1:])
+        return (
+            found is not None
+            and self.facts.inline(found.group(1) or found.group(2)) is not None
+        )
 
     def uv_settings(
         self, cmd: UvCommand, args: list[str], assigns: list[Node]
