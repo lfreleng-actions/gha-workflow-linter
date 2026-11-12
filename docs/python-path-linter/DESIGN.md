@@ -52,7 +52,7 @@ design accepts false positives and handles them with the ignore mark
 (`python-path-audit: ignore`) or the linter's allowlist; it does not
 accept a silent pass on a construct the tool did not model, short of
 the known limits listed below. The ignore mark applies to every rule,
-PPA008, PPA011 and PPA012 included, on the finding's line or the line
+PPA008, PPA011, PPA012 and PPA013 included, on the finding's line or the line
 above. Where a case
 raises a question, the answer that reports PPA009 is the right one.
 
@@ -61,7 +61,8 @@ Rules:
 1. **Parse, do not interpret.** `tree-sitter-bash` parses the shell.
    The scan judges each simple command from its own literal words,
    with no state machine over the block: no working directory, no
-   variable values, no exports, functions or control flow.
+   variable values (save the trusted interpreters of PPA013), no
+   exports, functions or control flow.
 2. **A non-literal word in a deciding position is PPA009
    "unresolved".** That covers: a program name the scan cannot read,
    provided the command looks like a Python or uv invocation: its
@@ -258,6 +259,80 @@ the mechanisms that drew them earned almost nothing:
 
 The scan keeps literal, per-command facts and nothing else.
 
+### PPA013 and trusted interpreters
+
+Issue #467 adds PPA013, "uv chooses its interpreter from the caller's
+environment", for workflows and composite actions. Scripts get none:
+the scan does not know their caller. It has three parts:
+
+1. A discovering uv command (`uv run`, `uvx`, `uv tool run`,
+   `uv venv`, `uv sync`, `uv export`, `uv pip`) without a trusted
+   `--python` or `UV_PYTHON`. A version request, `--system`,
+   `UV_SYSTEM_PYTHON`, `--managed-python` and `UV_MANAGED_PYTHON`
+   count as untrusted. A value with an expression the scan cannot
+   trace is PPA009.
+2. `uv python find` or `install` not run under a cleared environment.
+3. `UV_PYTHON`, `UV_SYSTEM_PYTHON` or `UV_MANAGED_PYTHON` in a YAML
+   `env:` block (any case, setup-uv steps aside, which PPA011
+   judges) or written to `$GITHUB_ENV`, save a `UV_PYTHON` holding a
+   trusted interpreter.
+
+`env -i` and `env -` clear the environment, as do `exec -c` and a
+`sudo` that keeps no interpreter selector (`INTERPRETER_SELECTORS`
+in `_uv.py`) or `UV_*` name; a command under any of them gets no
+PPA013, unless a wrapper passes a selector outside
+`CLEARED_ALLOWED` as `NAME=value`. `env -i` no longer
+counts as an unsettled environment (PPA009): uv runs with its
+defaults, which the uv rules judge.
+
+A trusted interpreter is an absolute literal path outside the
+workspace; an `actions/setup-python` `python-path` output from an
+earlier step of the same job; a run step's output written once, by
+standard output, to `$GITHUB_OUTPUT` from a variable assigned once
+from `$(env -i … uv python find|install …)` with `--managed-python`,
+or `--system` and `--no-config`; or a top-level shell variable
+assigned once, or a step `env:` value, holding one of these.
+`astral-sh/setup-uv`'s `uv-path` output counts as uv. This is the one
+place the scan reads variable values (`_trust.py`), and it reads them
+lexically: a name assigned more than once, a step id used twice, an
+output written more than once or a `$GITHUB_OUTPUT` mention it cannot
+read as a top-level write, or a block that runs `eval`, `source` or
+`.` (quoted, or after `builtin` or `command`) or sets a `trap` action
+trusts nothing.
+Assigning builtins (`printf -v`, `read`, `unset`, `export`) count
+their targets after quote removal; `read`, `select`, `mapfile` and
+`readarray` count `REPLY` or `MAPFILE` too, and `printf` with a `%n`
+or unread format counts its arguments. A subscript write changes a
+name but never binds its scalar. A value holding a control character
+is not trusted, and `literal_of()` keeps the line breaks between a
+string's pieces. A producer step with `if:` or `continue-on-error:`
+gives no trusted output; an output written from a literal path
+stands for that path, not a marker, so its program name still
+decides between uv and Python. Functions, loops and conditionals
+are not followed. An unquoted reference resolves when it holds a
+literal value with no blank or glob character, in a block that never
+sets `IFS`; a `$GITHUB_OUTPUT` write reads its arguments the same way.
+A trusted program is then judged as uv or Python, so
+`"$PYTHON" -I script.py` passes, no longer PPA009; a scalar that
+names neither (`/opt/pypy3`) stays PPA009 when it looks like Python.
+Unread `env -u` or `NAME=` words leave PPA006 to PPA008 unknown but
+not PPA013: the caller's environment still reaches uv.
+
+The model fails closed: a value the scan cannot read never earns an
+exemption or keeps a trust. A cleared wrapper's allow list covers a
+literal value alone, so `env -i PATH="$PATH"` passes a selector. A
+substituted step output (`Block.traced`) whose path names neither
+Python nor uv stays PPA009 in program position, as a variable does.
+A `$GITHUB_ENV` write with an unread format or name that mentions a
+uv interpreter setting is PPA009. An assigning builtin, declaration
+or `unset` whose target is unread leaves the block opaque, as
+`eval` does: the scan trusts none of its variables. A step `env:`
+`UV_PYTHON` that the block assigns, unsets or leaves opaque is
+unread (PPA009), while the command's own or a wrapper's value still
+decides. A Python-named `${{ }}` expression with no trusted producer
+is PPA009 in program position, as a variable is, unless the Python
+invocation is itself a finding.
+
 ## Known limits
 
 The scan does not see an interpreter reached through a variable
@@ -361,7 +436,8 @@ The package is `gha_workflow_linter.python_path`; the tests are in
 | `_uv.py` | uv argument tables and judgement: settings, inner program. |
 | `_pythonpath.py` | As on #434. |
 | `_envfile.py` | `$GITHUB_ENV` lines and records. |
-| `_yaml.py` | As on #434 (reader, env scopes, directory, setup-uv). |
+| `_yaml.py` | As on #434, plus steps and uv settings in `env:`. |
+| `_trust.py` | Trusted interpreters: outputs, variables set once. |
 | `_engine.py` | Rules, findings, discovery, entry point (exit 0/1/2). |
 
 Target size: about a quarter of #434. Nothing in `_commands.py` should

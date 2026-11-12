@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from gha_workflow_linter.shell._tree import node_text as _node_text
@@ -53,6 +55,32 @@ class Block:
     env: dict[str, str | None] = field(
         default_factory=dict
     )  # literal YAML env; None = expression
+    # Where a traced step output's literal path replaced its
+    # expression: start byte -> (end byte, the expression).
+    traced: dict[int, tuple[int, str]] = field(default_factory=dict)
+
+    @cached_property
+    def traced_starts(self) -> list[int]:
+        """The start bytes of ``traced``, sorted for range lookups."""
+        return sorted(self.traced)
+
+    def traced_within(self, start: int, end: int) -> list[tuple[int, int, str]]:
+        """Each traced span inside bytes ``start`` to ``end``, in order.
+
+        A binary search finds the first; the spans do not overlap, so
+        the walk stops at the first one past ``end``.
+        """
+        starts = self.traced_starts
+        out = []
+        i = bisect_left(starts, start)
+        while i < len(starts):
+            at = starts[i]
+            stop, expression = self.traced[at]
+            if stop > end:
+                break
+            out.append((at, stop, expression))
+            i += 1
+        return out
 
 
 def literal_of(src: bytes, node: Node) -> str | None:
@@ -75,7 +103,14 @@ def literal_of(src: bytes, node: Node) -> str | None:
         )
     if t in ("string", "concatenation"):
         parts: list[str] = []
+        at = node.start_byte
         for child in node.children:
+            # Text no child covers, such as a line break between two
+            # string_content pieces, is part of the value.
+            if t == "string" and child.start_byte > at:
+                gap = src[at : child.start_byte].decode("utf-8", "replace")
+                parts.append(gap)
+            at = child.end_byte
             if child.type == '"':
                 continue
             piece = literal_of(src, child)

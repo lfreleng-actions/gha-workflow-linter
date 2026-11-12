@@ -365,7 +365,7 @@ Example output (default behavior, test actions skipped):
 | `4`  | `--verify-allow-list` and the tool could not reach the latest release |
 | `5`  | `--verify-action-calls` and outdated action calls remain              |
 | `6`  | Rate-limited API, and the run asked it to verify or update            |
-| `7`  | `--verify-python-path` and a finding of `PPA001` to `PPA008` remains  |
+| `7`  | `--verify-python-path` and a python-path finding that gates remains   |
 | `8`  | `--verify-stderr-merge` and a stderr merge used as data remains       |
 
 <!-- markdownlint-enable MD013 -->
@@ -880,7 +880,7 @@ under a rate limit and when no action calls exist to check:
 gha-workflow-linter lint --python-path report
 
 # Fail with exit status 7 on a finding of PPA001 to PPA008, or of
-# PPA011 or PPA012 in a composite action
+# PPA011 to PPA013 in a composite action
 gha-workflow-linter lint --verify-python-path
 
 # Skip the check
@@ -902,12 +902,13 @@ run, and with which flags, needs a person.
 | `PPA004` | PYTHONPATH may hold an empty entry                                       | Join entries without a leading, trailing or doubled `:`                                                            |
 | `PPA005` | PYTHONPATH names the caller's checkout                                   | Point `PYTHONPATH` at the action's own files, not the workspace                                                    |
 | `PPA006` | uv reads .python-version from the workspace                              | Pass `--no-config`, or request an interpreter with `--python`                                                      |
-| `PPA007` | uv uses a .venv in the workspace                                         | `uv run`: pass `--no-project` and a `--python` path outside the workspace; `uv pip`: pass `--system` or `--python` |
+| `PPA007` | uv uses a .venv in the workspace                                         | `uv run`: pass `--no-project` and a `--python` path outside the workspace; `uv pip`: pass a trusted `--python`     |
 | `PPA008` | setup-uv works in the workspace                                          | Set `working-directory` to `${{ github.action_path }}` or `${{ runner.temp }}`                                     |
 | `PPA009` | unresolved: the command's effect depends on a value the scan cannot read | A notice: confirm the value by hand, or suppress it with a reason                                                  |
 | `PPA010` | not fully scanned: shell the parser could not read                       | A notice: simplify the shell, or suppress it with a reason                                                         |
 | `PPA011` | setup-uv runs an interpreter the caller's environment chooses            | Use the guarded step in [setup-uv and the caller's environment](#setup-uv-and-the-callers-environment)             |
 | `PPA012` | setup-uv adds a directory from the caller's environment to PATH          | Set `tool-bin-dir` under `${{ runner.temp }}` or `${{ github.action_path }}`, as the guarded step does             |
+| `PPA013` | uv chooses its interpreter from the caller's environment                 | Pass a [trusted interpreter](#trusted-interpreter-values) as `--python`; run `uv python find` under `env -i`       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -944,7 +945,9 @@ Evidence section of #448 records them:
 - `UV_PROJECT_ENVIRONMENT`
 
 Check this list against the uv release a step installs: a later
-release can read more.
+release can read more. `INTERPRETER_SELECTORS` in
+`src/gha_workflow_linter/python_path/_uv.py` holds this list, and
+`PPA013` reads it from there.
 
 The rules rest on these facts about setup-uv v10.3.3, which a reader
 can check against later uv and setup-uv releases:
@@ -1030,6 +1033,72 @@ context is the caller job's. The check matches `with:` input names in
 any case, as setup-uv reads them; see **Scope and limits** for how
 it reads step `env:` names.
 
+#### uv commands and the caller's environment
+
+`PPA013` reports a uv command in a workflow or composite action whose
+interpreter the caller's environment can choose. It does not read
+scripts, whose caller the scan does not know. Three cases count:
+
+1. **Rule 1.** `uv run`, `uvx`, `uv tool run`, `uv venv`, `uv sync`,
+   `uv export` and `uv pip` discover an interpreter. Without a
+   trusted `--python` or `UV_PYTHON` the caller's `UV_PYTHON`,
+   `VIRTUAL_ENV`, `CONDA_PREFIX` or `PATH` picks it. A version such
+   as `--python 3.12` is a request, not a path; `--system`,
+   `UV_SYSTEM_PYTHON`, `--managed-python` and `UV_MANAGED_PYTHON`
+   leave the search to the caller too, so `uv pip --system` clears
+   `PPA007` alone. A `--python` or `UV_PYTHON`
+   value the scan cannot trace to a trusted interpreter is `PPA009`.
+2. **Rule 2.** `uv python find` and `uv python install` read `PATH`
+   and `UV_*` from the caller unless `env -i` (or `env -`) runs them.
+   `env -u` or a `NAME=` value the check cannot read is `PPA009`, and
+   does not hide this finding: the caller's environment still
+   reaches uv.
+3. **Rule 3.** `UV_PYTHON`, `UV_SYSTEM_PYTHON` or `UV_MANAGED_PYTHON`
+   set in a workflow, job or step `env:` block, or written to
+   `$GITHUB_ENV`, reaches every uv command that inherits it. A
+   `UV_PYTHON` holding a trusted interpreter is fine; the check reads
+   these names in any case, as Windows does. The check reads a
+   `$GITHUB_ENV` write by record, as the runner does: a line inside
+   another variable's `NAME<<DELIMITER` record sets nothing, and a
+   `UV_PYTHON<<DELIMITER` record holds one value. A write whose format
+   or name the check cannot read (`printf "$fmt"`, `printf '%b'`)
+   and whose text names one of these settings is `PPA009`.
+
+A command that `env -i`, `env -`, `exec -c` or `sudo` runs gets no
+`PPA013`, unless the wrapper keeps one of the interpreter selectors
+[listed above](#setup-uv-and-the-callers-environment) or a `UV_*`
+name, or passes a selector itself as `NAME=value` (see **Python path
+scope and limits**): the caller's environment does not reach it.
+
+#### Trusted interpreter values
+
+`PPA013` and the program checks of the other rules trust these as an
+interpreter:
+
+- an absolute literal path outside the workspace, such as
+  `/usr/bin/python3`;
+- `${{ steps.<id>.outputs.python-path }}` of an
+  `actions/setup-python` step earlier in the same job;
+- a run step's output, `${{ steps.<id>.outputs.<name> }}`, that the
+  step writes once to `$GITHUB_OUTPUT` from a variable it assigns
+  once from `$(env -i … uv python find …)` or `install` with
+  `--managed-python`, or with `--system` and `--no-config`;
+- a shell variable assigned once at the top level of the step, or a
+  step `env:` value, that holds one of the above.
+
+`${{ steps.<id>.outputs.uv-path }}` of an `astral-sh/setup-uv` step
+earlier in the job counts as uv, so `"$UV" pip install --python
+"$PYTHON"` reads as a uv command. A step id used twice, an output
+written twice, a variable assigned twice, or a step that runs `eval`,
+`source` or `.` trusts nothing; nor does a producer step with an
+`if:` or a `continue-on-error:` other than `false`, whose output may
+be empty. A Python-named expression none of these produces, such as
+`"${{ inputs.python }}" -I s.py`, is `PPA009` as a program; the check
+still judges how it runs Python. The trust is lexical: the check does
+not follow functions, loops or conditionals. Quote the reference:
+`"$PYTHON"` holds one word, while an unquoted `$PYTHON` from a step
+output may split, so the check reads it as `PPA009`.
+
 #### Suppressing a deliberate run
 
 Both forms `stderr-merge-ok` accepts work here, on the line above the
@@ -1064,7 +1133,7 @@ carries them with `"suppressed": true`. The engine's own
 
 Without `--verify-python-path` the check reports and leaves the exit
 code alone. With it, an unsuppressed finding of `PPA001` to `PPA008`,
-or of `PPA011` or `PPA012` in a composite action, makes the run exit
+or of `PPA011` to `PPA013` in a composite action, makes the run exit
 `7`, and a file the check could not read makes it
 exit `1`: enforcement that never looked must not pass. A check that
 fails outright does the same under `--verify-python-path`, and
@@ -1089,8 +1158,8 @@ annotates the right file.
    through a value it cannot read, such as a step output or an
    unknown variable, as `PPA009`, without judging it.
 3. **The caller's environment.** `PPA011` and `PPA012` cover a
-   setup-uv step the caller's environment can steer. #448 tracks the
-   rest: the uv command rule and the bare-`python` rule. The `PPA011`
+   setup-uv step the caller's environment can steer, and `PPA013` a
+   uv command. #448 tracks the bare-`python` rule. The `PPA011`
    guard list follows the source of setup-uv v10.3.3 and may need
    revisiting for a later release. The rules read a step's values
    this way:
@@ -1125,11 +1194,90 @@ annotates the right file.
      guard needs its exact name, and fails when the step also sets it
      in another case, since the platform then decides which value uv
      reads.
-4. **Workflow findings do not gate.** In a workflow file the linter
-   reports `PPA011` and `PPA012` but they never fail a run: a job
-   sees its own environment, and a `$GITHUB_ENV` write earlier in the
-   same job falls outside these rules.
-5. **Out of scope.** The check does not read `.pth` files or Python
+4. **The trusted model.** [Trusted interpreter
+   values](#trusted-interpreter-values) rest on these readings:
+   - **Output writes.** A `$GITHUB_OUTPUT` write counts when its
+     standard output goes there: an unnumbered, `1>` or `1>>`
+     redirect, or `&>` and `&>>`. `2>>` does not, nor a later
+     redirect that sends fd 1 elsewhere (`> /dev/null`, `>&2`); a
+     mention of `GITHUB_OUTPUT` the check does not read as a write
+     makes it trust no output of the step. So does a write inside a
+     conditional, loop, function, `&&` or `||` list, or subshell,
+     which may never run: a write must stand at the top level.
+   - **Producers.** A step with an `if:`, or a `continue-on-error:`
+     other than `false`, gives no trusted output: it may not run, or
+     may fail, and leave the output empty.
+   - **Assignments.** `eval`, `source` and `.` count in any
+     spelling: quoted, or after `builtin` or `command`; so does a
+     `trap` that sets an action, whose text may run before any
+     command. `printf -v`,
+     `read`, `unset`, `export` and the other assigning builtins count
+     their targets after quote removal (`printf -v "PY"` assigns
+     `PY`). `read` and `select` always count `REPLY`, and `mapfile`
+     and `readarray` `MAPFILE`, the names they fill when given none.
+     `printf` counts its arguments as targets when its format holds
+     `%n` or is not literal. A target the check cannot read
+     (`read -r "$DEST"`, `printf -v "$DEST"`, `export "$NAME"`,
+     `unset "$NAME"`) may name any variable, so the step trusts none.
+     A subscript write (`PY[1]=x`) changes `PY` but never binds
+     `"$PY"`. A step `env:` `UV_PYTHON` the step assigns, unsets or
+     leaves opaque gives uv no exemption: `PPA009`. A `NAME=value`
+     on the uv command or its wrapper still decides.
+   - **Values.** A value holding a line break or other control
+     character is not one path and is never trusted: written to
+     `$GITHUB_OUTPUT` it would start a second record. An output
+     written from a literal path stands for that path, so its name
+     decides whether a later step runs Python or uv.
+   - **Word splitting.** An unquoted reference, in a command or a
+     `$GITHUB_OUTPUT` write, resolves when it holds a literal value
+     with no blank or glob character, in a step that never sets
+     `IFS`; a quoted `"$PYTHON"` always resolves. A variable
+     or a step output substituted in a command, that resolves to a
+     path whose name is neither Python nor uv, such as `/opt/pypy3`,
+     stays `PPA009` when the command looks like Python.
+   - **Lookups.** The check trusts the result of `env -i … uv python
+     find` or `install` when the lookup passes `PPA006` and `PPA007`
+     itself: with `--managed-python`, or with `--system` and
+     `--no-config` (or `UV_NO_CONFIG=1`). A lookup that could return
+     a workspace `.venv` gives no trusted value.
+   - **Cleared wrappers.** `env -i`, `env -`, `exec -c` or `sudo`
+     loses its exemption when any `NAME=value` it passes, through
+     nested wrappers and after `sudo` included, names an interpreter
+     selector. These names, which the pinned lookup of
+     lfreleng-actions/pypi-version-check-action#181 needs, may pass:
+     `PATH`, `HOME`, `UV_NO_CONFIG`, `UV_PYTHON_INSTALL_DIR`,
+     `UV_CACHE_DIR` and `UV_NO_PROGRESS` (`CLEARED_ALLOWED` in
+     `_uv.py`), each with a literal value: `PATH="$PATH"` or a
+     `${{ }}` value counts as a passed selector. A passed `UV_PYTHON`
+     holding a trusted interpreter still pins uv.
+   - **Trusted interpreter values: limits.** The model is lexical
+     and fixed. It trusts a value through these alone: one unconditional
+     top-level assignment, or one unconditional top-level
+     `$GITHUB_OUTPUT` write, from a producer step without `if:` or
+     `continue-on-error:`; a double-quoted expansion, or an unquoted
+     one as **Word splitting** allows; the assigning builtins named
+     above; and the selector constant above for `env -i`. It models no
+     control flow, functions, arrays beyond the literal `env -i`
+     form, `eval`, `source` or arithmetic. Anything else is `PPA009`,
+     reported and never trusted. A request to model more of bash than
+     this is out of the check's scope.
+
+     This list is the whole model. A construct it does not name, such
+     as arithmetic, indirect expansion (`${!name}`), `declare -n`,
+     traps, co-processes, process substitution or a value that crosses
+     a step through any channel other than `$GITHUB_OUTPUT`, leaves the
+     value unresolved: `PPA009`, reported and never trusted. A request
+     to model more of bash than this falls outside the check's scope.
+     The model fails closed: a value the check cannot read never earns
+     an exemption or keeps a trust: a wrapper's `NAME=value`, a
+     substituted step output, a `$GITHUB_ENV` write or an assigning
+     builtin's target alike.
+5. **Workflow findings do not gate.** In a workflow file the linter
+   reports `PPA011` to `PPA013` but they never fail a run: a job
+   sees its own environment. `PPA011` and `PPA012` do not read a
+   `$GITHUB_ENV` write earlier in the same job; `PPA013` reports one
+   that sets a uv interpreter setting.
+6. **Out of scope.** The check does not read `.pth` files or Python
    source files.
 
 ### What Gets Scanned
@@ -1318,7 +1466,7 @@ repos:
       # Offline; fails the commit on a high or medium stderr merge
       - id: gha-stderr-merge
       # Offline; fails the commit on a Python run that takes in
-      # workspace files (PPA001 to PPA008, and PPA011 and PPA012
+      # workspace files (PPA001 to PPA008, and PPA011 to PPA013
       # in a composite action)
       - id: gha-python-path
 ```
@@ -1926,7 +2074,7 @@ file given with `config-file` still decides it.
 | `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
 | `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
 | `python-path`         | Python-path check mode: `off` or `report`                     | No       |         |
-| `verify-python-path`  | Fail on PPA001 to PPA008, or PPA011/PPA012 in an action       | No       | `false` |
+| `verify-python-path`  | Fail on PPA001 to PPA008, or PPA011 to PPA013 in an action    | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 

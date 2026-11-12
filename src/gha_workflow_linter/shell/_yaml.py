@@ -129,13 +129,17 @@ class Block:
     each source line's text starts, with the line's 1-based number, in
     order. ``comment`` is the YAML comment after a plain or quoted
     value, with its 1-based line: YAML drops it from the value, so the
-    shell never sees it.
+    shell never sees it. ``job`` is the workflow job holding the step
+    (empty in an action) and ``step`` its position among the file's
+    steps.
     """
 
     text: str
     starts: list[tuple[int, int]]
     env: dict[str, Word] = field(default_factory=dict)
     comment: tuple[int, str] | None = None
+    job: str = ""
+    step: int = 0
 
     def line_at(self, offset: int) -> int:
         """The 1-based source line of an offset in the value."""
@@ -170,6 +174,47 @@ class SetupUv:
 
 
 @dataclass
+class Step:
+    """One step: its job (empty in an action), position, ``id`` and action.
+
+    ``action`` is the ``uses:`` action without its ref, lower-cased;
+    ``block`` the index in ``YamlFile.blocks`` of its POSIX-style
+    ``run:`` text, or -1. ``conditional`` is set when an ``if:`` or a
+    ``continue-on-error:`` other than ``false`` means the step may
+    leave its outputs empty.
+    """
+
+    job: str
+    step: int
+    id: str | None
+    action: str
+    block: int = -1
+    conditional: bool = False
+
+
+@dataclass
+class UvEnv:
+    """A uv interpreter setting in a YAML ``env:``: UV_PYTHON and the like.
+
+    ``scope`` is ``step``, ``job`` or ``file``; ``job`` and ``step``
+    place it as ``Step`` does, ``step`` being 0 outside a step.
+    """
+
+    line: int
+    name: str
+    value: Word
+    scope: str
+    job: str = ""
+    step: int = 0
+
+
+# The uv settings that choose an interpreter, matched in any case.
+UV_INTERPRETER_SETTINGS = frozenset(
+    {"UV_PYTHON", "UV_SYSTEM_PYTHON", "UV_MANAGED_PYTHON"}
+)
+
+
+@dataclass
 class YamlFile:
     """What the scan reads from one workflow or action file.
 
@@ -177,6 +222,8 @@ class YamlFile:
     among the file's steps, whatever its shell; ``blocks`` only the
     POSIX-style ones. Positions follow the file's order, so one step
     comes before another even when flow style puts both on one line.
+    ``steps`` holds every step, ``uv_env`` the uv interpreter settings
+    of every ``env:`` scope outside setup-uv steps.
     """
 
     blocks: list[Block] = field(default_factory=list)
@@ -184,6 +231,8 @@ class YamlFile:
     setup_uv: list[SetupUv] = field(default_factory=list)
     runs: list[tuple[int, str]] = field(default_factory=list)
     expressions: list[Expression] = field(default_factory=list)
+    steps: list[Step] = field(default_factory=list)
+    uv_env: list[UvEnv] = field(default_factory=list)
 
 
 def split_lines(text: str) -> list[str]:
@@ -397,20 +446,56 @@ class _Reader:
         job = len(path) == 2 and path[0] == "jobs"
         step = is_step_path(path)
         scope = not path or job or step
+        job_name = path[1] if path[:1] == ("jobs",) and len(path) > 1 else ""
+        # GitHub matches an action's owner and name in any case.
+        action, at, _ref = (scalar(child(node, "uses")) or "").partition("@")
+        action = action.lower() if at else ""
         if scope and isinstance(env, yaml.MappingNode):
             for name, value in env.value:
                 text = scalar(value)
-                if scalar(name) == "PYTHONPATH" and text is not None:
-                    line = int(name.start_mark.line) + 1
+                key = scalar(name)
+                if text is None or key is None:
+                    continue
+                line = int(name.start_mark.line) + 1
+                if key == "PYTHONPATH":
                     self.found.pythonpath.append(
                         (line, literal_word(text, table))
                     )
+                # PPA011 judges a setup-uv step's env, not PPA013.
+                if (
+                    step
+                    and action == "astral-sh/setup-uv"
+                    or key.upper() not in UV_INTERPRETER_SETTINGS
+                ):
+                    continue
+                where = "step" if step else "job" if job else "file"
+                self.found.uv_env.append(
+                    UvEnv(
+                        line,
+                        key.upper(),
+                        literal_word(text, table),
+                        where,
+                        job_name,
+                        self.steps + 1 if step else 0,
+                    )
+                )
         if not step:
             return
         self.steps += 1
-        # GitHub matches an action's owner and name in any case.
-        action, at, _ref = (scalar(child(node, "uses")) or "").partition("@")
-        if at and action.lower() == "astral-sh/setup-uv":
+        tolerant = child(node, "continue-on-error")
+        conditional = child(node, "if") is not None or (
+            tolerant is not None and scalar(tolerant) != "false"
+        )
+        self.found.steps.append(
+            Step(
+                job_name,
+                self.steps,
+                scalar(child(node, "id")),
+                action,
+                conditional=conditional,
+            )
+        )
+        if action == "astral-sh/setup-uv":
             inputs = scalar_words(child(node, "with"), table, inputs=True)
             self.found.setup_uv.append(
                 SetupUv(
@@ -426,7 +511,10 @@ class _Reader:
             # Every step's text, whatever its shell, for literal matches.
             self.found.runs.append((self.steps, str(run.value)))
             if self.is_shell(node, ancestors):
-                self.found.blocks.append(self.block(node, run, ancestors))
+                block = self.block(node, run, ancestors)
+                block.job, block.step = job_name, self.steps
+                self.found.steps[-1].block = len(self.found.blocks)
+                self.found.blocks.append(block)
 
     def scopes(
         self, node: yaml.MappingNode, ancestors: list[yaml.MappingNode]

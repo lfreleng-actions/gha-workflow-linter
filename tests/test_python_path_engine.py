@@ -1331,7 +1331,7 @@ class UvTest(unittest.TestCase):
             (
                 "runs:\n  steps:\n    - run: uv run --directory "
                 "${{ github.action_path }} python -m x\n",
-                ["PPA006", "PPA007", "PPA001"],
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
             ),
             # FALSE POSITIVE: no directory exempts Python; only -I does.
             ('env -C "$GITHUB_ACTION_PATH" python3 -m x', ["PPA001"]),
@@ -1390,8 +1390,9 @@ class UvTest(unittest.TestCase):
     def test_env_wrapper_removes_step_settings(self) -> None:
         """env NAME=value replaces what the step's env: sets.
 
-        -i, -u and - remove settings the scan would have to track, so
-        before uv they are PPA009 (R3); the last NAME=value wins.
+        -u removes settings the scan would have to track, so before uv
+        it is PPA009 (R3); -i and - clear them all, so uv runs with its
+        defaults; the last NAME=value wins.
         """
         env = (
             "on: push\njobs:\n  a:\n    steps:\n      - env:\n"
@@ -1406,15 +1407,18 @@ class UvTest(unittest.TestCase):
             ),
             ("env -u UV_NO_PROJECT uv run python s.py", ["PPA009"]),
             ("env --unset=UV_NO_PROJECT uv run python s.py", ["PPA009"]),
-            ("env -i PATH=/usr/bin uv run python s.py", ["PPA009"]),
-            ("env - PATH=/usr/bin uv run python s.py", ["PPA009"]),
-            ("env UV_PYTHON=.venv/bin/python uv run python s.py", ["PPA007"]),
+            ("env -i PATH=/usr/bin uv run python s.py", ["PPA006", "PPA007"]),
+            ("env - PATH=/usr/bin uv run python s.py", ["PPA006", "PPA007"]),
+            (
+                "env UV_PYTHON=.venv/bin/python uv run python s.py",
+                ["PPA007", "PPA013"],
+            ),
             ('env -u "$v" uv run python s.py', ["PPA009"]),
             ("env UV_PYTHON=/usr/bin/python3 uv run python s.py", []),
             (
                 "env UV_PYTHON=/usr/bin/python3 UV_PYTHON=.venv/bin/python "
                 "uv run python s.py",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
             (
                 "UV_PYTHON=.venv/bin/python UV_PYTHON=/usr/bin/python3 "
@@ -1424,7 +1428,7 @@ class UvTest(unittest.TestCase):
             (
                 "UV_PYTHON=/usr/bin/python3 UV_PYTHON=.venv/bin/python "
                 "uv run python s.py",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
         ):
             with self.subTest(line=line):
@@ -1456,32 +1460,50 @@ class UvTest(unittest.TestCase):
                 self.assertEqual(rules(text), ["PPA009"])
 
     def test_expressions_in_uv_paths(self) -> None:
-        """Only a literal absolute path is outside; no expression counts (R1)."""
+        """Only a literal absolute path is outside; no expression counts (R1).
+
+        PPA013 also asks the --python value to be trusted: a known
+        place that is not one is PPA013, an expression the scan cannot
+        trace PPA009.
+        """
         safe = "uv run --no-config --no-project --python {} python s.py"
         for path, kind, expected in (
             (
                 "${{ github.workspace }}/.venv/bin/python",
                 "workflow",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
-            ("${{ inputs.python }}", "workflow", ["PPA007"]),
-            ("${{ inputs.venv }}/bin/python", "workflow", ["PPA007"]),
-            ("${{ runner.temp }}/py/bin/python", "workflow", ["PPA007"]),
+            ("${{ inputs.python }}", "workflow", ["PPA007", "PPA009"]),
+            (
+                "${{ inputs.venv }}/bin/python",
+                "workflow",
+                ["PPA007", "PPA009"],
+            ),
+            (
+                "${{ runner.temp }}/py/bin/python",
+                "workflow",
+                ["PPA007", "PPA013"],
+            ),
             (
                 "${{ runner.temp }}/../w/.venv/bin/python",
                 "workflow",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
-            ("${{ steps.py.outputs.python-path }}", "workflow", ["PPA007"]),
+            # No setup-python step named py: not traced.
+            (
+                "${{ steps.py.outputs.python-path }}",
+                "workflow",
+                ["PPA007", "PPA009"],
+            ),
             (
                 "${{ github.action_path }}/.venv/bin/python",
                 "action",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
             (
                 "${{ github.action_path }}/.venv/bin/python",
                 "workflow",
-                ["PPA007"],
+                ["PPA007", "PPA009"],
             ),
         ):
             line = safe.format(path)
@@ -1497,29 +1519,33 @@ class UvTest(unittest.TestCase):
             (
                 "${{ github.action_path }}",
                 "action",
-                ["PPA006", "PPA007", "PPA001"],
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
             ),
             (
                 "${{ github.action_path }}/sub",
                 "action",
-                ["PPA006", "PPA007", "PPA001"],
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
             ),
             (
                 "${{ github.action_path }}/..",
                 "action",
-                ["PPA006", "PPA007", "PPA001"],
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
             ),
             (
                 "${{ github.action_path }}",
                 "workflow",
-                ["PPA006", "PPA007", "PPA001"],
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
             ),
             (
                 "${{ github.workspace }}",
                 "workflow",
-                ["PPA006", "PPA007", "PPA001"],
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
             ),
-            ("${{ inputs.dir }}", "workflow", ["PPA006", "PPA007", "PPA001"]),
+            (
+                "${{ inputs.dir }}",
+                "workflow",
+                ["PPA006", "PPA007", "PPA013", "PPA001"],
+            ),
         ):
             line = f"uv run --directory {directory} python -m x"
             text = (
@@ -1602,7 +1628,7 @@ class UvTest(unittest.TestCase):
             "env:\n  UV_NO_CONFIG: '1'\n  UV_NO_PROJECT: '1'\n  UV_PYTHON: /opt/py/bin/python3\n"
             "runs:\n  steps:\n    - run: uv run python x.py\n"
         )
-        self.assertEqual(rules(text, "action"), ["PPA006", "PPA007"])
+        self.assertEqual(rules(text, "action"), ["PPA006", "PPA007", "PPA013"])
 
     def test_no_directory_is_trusted(self) -> None:
         """A cd into the action path does not exempt uv (R1)."""
@@ -1724,29 +1750,26 @@ class ContextTest(unittest.TestCase):
 
     def test_arrays(self) -> None:
         for text, expected in (
-            # An array's elements are not read (R2): it is PPA009 when
-            # the command looks like Python, here by its "-" (which
-            # tree-sitter drops before a heredoc) or its -c.
-            # FALSE POSITIVE: the array's -I is not read.
+            # A literal array assigned once is read: its -I counts.
             (
                 'PY_RUN=(python3 -I)\n"${PY_RUN[@]}" - <<EOF\nimport x\nEOF',
-                ["PPA009"],
+                [],
             ),
             (
                 'PY_RUN=(python3)\n"${PY_RUN[@]}" - <<EOF\nimport x\nEOF',
-                ["PPA009"],
+                ["PPA003"],
             ),
             # Known limit (DESIGN.md): no Python-looking signal.
             (
                 'pip=("$venv/bin/python" -m pip download\n  --dest d)\n"${pip[@]}" six',
                 [],
             ),
-            # FALSE POSITIVE: uvx --from runs no project code, but the
-            # scan does not read the array.
+            # uvx --from runs no project code.
             (
                 'tox_cmd=(uvx --from tox tox)\n"${tox_cmd[@]}" -c tox.ini',
-                ["PPA009"],
+                [],
             ),
+            # An element the scan cannot read stays PPA009 (R2).
             (
                 'PY_RUN=(uv run --no-project --no-config --python "$py" --with pyyaml python)\n'
                 '"${PY_RUN[@]}" - <<EOF\nimport yaml\nEOF',
@@ -2052,9 +2075,18 @@ class YamlTest(unittest.TestCase):
             """
         )
         findings = audit.scan_text(text, "workflow", "repo", "ci.yaml")
+        # PPA013 names the file-level UV_SYSTEM_PYTHON once, where set,
+        # and each uv command run without env -i.
         self.assertEqual(
             [(f.rule, f.line) for f in findings],
-            [("PPA006", 12), ("PPA006", 15)],
+            [
+                ("PPA013", 3),
+                ("PPA013", 9),
+                ("PPA006", 12),
+                ("PPA013", 12),
+                ("PPA006", 15),
+                ("PPA013", 15),
+            ],
         )
 
     def test_non_shell_steps_are_skipped(self) -> None:
@@ -2682,7 +2714,8 @@ class SilentPassTest(unittest.TestCase):
                 ),
                 "workflow",
             ),
-            ["PPA009"],
+            # env -u leaves the caller's PATH and UV_* in place (PPA013).
+            ["PPA009", "PPA013"],
         )
         self.assertEqual(
             rules(
@@ -2693,7 +2726,10 @@ class SilentPassTest(unittest.TestCase):
         )
 
     def test_env_wrapper_order(self) -> None:
-        """env reads its words in order; -i before uv is PPA009 (R3)."""
+        """env reads its words in order; -i before uv is PPA009 (R3).
+
+        An unread PATH passed into env -i earns no exemption (PPA013).
+        """
         self.assertEqual(
             rules(
                 UV_STEP_ENV.format(
@@ -2701,7 +2737,7 @@ class SilentPassTest(unittest.TestCase):
                 ),
                 "workflow",
             ),
-            ["PPA009"],
+            ["PPA009", "PPA013"],
         )
         # Before Python, -i and -u cannot add to sys.path.
         self.assertEqual(rules("env -i -u X python3 -I s.py"), [])
@@ -2713,7 +2749,7 @@ class SilentPassTest(unittest.TestCase):
                 ),
                 "workflow",
             ),
-            ["PPA007"],
+            ["PPA007", "PPA013"],
         )
         # Unresolved: a word env reads that the scan cannot (R3).
         self.assertEqual(
@@ -2781,7 +2817,10 @@ class ReviewRoundFourTest(unittest.TestCase):
         safe = "uv run --no-config --no-project python s.py"
         outside = {"UV_PYTHON": "/usr/bin/python3"}
         for line, expected in (
-            (f"sudo UV_PYTHON=.venv/bin/python {safe}", ["PPA007"]),
+            (
+                f"sudo UV_PYTHON=.venv/bin/python {safe}",
+                ["PPA007", "PPA013"],
+            ),
             (f"sudo {safe}", ["PPA007"]),
             (f"sudo -E {safe}", []),
             (f"sudo --preserve-env {safe}", []),
@@ -2801,8 +2840,9 @@ class ReviewRoundFourTest(unittest.TestCase):
         for line, expected in (
             ("exec -c uv python find --system", ["PPA006"]),
             ("exec -cl uv python find --system", ["PPA006"]),
-            ("exec -a name uv python find --system", []),
-            ("exec uv python find --system", []),
+            # The caller's environment reaches uv: PPA013.
+            ("exec -a name uv python find --system", ["PPA013"]),
+            ("exec uv python find --system", ["PPA013"]),
         ):
             with self.subTest(line=line):
                 self.assertEqual(
@@ -2834,10 +2874,11 @@ class ReviewRoundFourTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(rules(line), expected)
         # A UV_PYTHON the scan cannot read is still a request.
+        # PPA013 names the step's UV_PYTHON; PPA009 cannot trace it.
         unread = {"VIRTUAL_ENV": "/opt/safe", "UV_PYTHON": "${{ inputs.py }}"}
         self.assertEqual(
             rules(step_with_env(unread, "uv pip list"), "workflow"),
-            ["PPA007"],
+            ["PPA013", "PPA007", "PPA009"],
         )
 
     def test_action_pythonpath_in_the_workspace(self) -> None:
@@ -2982,11 +3023,14 @@ class ReviewRoundFiveTest(unittest.TestCase):
         """An option's operand (exec -a NAME=1) sets nothing."""
         env = {"X": "'1'"}
         for line, expected in (
-            ("exec -a UV_NO_CONFIG=1 uv python find --system", ["PPA006"]),
+            (
+                "exec -a UV_NO_CONFIG=1 uv python find --system",
+                ["PPA006", "PPA013"],
+            ),
             (
                 "exec -a UV_PYTHON=/usr/bin/python3 "
                 "uv run --no-config --no-project python s.py",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
             ("sudo -u root UV_NO_CONFIG=1 uv python find --system", []),
         ):
@@ -3076,14 +3120,15 @@ class ReviewRoundSixTest(unittest.TestCase):
         for line, expected in (
             (
                 "UV_PROJECT_ENVIRONMENT+=/opt/safe uv export --no-config --locked",
-                ["PPA007"],
+                ["PPA007", "PPA013"],
             ),
-            ("UV_PROJECT_ENVIRONMENT=/opt/safe uv export --locked", []),
-            ("VIRTUAL_ENV+=/opt/safe uv pip list", ["PPA007"]),
+            ("UV_PROJECT_ENVIRONMENT=/opt/safe uv export --locked", ["PPA013"]),
+            ("VIRTUAL_ENV+=/opt/safe uv pip list", ["PPA007", "PPA013"]),
+            # PPA013 cannot trace the appended UV_PYTHON: PPA009.
             (
                 "UV_PYTHON+=/usr/bin/python3 "
                 "uv run --no-config --no-project python s.py",
-                ["PPA007"],
+                ["PPA007", "PPA009"],
             ),
         ):
             with self.subTest(line=line):
@@ -3169,7 +3214,8 @@ class ReviewRoundSixTest(unittest.TestCase):
         for rest, expected in (
             ("${{ inputs.python }} true", ["PPA009"]),
             ("${{ env.PYTHONPATH }} true", ["PPA009"]),
-            ("-- ${{ inputs.python }} s.py", []),
+            # A program no trusted step produces is unresolved (#467).
+            ("-- ${{ inputs.python }} s.py", ["PPA009"]),
         ):
             with self.subTest(rest=rest):
                 self.assertEqual(
@@ -3693,7 +3739,7 @@ class ReviewRoundElevenTest(unittest.TestCase):
             ),
             # Operands, read or not, are not options.
             (safe + 'uv pip list --python /usr/bin/python3 "$pkg"', []),
-            ("uv pip install --system ${{ inputs.pkg }}", []),
+            ("uv pip install --system ${{ inputs.pkg }}", ["PPA013"]),
             (
                 "uv run --no-config --no-project --python /usr/bin/python3 "
                 '--with "$dep" python -I s.py',
@@ -4337,9 +4383,11 @@ class ReviewRoundElevenTest(unittest.TestCase):
         ):
             with self.subTest(options=options):
                 step = head + f"xargs {options} uv python find --system\n"
-                self.assertEqual(rules(step, "action"), ["PPA006"])
+                self.assertEqual(rules(step, "action"), ["PPA006", "PPA013"])
+        # uv python find without env -i is PPA013 throughout.
         self.assertEqual(
-            rules(head + "xargs -n 1 uv python find --system\n", "action"), []
+            rules(head + "xargs -n 1 uv python find --system\n", "action"),
+            ["PPA013"],
         )
         self.assertEqual(
             rules(
@@ -4347,7 +4395,7 @@ class ReviewRoundElevenTest(unittest.TestCase):
                 + "xargs -I X --process-slot-var=OTHER uv python find --system\n",
                 "action",
             ),
-            [],
+            ["PPA013"],
         )
         # PYTHONPATH itself: a number is a relative entry the scan cannot see.
         self.assertEqual(
@@ -4398,7 +4446,11 @@ class ReviewRoundElevenTest(unittest.TestCase):
         self.assertEqual(rules(safe + "python -I -"), [])
 
     def test_python_named_expressions_are_interpreters(self) -> None:
-        """``${{ env.PY }}``, ``${{ inputs.python3 }}``: names that say Python."""
+        """``${{ env.PY }}``, ``${{ inputs.python3 }}``: names that say Python.
+
+        With no trusted producer, a safe invocation is still PPA009:
+        the scan cannot resolve the interpreter (#467).
+        """
         for expression in (
             "env.PY",
             "inputs.python3",
@@ -4422,7 +4474,7 @@ class ReviewRoundElevenTest(unittest.TestCase):
                         action_step('"${{ ' + expression + ' }}" -I -m x'),
                         "action",
                     ),
-                    [],
+                    ["PPA009"],
                 )
         self.assertEqual(
             rules(
