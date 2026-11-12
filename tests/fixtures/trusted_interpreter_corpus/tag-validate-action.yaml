@@ -1,0 +1,518 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+# yamllint disable rule:line-length
+
+# The interpreter producer and consumer steps of
+# lfreleng-actions/tag-validate-action action.yaml at
+# ebcc07e7303b1e211c80030f38f0ff8795466115,
+# as #469 pins them, comments included. The consumers sit at lines
+# 316, 319, 329, 619, 628, 647, 651, 655, 756 of the full file.
+runs:
+  using: composite
+  steps:
+    - name: 'Set up Python'
+      id: setup-python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.12'
+
+    # setup-uv leaves PATH alone whenever UV_NO_MODIFY_PATH is defined,
+    # even empty, and then runs a bare "uv", which PATH resolves to the
+    # caller's if an earlier step put one there. A step env cannot unset
+    # a variable, so stop here instead.
+
+    - name: 'Install uv'
+      id: setup-uv
+      if: inputs.use_local_action != 'true' && !contains(github.repository, 'lfreleng-actions/tag-validate-action')
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        # The action's own checkout, outside the caller's workspace
+        working-directory: "${{ github.action_path }}"
+        # Without it setup-uv puts the caller's HOME/XDG_* bin dir on PATH
+        tool-bin-dir: "${{ runner.temp }}/tag-validate-action/bin"
+        # The post-step "uv cache prune" would hit the invalid preference
+        enable-cache: false
+      env:
+        UV_NO_CONFIG: '1'
+        UV_NO_PROJECT: '1'
+        UV_PYTHON_PREFERENCE: 'lookup-disabled'
+        # Inherited, it makes setup-uv probe uv, which the line above fails
+        UV_PYTHON_ARCH: ''
+        UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/tag-validate-action/python"
+
+
+    - name: 'Verify Python module import'
+      if: inputs.use_local_action == 'true' || contains(github.repository, 'lfreleng-actions/tag-validate-action')
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
+      run: |
+        # -I keeps the working directory (the caller's workspace) off
+        # sys.path and ignores PYTHONPATH and the other PYTHON*
+        # variables. src/ is added to sys.path by the code itself.
+        # -I does not cover these two, which set sys.executable.
+        unset PYTHONEXECUTABLE __PYVENV_LAUNCHER__
+        SRC_DIR="${ACTION_PATH}/src"
+        # Test if the Python module can be imported
+        echo "🔍 Testing Python module import..."
+        echo "Python: ${PYTHON}"
+        echo "Python sys.path:"
+        "${PYTHON}" -I -c 'import sys; print("\n".join(sys.path))'
+        echo ""
+        echo "Attempting to import tag_validate module..."
+        "${PYTHON}" -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import tag_validate; print("✅ tag_validate module imported successfully"); print("Module location:", tag_validate.__file__)' "${SRC_DIR}" || {
+          echo "❌ Failed to import tag_validate module" >&2
+          echo "Directory contents of src/:" >&2
+          ls -la "${ACTION_PATH}/src/" || echo "src/ directory not found" >&2
+          echo "Directory contents of src/tag_validate/:" >&2
+          ls -la "${ACTION_PATH}/src/tag_validate/" || echo "src/tag_validate/ directory not found" >&2
+          exit 1
+        }
+        echo ""
+        echo "Testing CLI entry point..."
+        "${PYTHON}" -I "${ACTION_PATH}/scripts/run_local_cli.py" --version || {
+          echo "❌ Failed to run CLI --version" >&2
+          exit 1
+        }
+        echo "✅ All import tests passed"
+
+
+    - name: 'Validate tag'
+      id: validate
+      shell: bash
+      run: |
+        # Run tag-validate Python CLI with rich output
+        set -euo pipefail
+        # -I below does not cover these two, which set sys.executable
+        # and with it the site-packages Python uses
+        unset PYTHONEXECUTABLE __PYVENV_LAUNCHER__
+
+        # Normalize inputs to lowercase for case-insensitive matching.
+        # printf '%s\n' is used instead of echo so values beginning with
+        # -n/-e or containing backslash escapes are passed through
+        # literally (echo's option/escape handling is implementation-
+        # defined).
+        REQUIRE_TYPE=$(printf '%s\n' "${INPUTS_REQUIRE_TYPE}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        REQUIRE_SIGNED=$(printf '%s\n' "${INPUTS_REQUIRE_SIGNED}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')
+        REQUIRE_GITHUB=$(printf '%s\n' "${INPUTS_REQUIRE_GITHUB}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_GERRIT=$(printf '%s\n' "${INPUTS_REQUIRE_GERRIT}" | tr '[:upper:]' '[:lower:]')
+        REQUIRE_OWNER="${INPUTS_REQUIRE_OWNER}"
+        REJECT_DEVELOPMENT=$(printf '%s\n' "${INPUTS_REJECT_DEVELOPMENT}" | tr '[:upper:]' '[:lower:]')
+        ENFORCE_INCREMENT=$(printf '%s\n' "${INPUTS_ENFORCE_INCREMENT}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        # Trim surrounding whitespace (workflow inputs may carry stray
+        # spaces); git branch names never contain whitespace
+        REQUIRE_BRANCH=$(printf '%s\n' "${INPUTS_REQUIRE_BRANCH}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # The CLI treats false/no/0 as "branch gating disabled"; normalize
+        # those values to empty (preserving branch name case) so the
+        # tag_string guard and --require-branch flag match CLI semantics
+        REQUIRE_BRANCH_LOWER=$(printf '%s\n' "${REQUIRE_BRANCH}" | tr '[:upper:]' '[:lower:]')
+        case "${REQUIRE_BRANCH_LOWER}" in
+          false|no|0) REQUIRE_BRANCH="" ;;
+        esac
+        # require_recent accepts true (default window) or minutes;
+        # false/no/0/empty disable the check. Trim surrounding
+        # whitespace only: deleting internal whitespace could silently
+        # change a numeric value (e.g. '1 0' becoming '10'); the CLI
+        # rejects such malformed values instead
+        REQUIRE_RECENT=$(printf '%s\n' "${INPUTS_REQUIRE_RECENT}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        case "${REQUIRE_RECENT}" in
+          false|no|0) REQUIRE_RECENT="" ;;
+        esac
+        REQUIRE_LATEST=$(printf '%s\n' "${INPUTS_REQUIRE_LATEST}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        PERMIT_MISSING=$(printf '%s\n' "${INPUTS_PERMIT_MISSING}" | tr '[:upper:]' '[:lower:]')
+        DEBUG=$(printf '%s\n' "${INPUTS_DEBUG}" | tr '[:upper:]' '[:lower:]')
+        USE_LOCAL_ACTION=$(printf '%s\n' "${INPUTS_USE_LOCAL_ACTION}" | tr '[:upper:]' '[:lower:]')
+        UPLOAD_JSON=$(printf '%s\n' "${INPUTS_UPLOAD_JSON}" | tr '[:upper:]' '[:lower:]')
+        JSON_UPLOAD_FORMAT=$(printf '%s\n' "${INPUTS_JSON_UPLOAD_FORMAT}" | tr '[:upper:]' '[:lower:]')
+        GITHUB_STEP_SUMMARY_ENABLED=$(printf '%s\n' "${INPUTS_GITHUB_STEP_SUMMARY}" | tr '[:upper:]' '[:lower:]')
+
+        # Build command arguments
+        USE_VERSION_ONLY="false"
+
+        # Determine tag location or string
+        if [ -n "${INPUTS_TAG_LOCATION}" ]; then
+          TAG_LOCATION="${INPUTS_TAG_LOCATION}"
+          # Python CLI now handles format normalization (owner/repo/tag → owner/repo@tag)
+        elif [ -n "${INPUTS_TAG_STRING}" ]; then
+          # For tag_string, use validate-version command
+          USE_VERSION_ONLY="true"
+          TAG_LOCATION="${INPUTS_TAG_STRING}"
+        elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+          # Auto-detect from tag push event
+          TAG_LOCATION="${GITHUB_REF_NAME:-}"
+          echo "🏷️ Tag push event detected: ${TAG_LOCATION}"
+        elif [ "${PERMIT_MISSING}" = "true" ]; then
+          # Handle missing tag with permit_missing=true
+          echo "ℹ️ No tag found, but permit_missing=true"
+          # Write minimal outputs and exit successfully
+          cat >> "${GITHUB_OUTPUT}" << 'EOFOUTPUT'
+        valid=true
+        tag_type=unknown
+        signing_type=unsigned
+        development_tag=false
+        version_prefix=false
+        tag_name=
+        EOFOUTPUT
+          exit 0
+        else
+          echo "Error: Either tag_location or tag_string must be provided" >&2
+          exit 1
+        fi
+
+        # Increment/branch checks need a repository context; they cannot
+        # run against a bare version string
+        if [ "${USE_VERSION_ONLY}" = "true" ]; then
+          if [ "${ENFORCE_INCREMENT}" = "true" ] || [ -n "${REQUIRE_BRANCH}" ] || \
+             [ -n "${REQUIRE_RECENT}" ] || [ "${REQUIRE_LATEST}" = "true" ]; then
+            echo "Error: enforce_increment, require_branch, require_recent and require_latest require a repository context" >&2
+            echo "Use tag_location (or a tag push event) instead of tag_string" >&2
+            exit 1
+          fi
+        fi
+
+        # Add validation options
+        # Common args for both validate and verify commands
+        COMMON_ARGS=()
+
+        # Add --require-type if it's not empty (supports comma-separated values)
+        if [ -n "${REQUIRE_TYPE}" ]; then
+          COMMON_ARGS+=("--require-type" "${REQUIRE_TYPE}")
+        fi
+
+        # Signature-specific args only for verify command
+        VERIFY_ARGS=()
+
+        # Add --require-signed if it's not empty (supports comma-separated values)
+        # Values: gpg, ssh, gpg-unverifiable, unsigned (or comma-separated combinations)
+        # Handle backward compatibility for boolean values
+        if [ -n "${REQUIRE_SIGNED}" ]; then
+          # Convert boolean values for backward compatibility
+          case "${REQUIRE_SIGNED}" in
+            "true")
+              # For backward compatibility: true means require any valid signature
+              VERIFY_ARGS+=("--require-signed" "gpg,ssh")
+              ;;
+            "false")
+              # For backward compatibility: false means accept unsigned
+              VERIFY_ARGS+=("--require-signed" "unsigned")
+              ;;
+            *)
+              # Pass through specific signature types as-is
+              VERIFY_ARGS+=("--require-signed" "${REQUIRE_SIGNED}")
+              ;;
+          esac
+        fi
+
+        # Add GitHub key verification if requested
+        if [ "${REQUIRE_GITHUB}" = "true" ]; then
+          VERIFY_ARGS+=("--require-github")
+        fi
+
+        # Add Gerrit key verification if requested
+        if [ -n "${REQUIRE_GERRIT}" ] && [ "${REQUIRE_GERRIT}" != "false" ]; then
+          VERIFY_ARGS+=("--require-gerrit" "${REQUIRE_GERRIT}")
+        fi
+
+        # Gerrit authentication is supplied to the CLI via the
+        # GERRIT_USERNAME / GERRIT_PASSWORD environment variables (set in
+        # the env: section below). They are deliberately NOT passed as
+        # CLI arguments, which would expose the password in the process
+        # argument list and in the "🔍 Executing" debug log line.
+
+        # Add require-owner if provided (comma or space separated values)
+        if [ -n "${REQUIRE_OWNER}" ]; then
+          VERIFY_ARGS+=("--require-owner" "${REQUIRE_OWNER}")
+        fi
+
+        # Add reject-development flag if enabled (only for verify command)
+        if [ "${REJECT_DEVELOPMENT}" = "true" ]; then
+          VERIFY_ARGS+=("--reject-development")
+        fi
+
+        # Add enforce-increment flag if enabled (only for verify command)
+        if [ "${ENFORCE_INCREMENT}" = "true" ]; then
+          VERIFY_ARGS+=("--enforce-increment")
+        fi
+
+        # Add require-branch if provided (only for verify command)
+        if [ -n "${REQUIRE_BRANCH}" ]; then
+          VERIFY_ARGS+=("--require-branch" "${REQUIRE_BRANCH}")
+        fi
+
+        # Add require-recent if provided (only for verify command)
+        if [ -n "${REQUIRE_RECENT}" ]; then
+          VERIFY_ARGS+=("--require-recent" "${REQUIRE_RECENT}")
+        fi
+
+        # Add require-latest flag if enabled (only for verify command)
+        if [ "${REQUIRE_LATEST}" = "true" ]; then
+          VERIFY_ARGS+=("--require-latest")
+        fi
+
+        # Add permit_missing flag if enabled (applies to both)
+        if [ "${PERMIT_MISSING}" = "true" ]; then
+          COMMON_ARGS+=("--permit-missing")
+        fi
+
+        # GitHub token is passed via GITHUB_TOKEN environment variable (see env section below)
+        # This is more secure than passing it as a CLI argument
+
+        # Enable debug output
+        if [ "${DEBUG}" = "true" ]; then
+          set -x
+        fi
+
+        # Determine which CLI invocation method to use. Both run the
+        # trusted interpreter set up above, named by its absolute path.
+        if [[ "${USE_LOCAL_ACTION}" == "true" ]] || \
+           [[ "${GITHUB_REPOSITORY}" =~ lfreleng-actions/tag-validate-action ]]; then
+          # -I keeps the working directory off sys.path and ignores
+          # PYTHONPATH; the launcher adds src/ to sys.path itself.
+          CLI_CMD=("${PYTHON}" -I "${ACTION_PATH}/scripts/run_local_cli.py")
+          echo "Using local action code: ${CLI_CMD[*]}"
+        else
+          # Use PyPI package via uvx (uv tool run), on the trusted interpreter.
+          # The --quiet flag is critical to suppress uvx's download progress output,
+          # which would otherwise mix with the JSON output from tag-validate and cause parsing errors
+          # The CLI runs as a console script, which honours PYTHON*
+          # variables (PYTHONPATH, PYTHONHOME, ...); drop them all.
+          # PYTHON, the trusted interpreter's path, is the action's own.
+          while IFS= read -r name; do
+            unset "${name}"
+          done < <(compgen -e | grep -E '^(PYTHON.+|__PYVENV_LAUNCHER__)$' || true)
+          CLI_CMD=("${UV}" tool run --no-config --python "${PYTHON}" --quiet --from tag-validate tag-validate)
+          echo "Using PyPI package via uvx"
+        fi
+
+        # Execute validation and capture output
+        # Display exact command being executed for debugging
+        # Note: This is safe to log because sensitive data (GITHUB_TOKEN) is passed via
+        # environment variable (see env section below), NOT as a CLI argument
+        EXIT_CODE=0
+        # Add --verbose flag when debug is enabled for comprehensive Python logging
+        VERBOSE_FLAG=""
+        if [ "${DEBUG}" = "true" ]; then
+          VERBOSE_FLAG="--verbose"
+        fi
+
+        if [ "${USE_VERSION_ONLY}" = "true" ]; then
+          # validate command only uses common args (no signature args)
+          # Note: validate command doesn't support --github-step-summary or --json-file flags
+
+          # If upload_json is enabled, add --json-file flag to write JSON while showing rich output
+          if [ "${UPLOAD_JSON}" = "true" ]; then
+            # Create temp file for JSON output
+            JSON_FILE="${RUNNER_TEMP}/tag-validate-output.json"
+            COMMON_ARGS+=("--json-file" "${JSON_FILE}")
+          fi
+
+          echo "🔍 Executing: ${CLI_CMD[*]} ${VERBOSE_FLAG} validate \"${TAG_LOCATION}\" ${COMMON_ARGS[@]}"
+          "${CLI_CMD[@]}" ${VERBOSE_FLAG} validate "${TAG_LOCATION}" "${COMMON_ARGS[@]}" || EXIT_CODE=$?
+          echo ""  # Add blank line after rich output
+
+          # Read JSON from file if it was created
+          if [ "${UPLOAD_JSON}" = "true" ] && [ -f "${JSON_FILE}" ]; then
+            JSON_OUTPUT=$(cat "${JSON_FILE}")
+            rm -f "${JSON_FILE}"
+          fi
+        else
+          # verify command uses both common and verify-specific args
+          ALL_VERIFY_ARGS=("${COMMON_ARGS[@]}" "${VERIFY_ARGS[@]}")
+
+          # Add --github-step-summary or --no-github-step-summary flag
+          if [ "${GITHUB_STEP_SUMMARY_ENABLED}" = "true" ]; then
+            ALL_VERIFY_ARGS+=("--github-step-summary")
+          else
+            ALL_VERIFY_ARGS+=("--no-github-step-summary")
+          fi
+
+          # If upload_json is enabled, add --json-file flag to write JSON while showing rich output
+          if [ "${UPLOAD_JSON}" = "true" ]; then
+            # Create temp file for JSON output
+            JSON_FILE="${RUNNER_TEMP}/tag-validate-output.json"
+            ALL_VERIFY_ARGS+=("--json-file" "${JSON_FILE}")
+          fi
+
+          echo "🔍 Executing: ${CLI_CMD[*]} ${VERBOSE_FLAG} verify \"${TAG_LOCATION}\" ${ALL_VERIFY_ARGS[@]}"
+          "${CLI_CMD[@]}" ${VERBOSE_FLAG} verify "${TAG_LOCATION}" "${ALL_VERIFY_ARGS[@]}" || EXIT_CODE=$?
+          echo ""  # Add blank line after rich output
+
+          # Read JSON from file if it was created
+          if [ "${UPLOAD_JSON}" = "true" ] && [ -f "${JSON_FILE}" ]; then
+            JSON_OUTPUT=$(cat "${JSON_FILE}")
+            rm -f "${JSON_FILE}"
+          fi
+        fi
+
+        # Handle JSON artifact upload if enabled
+        if [ "${UPLOAD_JSON}" = "true" ] && [ -n "${JSON_OUTPUT:-}" ]; then
+          # Validate JSON using Python. The report is passed on stdin, never
+          # as program text: it holds the tag, which may contain quotes.
+          printf '%s' "${JSON_OUTPUT}" | "${PYTHON}" -I -c 'import json, sys; json.load(sys.stdin)' 2>/dev/null || {
+            echo "Warning: Invalid JSON for artifact upload" >&2
+            echo "Continuing without artifact upload..." >&2
+            UPLOAD_JSON="false"
+          }
+        fi
+
+        # Generate artifact suffix (timestamp + random hex for uniqueness)
+        if [ "${UPLOAD_JSON}" = "true" ]; then
+          ARTIFACT_SUFFIX=$("${PYTHON}" -I -c "
+        import secrets
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        datetime_str = now.strftime('%Y%m%d-%H%M%S')
+        random_hex = secrets.token_hex(2)  # 4 hex chars
+        print(f'{datetime_str}-{random_hex}')
+        ")
+
+          # Create artifact directory
+          ARTIFACT_DIR="${RUNNER_TEMP}/tag-validate-${ARTIFACT_SUFFIX}"
+          mkdir -p "${ARTIFACT_DIR}"
+
+          # Write JSON files based on format preference
+          case "${JSON_UPLOAD_FORMAT}" in
+            compact)
+              echo "${JSON_OUTPUT}" > "${ARTIFACT_DIR}/tag-validation.json"
+              ;;
+            pretty)
+              echo "${JSON_OUTPUT}" | "${PYTHON}" -I -m json.tool > "${ARTIFACT_DIR}/tag-validation-pretty.json"
+              ;;
+            both)
+              echo "${JSON_OUTPUT}" > "${ARTIFACT_DIR}/tag-validation.json"
+              echo "${JSON_OUTPUT}" | "${PYTHON}" -I -m json.tool > "${ARTIFACT_DIR}/tag-validation-pretty.json"
+              ;;
+            *)
+              echo "Warning: Invalid json_upload_format '${JSON_UPLOAD_FORMAT}', defaulting to 'pretty'" >&2
+              echo "${JSON_OUTPUT}" | "${PYTHON}" -I -m json.tool > "${ARTIFACT_DIR}/tag-validation-pretty.json"
+              ;;
+          esac
+
+          echo "✅ JSON artifact created: ${ARTIFACT_DIR}"
+        else
+          ARTIFACT_SUFFIX=""
+          ARTIFACT_DIR=""
+        fi
+
+        # Parse JSON output for GitHub outputs (using JSON if available, or defaults)
+
+        # Create temporary Python script to avoid YAML parsing issues
+        cat > /tmp/parse_output.py << 'PYEOF'
+        import json
+        import sys
+        import os
+        import re
+
+        json_output = sys.argv[1] if len(sys.argv) > 1 else ""
+        exit_code = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+        artifact_dir = sys.argv[3] if len(sys.argv) > 3 else ""
+        artifact_suffix = sys.argv[4] if len(sys.argv) > 4 else ""
+
+        # Default values
+        success = "true" if exit_code == 0 else "false"
+        tag_name = ""
+        version_type = "unknown"
+        signature_type = "unsigned"
+        is_dev = "false"
+        has_prefix = "false"
+        incremental = ""
+        latest_tag = ""
+        recent = ""
+        latest = ""
+
+        # Try to parse JSON if available
+        if json_output:
+            try:
+                data = json.loads(json_output)
+                success = str(data.get("success", False)).lower()
+                tag_name = data.get("tag_name", data.get("version", ""))
+                version_type = data.get("version_type", data.get("detected_type", "unknown")) or "unknown"
+                # Map 'other' to 'other' (custom format), keep all other values as-is
+                if version_type not in ["semver", "calver", "both", "other"]:
+                    version_type = "unknown"
+                signature_type = data.get("signature_type", "unsigned") or "unsigned"
+
+                # Determine development tag
+                # Support both new (development_tag) and old (is_development) field names for backwards compatibility
+                if data.get("development_tag", False) or data.get("is_development", False):
+                    is_dev = "true"
+                # Fallback: check tag name for development indicators (for backwards compatibility)
+                elif tag_name and re.search(r"(dev|pre|alpha|beta|rc|snapshot|nightly|canary|preview)", tag_name.lower()):
+                    is_dev = "true"
+
+                # Determine version prefix
+                # Support both new (version_prefix) and old (has_prefix) field names for backwards compatibility
+                if data.get("version_prefix", False) or data.get("has_prefix", False):
+                    has_prefix = "true"
+                # Fallback: check tag name directly (for backwards compatibility)
+                elif tag_name and tag_name[0:1] in ("v", "V"):
+                    has_prefix = "true"
+
+                # Increment check results: the key is present when the
+                # check was performed; null means indeterminate, which
+                # fails closed and is reported as false
+                if "incremental" in data:
+                    incremental = "true" if data.get("incremental") else "false"
+                latest_tag = data.get("latest_tag") or ""
+
+                # Tag age and latest-commit results follow the same
+                # convention: key present means the check ran; null
+                # means indeterminate, which fails closed (false)
+                if "recent" in data:
+                    recent = "true" if data.get("recent") else "false"
+                if "latest" in data:
+                    latest = "true" if data.get("latest") else "false"
+            except Exception as e:
+                print(f"Warning: Could not parse JSON output, using defaults: {e}", file=sys.stderr)
+
+        # Write to GITHUB_OUTPUT in single block
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"valid={success}\n")
+            f.write(f"tag_type={version_type}\n")
+            f.write(f"signing_type={signature_type}\n")
+            f.write(f"development_tag={is_dev}\n")
+            f.write(f"version_prefix={has_prefix}\n")
+            f.write(f"tag_name={tag_name}\n")
+            f.write(f"incremental={incremental}\n")
+            f.write(f"latest_tag={latest_tag}\n")
+            f.write(f"recent={recent}\n")
+            f.write(f"latest={latest}\n")
+            f.write(f"artifact_path={artifact_dir}\n")
+            f.write(f"artifact_suffix={artifact_suffix}\n")
+
+        # Exit with the original command's exit code
+        sys.exit(exit_code)
+        PYEOF
+
+        # Execute the Python script with JSON output and exit code as arguments
+        "${PYTHON}" -I /tmp/parse_output.py "${JSON_OUTPUT:-}" "${EXIT_CODE}" "${ARTIFACT_DIR:-}" "${ARTIFACT_SUFFIX:-}"
+
+        # Exit code is already set by Python script above
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        UV: ${{ steps.setup-uv.outputs.uv-path }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+        GITHUB_SERVER_URL: ${{ inputs.github_server_url || env.GITHUB_SERVER_URL || 'https://github.com' }}
+        GERRIT_USERNAME: ${{ inputs.gerrit_username || env.GERRIT_USERNAME }}
+        GERRIT_PASSWORD: ${{ inputs.gerrit_password || env.GERRIT_PASSWORD }}
+        INPUTS_REQUIRE_TYPE: ${{ inputs.require_type }}
+        INPUTS_REQUIRE_SIGNED: ${{ inputs.require_signed }}
+        INPUTS_REQUIRE_GITHUB: ${{ inputs.require_github }}
+        INPUTS_REQUIRE_GERRIT: ${{ inputs.require_gerrit }}
+        INPUTS_REQUIRE_OWNER: ${{ inputs.require_owner }}
+        INPUTS_REJECT_DEVELOPMENT: ${{ inputs.reject_development }}
+        INPUTS_ENFORCE_INCREMENT: ${{ inputs.enforce_increment }}
+        INPUTS_REQUIRE_BRANCH: ${{ inputs.require_branch }}
+        INPUTS_REQUIRE_RECENT: ${{ inputs.require_recent }}
+        INPUTS_REQUIRE_LATEST: ${{ inputs.require_latest }}
+        INPUTS_PERMIT_MISSING: ${{ inputs.permit_missing }}
+        INPUTS_DEBUG: ${{ inputs.debug }}
+        INPUTS_USE_LOCAL_ACTION: ${{ inputs.use_local_action }}
+        INPUTS_UPLOAD_JSON: ${{ inputs.upload_json }}
+        INPUTS_JSON_UPLOAD_FORMAT: ${{ inputs.json_upload_format }}
+        INPUTS_GITHUB_STEP_SUMMARY: ${{ inputs.github_step_summary }}
+        INPUTS_TAG_LOCATION: ${{ inputs.tag_location }}
+        INPUTS_TAG_STRING: ${{ inputs.tag_string }}

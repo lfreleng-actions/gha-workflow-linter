@@ -1,0 +1,84 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The interpreter producer and consumer steps of
+# lfreleng-actions/pypi-version-check-action action.yaml at
+# 7b9ae4a3c6b5a0f272f8ebb38604a8a31d916b3c,
+# as #469 pins them, comments included. The consumers sit at lines
+# 129 of the full file.
+runs:
+  using: composite
+  steps:
+    - name: "Install uv"
+      id: setup-uv
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        version-file: "${{ github.action_path }}/requirements/uv.txt"
+        working-directory: "${{ github.action_path }}"
+        tool-bin-dir: "${{ runner.temp }}/pypi-version-check-action/bin"
+        enable-cache: false
+      env:
+        UV_NO_CONFIG: '1'
+        UV_NO_PROJECT: '1'
+        UV_PYTHON_PREFERENCE: 'lookup-disabled'
+        UV_PYTHON_ARCH: ''
+        UV_PYTHON_INSTALL_DIR: >-
+          ${{ runner.temp }}/pypi-version-check-action/python
+
+    # The interpreter is one uv installs, from its own pinned and
+    # hash-checked builds, into a directory outside the workspace. uv
+    # runs with an empty environment plus what it needs, so no caller
+    # setting (PATH, VIRTUAL_ENV, CONDA_PREFIX, UV_*, PYTHON*) can pick
+    # the interpreter; proxy and certificate settings pass through for
+    # self-hosted runners. The path found must lie in the install
+    # directory all the same.
+
+    - name: "Install Python"
+      id: python
+      shell: bash
+      working-directory: "${{ github.action_path }}"
+      env:
+        UV: "${{ steps.setup-uv.outputs.uv-path }}"
+        INSTALL_DIR: "${{ runner.temp }}/pypi-version-check-action/python"
+        CACHE_DIR: "${{ runner.temp }}/pypi-version-check-action/cache"
+        PYTHON_VERSION: '3.13'
+      run: |
+        # Install Python
+        clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+          "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR" "UV_CACHE_DIR=$CACHE_DIR")
+        for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+            https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+            UV_NATIVE_TLS; do
+          if [ -n "${!name+set}" ]; then clean+=("$name=${!name}"); fi
+        done
+        env -i "${clean[@]}" "$UV" python install --quiet --no-bin \
+          "$PYTHON_VERSION"
+        PYTHON=$(env -i "${clean[@]}" "$UV" python find --managed-python \
+          "$PYTHON_VERSION")
+        case "$PYTHON" in
+          "$INSTALL_DIR"/*) ;;
+          *) echo "Error: uv found Python outside its install directory ❌"
+             exit 1 ;;
+        esac
+        echo "path=$PYTHON" >> "$GITHUB_OUTPUT"
+
+    # -I ignores PYTHON* variables and the user site and keeps the
+    # working directory off sys.path; macOS reads the two location
+    # variables even so, hence the unset.
+    - name: "Check Python package index"
+      id: check
+      shell: bash
+      working-directory: "${{ github.action_path }}"
+      env:
+        PYTHON: "${{ steps.python.outputs.path }}"
+        INPUT_INDEX_URL: "${{ inputs.INDEX_URL }}"
+        INPUT_PACKAGE_NAME: "${{ inputs.PACKAGE_NAME }}"
+        INPUT_PACKAGE_VERSION: "${{ inputs.PACKAGE_VERSION }}"
+        INPUT_PRE_RELEASE: "${{ inputs.PRE_RELEASE }}"
+        INPUT_EXIT_ON_FAIL: "${{ inputs.EXIT_ON_FAIL }}"
+      run: |
+        # Check Python package index
+        unset PYTHONEXECUTABLE __PYVENV_LAUNCHER__
+        "$PYTHON" -I "$GITHUB_ACTION_PATH/scripts/check_index.py"
