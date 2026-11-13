@@ -1,0 +1,163 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The interpreter producer and consumer steps of
+# lfreleng-actions/info-yaml-validate-action action.yaml at
+# 2d2ad906e5963b561c6322d29d1224238b1a0665,
+# as #469 pins them, comments included. The consumers sit at lines
+# 178, 219, 222, 225, 229 of the full file.
+runs:
+  using: composite
+  steps:
+    - name: "Install uv"
+      id: setup-uv
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        version: "0.13.4"
+        working-directory: ${{ github.action_path }}
+        # Without it setup-uv puts the caller's HOME/XDG_* bin dir on PATH
+        tool-bin-dir: ${{ runner.temp }}/info-yaml-validate/bin
+        # The post-step "uv cache prune" would hit the invalid preference
+        enable-cache: false
+      env:
+        UV_NO_CONFIG: "1"
+        UV_NO_PROJECT: "1"
+        UV_PYTHON_PREFERENCE: "lookup-disabled"
+        # Inherited, it makes setup-uv probe uv, which the line above fails
+        UV_PYTHON_ARCH: ""
+        UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/info-yaml-validate/python
+
+    # A trusted interpreter: uv installs its own pinned, hash-checked
+    # build. uv runs with an empty environment plus an allow-list, so
+    # no caller variable can pick or redirect the interpreter.
+
+    - name: "Install Python"
+      id: python
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        UV: ${{ steps.setup-uv.outputs.uv-path }}
+        INSTALL_DIR: ${{ runner.temp }}/info-yaml-validate/python
+        CACHE_DIR: ${{ runner.temp }}/info-yaml-validate/cache
+        PYTHON_VERSION: "3.13"
+        RUNNER_OS_NAME: ${{ runner.os }}
+      run: |
+        # Install the action's own Python
+        clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+          "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR" "UV_CACHE_DIR=$CACHE_DIR")
+        for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+            https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+            UV_NATIVE_TLS; do
+          if [ -n "${!name+set}" ]; then clean+=("$name=${!name}"); fi
+        done
+        env -i "${clean[@]}" "$UV" python install --quiet --no-bin \
+          "$PYTHON_VERSION"
+        # --system skips virtual environments: uv would otherwise run a
+        # .venv's interpreter in this directory or a parent to query it,
+        # which for an action checked out inside the workspace is the
+        # checkout under test's. --managed-python keeps the search to
+        # uv's own installs.
+        PYTHON=$(env -i "${clean[@]}" "$UV" python find --managed-python \
+          --system "$PYTHON_VERSION")
+        # On Windows uv prints backslashes, while INSTALL_DIR ends in the
+        # forward slashes written above; compare both with forward ones.
+        found=$PYTHON
+        root=$INSTALL_DIR
+        if [ "$RUNNER_OS_NAME" = Windows ]; then
+          found=${found//\\//}
+          root=${root//\\//}
+        fi
+        case "$found" in
+          "$root"/*) ;;
+          *) echo "Error: uv found Python outside its install directory ❌"
+             exit 1 ;;
+        esac
+        echo "path=$PYTHON" >> "$GITHUB_OUTPUT"
+
+
+    - name: "Install yamllint"
+      shell: bash
+      env:
+        UV: ${{ steps.setup-uv.outputs.uv-path }}
+        PYTHON: ${{ steps.python.outputs.path }}
+        ACTION_PATH: ${{ github.action_path }}
+        # yamllint is GPL-3.0 licensed, so it is installed on its own and
+        # run as a separate process; the validator imports nothing from
+        # it, and the script lock it runs under does not list it. The
+        # 'lint' dependency group holds it, so the install is locked and
+        # hash-checked through uv.lock, which Dependabot keeps current.
+        # A private environment: the install neither collides with nor
+        # overwrites a yamllint the runner already has.
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/info-yaml-validate/lint
+      run: |
+        # Python reads these even under -I: PYTHONEXECUTABLE and
+        # __PYVENV_LAUNCHER__ move its prefix to a .venv they name, and
+        # uv would install there. The caller's settings go first.
+        for name in $(compgen -e); do
+          case "$name" in
+            PYTHON) ;;
+            PYTHON*|__PYVENV_LAUNCHER__) unset "$name" ;;
+          esac
+        done
+        # Install the locked yamllint into a private environment, built
+        # on the action's own interpreter. --no-config: uv would
+        # otherwise read a .python-version or uv.toml from the checkout
+        # under test, which can name the interpreter or change the
+        # package index. --python names the interpreter by absolute
+        # path, so no caller variable can choose it.
+        "$UV" sync --no-config --locked --only-group lint \
+          --no-install-project --project "${ACTION_PATH}" \
+          --python "$PYTHON"
+
+    - name: "Validate INFO.yaml"
+      id: validate
+      shell: bash
+      env:
+        UV: ${{ steps.setup-uv.outputs.uv-path }}
+        PYTHON: ${{ steps.python.outputs.path }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_SCHEMA_PATH: ${{ inputs.schema-path }}
+        INPUT_REQUIRE_REPOSITORY_MATCH: ${{ inputs.require-repository-match }}
+        INPUT_LINT_YAML: ${{ inputs.lint-yaml }}
+        ACTION_PATH: ${{ github.action_path }}
+        # The validator's private environment, built from the script lock
+        VALIDATOR_ENV_DIR: ${{ runner.temp }}/info-yaml-validate/validator
+        # Where 'uv venv' puts that environment's interpreter
+        VALIDATOR_BIN: >-
+          ${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }}
+        # The validator takes yamllint from this environment and nowhere
+        # else: a PATH search would let a 'yamllint' in the checkout under
+        # test win on Windows, where the current directory is searched.
+        YAMLLINT_ENV_DIR: ${{ runner.temp }}/info-yaml-validate/lint
+      run: |
+        # Python reads these even under -I: PYTHONEXECUTABLE and
+        # __PYVENV_LAUNCHER__ move its prefix to a .venv they name, and
+        # uv would install there. The caller's settings go first.
+        for name in $(compgen -e); do
+          case "$name" in
+            PYTHON) ;;
+            PYTHON*|__PYVENV_LAUNCHER__) unset "$name" ;;
+          esac
+        done
+        # Install the script lock's pinned, hash-checked dependencies
+        # into a private environment on the action's own interpreter,
+        # then run the validator there with -I, so no PYTHON* setting
+        # or module in the checkout under test reaches it. It validates
+        # the consumer's checked-out repository (the workspace) and
+        # resolves the bundled schema beside the script.
+        requirements="${VALIDATOR_ENV_DIR}.txt"
+        "$UV" export --no-config --locked --quiet --python "$PYTHON" \
+          --script "${ACTION_PATH}/info_yaml_validate.py" \
+          --format requirements.txt --no-header --output-file "$requirements"
+        "$UV" venv --no-config --quiet --clear --python "$PYTHON" \
+          "$VALIDATOR_ENV_DIR"
+        VALIDATOR_PYTHON="${VALIDATOR_ENV_DIR}/${VALIDATOR_BIN}"
+        "$UV" pip install --no-config --quiet --require-hashes --no-deps \
+          --python "$VALIDATOR_PYTHON" \
+          --requirements "$requirements"
+        cd "$GITHUB_WORKSPACE"
+        "$VALIDATOR_PYTHON" -I \
+          "${ACTION_PATH}/info_yaml_validate.py"

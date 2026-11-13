@@ -1,0 +1,299 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The interpreter producer and consumer steps of
+# lfreleng-actions/repository-metadata-action action.yaml at
+# b5fc39002b54a9863975c89d0bd0c347a9861954,
+# as #469 pins them, comments included. The consumers sit at lines
+# 451, 602, 635 of the full file.
+runs:
+  using: composite
+  steps:
+    - name: 'Setup Python'
+      id: setup-python
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.11'
+
+    # Dependency change detection runs before any step that could
+    # change the checkout, so it sees it exactly as the caller left it.
+
+    - name: 'Check dependency change inputs'
+      id: dependency-change-setup
+      shell: bash
+      env:
+        DEPENDENCY_CHANGE: ${{ inputs.dependency_change }}
+        # The detector deletes whatever sits at its output path; use a
+        # name of our own and never run it over an existing file.
+        SIDECAR: '.repository-metadata-dependency-change.json'
+        INTERPRETER: "${{ steps.setup-python.outputs.python-path }}"
+        # The guard runs the interpreter with -I, but these still
+        # redirect it on macOS under -I; empty values are ignored.
+        PYTHONEXECUTABLE: ''
+        __PYVENV_LAUNCHER__: ''
+        # The detector v0.1.0 runs ["git", ...] through Python's
+        # subprocess, which tries the git in each PATH entry in turn
+        # when one fails to start, such as a script whose interpreter
+        # is missing. So check every candidate subprocess would try,
+        # not just the first. A relative entry resolves against the
+        # detector's directory, which this check cannot see, so refuse
+        # it outright. Exits 0 when some git can run and none lies
+        # inside a directory passed as an argument; otherwise prints
+        # the refused path and exits 3 for a line break, 4 for a
+        # protected directory, 5 for no git, 6 for a relative entry.
+        # Containment is decided by filesystem identity, not path
+        # text: a case-insensitive volume, or any other alias, can spell
+        # a protected directory differently from GITHUB_WORKSPACE.
+        GIT_GUARD: |
+          import os, stat, sys
+
+          def identity(path):
+              info = os.stat(path)
+              return info.st_dev, info.st_ino
+
+          def runnable(path):
+              try:
+                  info = os.stat(path)
+              except OSError:
+                  return False
+              return stat.S_ISREG(info.st_mode) and os.access(path, os.X_OK)
+
+          def inside(path, protected):
+              path = os.path.realpath(path)
+              while True:
+                  if identity(path) in protected:
+                      return True
+                  parent = os.path.dirname(path)
+                  if parent == path:
+                      return False
+                  path = parent
+
+          def refuse(code, path):
+              sys.stdout.buffer.write(os.fsencode(path))
+              sys.exit(code)
+
+          try:
+              protected = {
+                  identity(os.path.realpath(path))
+                  for path in sys.argv[1:]
+                  if path
+              }
+              found = False
+              for entry in os.get_exec_path():
+                  if not os.path.isabs(entry):
+                      refuse(6, entry)
+                  candidate = os.path.join(entry, "git")
+                  if not runnable(candidate):
+                      continue
+                  found = True
+                  if "\r" in candidate or "\n" in candidate:
+                      refuse(3, candidate)
+                  if inside(candidate, protected):
+                      refuse(4, candidate)
+              if not found:
+                  sys.exit(5)
+          except OSError:
+              sys.exit(1)
+      run: |
+        # Validate the opt-in and check the sidecar path is free
+        set -euo pipefail
+        case "$DEPENDENCY_CHANGE" in
+          true) ;;
+          false) echo 'enabled=false' >> "$GITHUB_OUTPUT"; exit 0 ;;
+          *) echo "::error::dependency_change must be 'true' or 'false' ❌"
+             exit 1 ;;
+        esac
+        {
+          echo 'enabled=true'
+          echo "sidecar=$SIDECAR"
+        } >> "$GITHUB_OUTPUT"
+        # setup-python prepends its bin directory to PATH last, so the
+        # runner puts it ahead of any directory a caller added. Verify
+        # rather than assume: this step sees the detector's PATH.
+        trusted=''
+        case "$INTERPRETER" in
+          /*) trusted="${INTERPRETER%/*}/python3" ;;
+        esac
+        # Check each lookup exactly as the detector's lookup returns
+        # it. A PATH entry can hold a line break; stripping it would
+        # validate a different file from the one the detector runs, so
+        # refuse such a lookup and escape it only for display.
+        found="$(command -v python3 || true)"
+        has_line_break() {
+          case "$1" in *$'\r'*|*$'\n'*) return 0 ;; esac
+          return 1
+        }
+        shown() {
+          local text="${1//$'\r'/\\r}"
+          printf '%s' "${text//$'\n'/\\n}"
+        }
+        # The detector runs "git" from this PATH too. A caller's step
+        # can put a checkout directory such as .venv/bin on it, where
+        # the change under review could supply a git. Check every git
+        # candidate with the trusted interpreter, not a tool from PATH.
+        # Prints why git is refused, or nothing when every one passes.
+        git_refusal() {
+          local candidate status=0
+          candidate="$("$INTERPRETER" -I -c "$GIT_GUARD" \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP")" || status=$?
+          candidate="$(shown "$candidate")"
+          case "$status" in
+            0) ;;
+            3) printf "the git candidate '%s' holds a line break" \
+                 "$candidate" ;;
+            4) printf "git candidate '%s' %s" "$candidate" \
+                 'lies inside the workspace or RUNNER_TEMP' ;;
+            5) printf 'no executable git on PATH' ;;
+            6) printf "PATH entry '%s' is relative, so git could %s" \
+                 "$candidate" 'resolve anywhere' ;;
+            *) printf 'the git check failed' ;;
+          esac
+        }
+        git_problem=''
+        reason=''
+        if [ -e "$SIDECAR" ] || [ -L "$SIDECAR" ]; then
+          reason="unresolved: ${SIDECAR} already exists; detection skipped"
+          echo "::warning::${reason}"
+        elif has_line_break "$found"; then
+          reason='unresolved: the python3 lookup holds a line break;'
+          reason="$reason detection skipped"
+          echo "::warning::${reason} (python3 resolves to '$(shown "$found")')"
+        elif [ -z "$trusted" ] || [ ! -x "$trusted" ] \
+          || [ "$found" != "$trusted" ]; then
+          reason='unresolved: python3 is not the trusted interpreter;'
+          reason="$reason detection skipped"
+          echo "::warning::${reason} (python3 resolves to '${found}')"
+        elif git_problem="$(git_refusal)"; [ -n "$git_problem" ]; then
+          reason="unresolved: ${git_problem}; detection skipped"
+          echo "::warning::${reason}"
+        fi
+        if [ -n "$reason" ]; then
+          {
+            echo 'run=false'
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+        else
+          echo 'run=true' >> "$GITHUB_OUTPUT"
+        fi
+
+
+    - name: 'Report dependency change'
+      id: dependency-change-result
+      if: steps.dependency-change-setup.outputs.enabled == 'true'
+      shell: bash
+      env:
+        DETECTOR_OUTCOME: ${{ steps.dependency-change.outcome }}
+        SIDECAR: ${{ steps.dependency-change-setup.outputs.sidecar }}
+        SKIP_REASON: ${{ steps.dependency-change-setup.outputs.reason }}
+        CHANGED: ${{ steps.dependency-change.outputs.changed }}
+        REASON: ${{ steps.dependency-change.outputs.reason }}
+        BASE: ${{ steps.dependency-change.outputs.base }}
+      run: |
+        # Publish the verdict and remove the sidecar the detector wrote
+        set -euo pipefail
+        if [ "$DETECTOR_OUTCOME" = 'success' ]; then
+          # The path was free before detection, so this is the detector's
+          rm -f -- "$SIDECAR"
+        else
+          REASON="$SKIP_REASON"
+        fi
+        # Fail closed: anything but a resolved verdict leaves both empty
+        case "$CHANGED" in
+          true|false) ;;
+          *) CHANGED=''; BASE='' ;;
+        esac
+        REASON="${REASON//[$'\r\n']/ }"
+        BASE="${BASE//[$'\r\n']/}"
+        {
+          echo "changed=$CHANGED"
+          echo "reason=$REASON"
+          echo "base=$BASE"
+        } >> "$GITHUB_OUTPUT"
+        echo "Dependency change: $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+
+    # setup-uv's only uv call for these inputs is "uv python find",
+    # whose result it executes. An invalid preference makes uv refuse
+    # its arguments before any lookup; setup-uv then reports the
+    # Python version as "unknown", which nothing reads. The working
+    # directory keeps uv away from the caller's checkout.
+
+    - name: 'Install uv'
+      id: setup-uv
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      with:
+        working-directory: "${{ github.action_path }}"
+        # Without it setup-uv puts the caller's HOME/XDG_* bin dir on PATH
+        tool-bin-dir: "${{ runner.temp }}/repository-metadata-action/bin"
+        # The post-step "uv cache prune" would hit the invalid preference
+        enable-cache: false
+      env:
+        UV_NO_CONFIG: '1'
+        UV_NO_PROJECT: '1'
+        UV_PYTHON_PREFERENCE: 'lookup-disabled'
+        # Inherited, it makes setup-uv probe uv, which the line above fails
+        UV_PYTHON_ARCH: ''
+        # yamllint disable-line rule:line-length
+        UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/repository-metadata-action/python"
+
+
+    - name: 'Install Python dependencies'
+      shell: bash
+      working-directory: "${{ github.action_path }}"
+      env:
+        UV: "${{ steps.setup-uv.outputs.uv-path }}"
+        INTERPRETER: "${{ steps.setup-python.outputs.python-path }}"
+        # An action-owned cache, not one a caller variable points at
+        UV_CACHE_DIR: "${{ runner.temp }}/repository-metadata-action/cache"
+      run: |
+        # Install into the trusted interpreter only
+        set -euo pipefail
+        case "$INTERPRETER" in
+          /*) ;;
+          *) echo "Error: setup-python gave no absolute interpreter ❌"
+             exit 1 ;;
+        esac
+        # The package build runs Python without -I; drop the caller's
+        # PYTHON* settings so they cannot redirect it.
+        while IFS= read -r name; do
+          case "$name" in
+            PYTHON*|__PYVENV_LAUNCHER__) unset "$name" ;;
+          esac
+        done < <(compgen -e)
+        "$UV" pip install --no-config --python "$INTERPRETER" .
+
+
+    - name: 'Extract Repository Metadata'
+      id: metadata
+      shell: bash
+      working-directory: "${{ github.action_path }}"
+      env:
+        DEBUG_MODE: ${{ inputs.debug }}
+        GITHUB_TOKEN_INPUT: ${{ inputs.github_token }}
+        GITHUB_SUMMARY: ${{ inputs.github_summary }}
+        ARTIFACT_UPLOAD: ${{ inputs.artifact_upload }}
+        ARTIFACT_FORMATS: ${{ inputs.artifact_formats }}
+        CHANGE_DETECTION: ${{ inputs.change_detection }}
+        GIT_FETCH_DEPTH: ${{ inputs.git_fetch_depth }}
+        GERRIT_SUMMARY: ${{ inputs.gerrit_summary }}
+        FILES_SUMMARY: ${{ inputs.files_summary }}
+        GERRIT_INCLUDE_COMMENT: ${{ inputs.gerrit_include_comment }}
+        REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_ACTOR_ID: ${{ github.actor_id }}
+        PR_HEAD_REPO_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        INTERPRETER: "${{ steps.setup-python.outputs.python-path }}"
+      run: |
+        # Isolated mode ignores PYTHON* settings and the working
+        # directory; src imports from the package installed above.
+        # PYTHONEXECUTABLE and __PYVENV_LAUNCHER__ still redirect the
+        # interpreter on macOS under -I, so drop the caller's copies.
+        while IFS= read -r name; do
+          case "$name" in
+            PYTHON*|__PYVENV_LAUNCHER__) unset "$name" ;;
+          esac
+        done < <(compgen -e)
+        "$INTERPRETER" -I -m src.main

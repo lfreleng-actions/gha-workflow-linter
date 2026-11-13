@@ -91,12 +91,18 @@ MARKER_NAMES = {
     kind: expression_marker(kind.upper())
     for kind in ("action_path", "workspace", "pythonpath", "temp")
 }
+# Expressions that name a directory, as their marker names it.
+PATH_KINDS = ("action_path", "workspace", "temp")
 # An expression whose name says Python: setup-python's python-path
 # output and the like, or any name ending in a py/python stem.
 PYTHON_EXPRESSION = re.compile(
     r"python[-_](?:path|bin|executable)|python_path|pythonLocation"
     r"|\.(?:py|python\d*(?:\.\d+)?|[a-z_]*_py(?:thon)?)\s*\}\}$",
     re.I,
+)
+# ${{ COND && 'A' || 'B' }} with a COND no other operand can join.
+CHOICE = re.compile(
+    r"\$\{\{\s*[^&|()']*(?:'[^']*'[^&|()']*)*&&\s*'([^']*)'\s*\|\|\s*'([^']*)'\s*\}\}"
 )
 # setup-uv's uv-path output and similar: an expression that names uv.
 UV_EXPRESSION = re.compile(r"(?<![A-Za-z])uvx?(?![A-Za-z])", re.I)
@@ -465,7 +471,7 @@ def file_trust(found: _yaml.YamlFile, kind: str) -> Trust:
             if "GITHUB_OUTPUT" in block.text:
                 src = block.text.encode()
                 root = Parser(BASH).parse(src).root_node
-                facts = ShellFacts(src, root, block.env)
+                facts = ShellFacts(src, root, block.env, block.choices)
                 outputs = facts.outputs()
         trust.add(step.job, step.id, step.step, outputs)
     return trust
@@ -484,6 +490,14 @@ def env_value(
     if all(isinstance(p, Lit) for p in word.parts):
         return "".join(p.text for p in word.parts if isinstance(p, Lit))
     head = word.parts[0]
+    if (
+        isinstance(head, Expr)
+        and head.kind == "temp"
+        and all(isinstance(p, Lit) for p in word.parts[1:])
+    ):
+        return MARKER_NAMES["temp"] + "".join(
+            p.text for p in word.parts[1:] if isinstance(p, Lit)
+        )
     if trust is not None and len(word.parts) == 1 and isinstance(head, Expr):
         return trust.resolve(
             expressions[head.index].text, where.job, where.step
@@ -544,8 +558,39 @@ def yaml_block(
         name: env_value(word, expressions, trust, yblock)
         for name, word in yblock.env.items()
     }
+    choices = {
+        name: found
+        for name, word in yblock.env.items()
+        if (found := env_choices(word, expressions, kind)) is not None
+    }
     text, starts = swapped_text(yblock, expressions, swap)
-    return Block(text, yblock.starts[0][1], starts, kind, env, traced_at)
+    return Block(
+        text, yblock.starts[0][1], starts, kind, env, traced_at, choices
+    )
+
+
+def env_choices(
+    word: _yaml.Word, expressions: list[_yaml.Expression], kind: str
+) -> list[str] | None:
+    """The literals a YAML env value of one expression may hold; else None.
+
+    ``${{ COND && 'A' || 'B' }}`` gives A when COND holds and A is not
+    empty, else B; COND may hold no ``&``, ``|`` or parenthesis outside
+    quotes, so no other operand can reach the result. A lone
+    ``${{ github.action_path }}``, ``${{ github.workspace }}`` or
+    ``${{ runner.temp }}`` gives the marker the same expression gets
+    in a ``run:`` block; a workflow has no action path, so none there.
+    """
+    if len(word.parts) != 1 or not isinstance(word.parts[0], Expr):
+        return None
+    if word.parts[0].kind == "action_path" and kind == "workflow":
+        return None
+    if word.parts[0].kind in PATH_KINDS:
+        return [MARKER_NAMES[word.parts[0].kind]]
+    found = CHOICE.fullmatch(expressions[word.parts[0].index].text)
+    if found is None:
+        return None
+    return [found.group(1), found.group(2)]
 
 
 def yaml_tokens(word: _yaml.Word, kind: str) -> list[Token]:

@@ -214,14 +214,16 @@ class PythonpathChecks:
             at_entry_start = token.kind == TEXT and token.text.endswith(":")
         return out
 
-    def pythonpath_tokens(self, node: Node) -> list[Token]:
+    def pythonpath_tokens(self, node: Node, quoted: bool = True) -> list[Token]:
         """Tokens of a PYTHONPATH value written as a shell word.
 
         A reference to PYTHONPATH (with its operator and operand) is a
         "self" token; $GITHUB_WORKSPACE, $PWD and $(pwd) name the
         workspace; a runner variable in ``ABSOLUTE_NAMES`` is "unknown"
         (some absolute path); any other expansion is "unresolved", and
-        an unusual spelling is a "spelling" token.
+        an unusual spelling is a "spelling" token. A command's argument
+        is ``quoted`` False: an expansion outside double quotes, which
+        may split or glob, has the op "unquoted".
         """
         t = node.type
         text = _node_text(self.src, node)
@@ -237,10 +239,17 @@ class PythonpathChecks:
                     out.append(Token(TEXT, piece))
                 gap = child.end_byte
                 if child.type not in ('"', "'"):
-                    out.extend(self.pythonpath_tokens(child))
+                    out.extend(
+                        self.pythonpath_tokens(child, quoted or t == "string")
+                    )
             return out
         if t in ("simple_expansion", "expansion"):
-            return [self.expansion_token(node)]
+            token = self.expansion_token(node)
+            # A SELF token's op is its operator; a plain $PYTHONPATH
+            # has none, and splits as any other reference.
+            if not quoted and (token.kind != SELF or not token.op):
+                token = replace(token, op="unquoted")
+            return [token]
         if t == "command_substitution":
             prints_cwd = re.fullmatch(r"\$\(\s*pwd\s*\)|`\s*pwd\s*`", text)
             return [Token(WORKDIR if prints_cwd else "unresolved", text)]
@@ -387,7 +396,7 @@ class PythonpathChecks:
             for index, word in enumerate(args):
                 if index:
                     joined.append(Token(TEXT, " "))
-                joined.extend(self.pythonpath_tokens(word.node))
+                joined.extend(self.pythonpath_tokens(word.node, False))
             return split_token_lines(unescape(joined) if escapes else joined)
         if args and args[0].literal and args[0].text == "--":
             args = args[1:]
@@ -418,7 +427,7 @@ class PythonpathChecks:
                         # scan does not read; the text it carries stays.
                         out.append(Token(SPELLING, piece))
                     if value is not None:
-                        out.extend(self.pythonpath_tokens(value.node))
+                        out.extend(self.pythonpath_tokens(value.node, False))
                 elif "%" in piece:
                     out.append(Token(SPELLING, piece))
                 elif piece:

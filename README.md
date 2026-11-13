@@ -1048,6 +1048,11 @@ scripts, whose caller the scan does not know. Three cases count:
    leave the search to the caller too, so `uv pip --system` clears
    `PPA007` alone. A `--python` or `UV_PYTHON`
    value the scan cannot trace to a trusted interpreter is `PPA009`.
+   `env -u UV_PYTHON` (`--unset`, `-uNAME`) removes the step's value
+   from the command, so a trusted step `env:` `UV_PYTHON` no longer
+   pins it; a `NAME=value` after the `-u` sets it again. An `env -u`
+   operand the check cannot read may name any setting, so no value
+   set before it, by a wrapper's `NAME=value` included, pins one.
 2. **Rule 2.** `uv python find` and `uv python install` read `PATH`
    and `UV_*` from the caller unless `env -i` (or `env -`) runs them.
    `env -u` or a `NAME=` value the check cannot read is `PPA009`, and
@@ -1062,7 +1067,11 @@ scripts, whose caller the scan does not know. Three cases count:
    another variable's `NAME<<DELIMITER` record sets nothing, and a
    `UV_PYTHON<<DELIMITER` record holds one value. A write whose format
    or name the check cannot read (`printf "$fmt"`, `printf '%b'`)
-   and whose text names one of these settings is `PPA009`.
+   and whose text names one of these settings is `PPA009`. An
+   unquoted reference in such a write (`echo UV_PYTHON=$PY`, or
+   `$PYTHONPATH` itself) holds a trusted
+   interpreter as far as **Word splitting** allows, as in a
+   `$GITHUB_OUTPUT` write.
 
 A command that `env -i`, `env -`, `exec -c` or `sudo` runs gets no
 `PPA013`, unless the wrapper keeps one of the interpreter selectors
@@ -1081,10 +1090,15 @@ interpreter:
   `actions/setup-python` step earlier in the same job;
 - a run step's output, `${{ steps.<id>.outputs.<name> }}`, that the
   step writes once to `$GITHUB_OUTPUT` from a variable it assigns
-  once from `$(env -i … uv python find …)` or `install` with
+  once from `$(env -i … uv python find …)` with
   `--managed-python`, or with `--system` and `--no-config`;
+  `uv python install` is not a lookup, and its output is never
+  trusted;
 - a shell variable assigned once at the top level of the step, or a
-  step `env:` value, that holds one of the above.
+  step `env:` value, that holds one of the above;
+- a double-quoted word composed of literal text and references, such
+  as `"${ENV_DIR}/${BIN}"`, whose every value is a trusted
+  interpreter (see **Composed words**).
 
 `${{ steps.<id>.outputs.uv-path }}` of an `astral-sh/setup-uv` step
 earlier in the job counts as uv, so `"$UV" pip install --python
@@ -1095,9 +1109,11 @@ written twice, a variable assigned twice, or a step that runs `eval`,
 be empty. A Python-named expression none of these produces, such as
 `"${{ inputs.python }}" -I s.py`, is `PPA009` as a program; the check
 still judges how it runs Python. The trust is lexical: the check does
-not follow functions, loops or conditionals. Quote the reference:
-`"$PYTHON"` holds one word, while an unquoted `$PYTHON` from a step
-output may split, so the check reads it as `PPA009`.
+not follow functions, loops or conditionals, beyond the unset filters
+and loop appends that **Python path scope and limits** names. Quote
+the reference: `"$PYTHON"` holds one word, while an unquoted
+`$PYTHON` from a step output may split, so the check reads it as
+`PPA009`.
 
 #### Suppressing a deliberate run
 
@@ -1218,7 +1234,10 @@ annotates the right file.
      `printf` counts its arguments as targets when its format holds
      `%n` or is not literal. A target the check cannot read
      (`read -r "$DEST"`, `printf -v "$DEST"`, `export "$NAME"`,
-     `unset "$NAME"`) may name any variable, so the step trusts none.
+     `unset "$NAME"`) may name any variable, so the step trusts none,
+     with one exception: an `unset "$name"` that a `case` arm or a
+     `grep -E` feed filters (see **Unset
+     filters**) removes the names its filter matches and no others.
      A subscript write (`PY[1]=x`) changes `PY` but never binds
      `"$PY"`. A step `env:` `UV_PYTHON` the step assigns, unsets or
      leaves opaque gives uv no exemption: `PPA009`. A `NAME=value`
@@ -1231,15 +1250,75 @@ annotates the right file.
    - **Word splitting.** An unquoted reference, in a command or a
      `$GITHUB_OUTPUT` write, resolves when it holds a literal value
      with no blank or glob character, in a step that never sets
-     `IFS`; a quoted `"$PYTHON"` always resolves. A variable
-     or a step output substituted in a command, that resolves to a
-     path whose name is neither Python nor uv, such as `/opt/pypy3`,
-     stays `PPA009` when the command looks like Python.
+     `IFS`; a quoted `"$PYTHON"` always resolves. A value traced to
+     an expression, such as a setup-python path or a
+     `${{ runner.temp }}/…` path, holds text the check cannot see, so
+     an unquoted reference to it never resolves. A variable, a
+     composed word such as `"${ROOT}/pypy3"`, or a step output
+     substituted in a command, that resolves to a path whose name is
+     neither Python nor uv, such as `/opt/pypy3`, stays `PPA009`
+     when the command looks like Python.
+   - **Unset filters.** `unset NAME` with literal names changes
+     those names alone. `unset "$name"` removes the names a filter
+     allows, and no others, when it stands alone in one of two
+     places: a
+     `case "$name"` arm of plain globs (letters, digits, `_`, `*`,
+     `?`), less any name an earlier arm matches, with no `;&` or
+     `;;&` and no `nocasematch` in the step; or the body of `while
+     [IFS=] read -r name; do …; done < <(… | grep -E 'RE')`, with
+     at most `|| true` after the `grep`, which removes the names `RE`
+     matches. `RE` holds nothing but letters, digits and
+     `_.+*?|()^$`, with no two of `+*?` in a row (Python reads
+     `++` as possessive and `+?` as lazy, where `grep` repeats the
+     repetition), and the `grep` takes no `-v` or other option.
+     Without `-r`, `read` drops backslashes from the line `grep`
+     matched, so the loop may remove any name. `read` strips `IFS`
+     characters from that line too, so without `IFS=` before it, in a
+     step that sets `IFS`, the loop may remove any name. The target
+     must be double-quoted in either place: bash splits an unquoted
+     `$name` on `IFS` and globs it, so `PYTHONX` under `IFS=X`
+     unsets `PYTHON`, and the step trusts none. A variable
+     the filter may match counts as changed. Any other `unset` target
+     the check cannot read trusts nothing.
+   - **Composed words.** A double-quoted word of literal text and
+     references, such as `"${ENV_DIR}/${BIN}"`, takes every value its
+     parts may hold, up to 16: a reference's trusted value, or, for a
+     name the step never sets, each literal its step `env:` value
+     `${{ COND && 'A' || 'B' }}` may give. `COND` may hold no `&`,
+     `|` or parenthesis outside quotes. Text between the parts, a
+     line break included, is part of every value. The check trusts
+     the word, assigned to a variable or used directly as a command
+     argument, when each value is a trusted interpreter; when the
+     word has more than one value, or its one value ends `.exe`, each
+     must name Python (`python`, `python3`, `python3.12`, with or
+     without `.exe`).
+   - **Path expressions.** A step `env:` value that is a lone
+     `${{ github.action_path }}`, `${{ github.workspace }}` or
+     `${{ runner.temp }}` reads, quoted as `"$V"` in a step that
+     never sets `V`, as the inline expression would; in a workflow,
+     which has no action path, `${{ github.action_path }}` does not.
+     A value starting `${{ runner.temp }}/` with literal text alone
+     after it, and no empty, `.` or `..` component between either
+     slash, is a path outside the workspace.
    - **Lookups.** The check trusts the result of `env -i … uv python
-     find` or `install` when the lookup passes `PPA006` and `PPA007`
+     find` when the lookup passes `PPA006` and `PPA007`
      itself: with `--managed-python`, or with `--system` and
      `--no-config` (or `UV_NO_CONFIG=1`). A lookup that could return
-     a workspace `.venv` gives no trusted value.
+     a workspace `.venv` gives no trusted value. A `uv python find
+     --managed-python` lookup is not `PPA007`: the option keeps uv to
+     its own installs. Nor is `uv export --script`, which exports the
+     script's requirements rather than a project's. `uv python
+     install` prints no path on some uv releases, so its output is
+     never trusted. The version request may be `"$V"` for a step
+     `env:` value of literal text the step never sets. In a leaf uv
+     subcommand such as `uv venv` or `uv sync`, a later word is an
+     operand, not a subcommand. An operand the check cannot read
+     may still expand to an option such as `--python=…`, so it stays
+     `PPA009` unless the whole word is one double-quoted string that
+     opens with a path expression, such as `"${DIR}/v"` for a step
+     `env:` `DIR` of `${{ runner.temp }}`. As on the check's earlier
+     releases, it reads the first operand alone: a later one that a
+     caller's input expands to an option is outside the model.
    - **Cleared wrappers.** `env -i`, `env -`, `exec -c` or `sudo`
      loses its exemption when any `NAME=value` it passes, through
      nested wrappers and after `sudo` included, names an interpreter
@@ -1249,7 +1328,26 @@ annotates the right file.
      `UV_CACHE_DIR` and `UV_NO_PROGRESS` (`CLEARED_ALLOWED` in
      `_uv.py`), each with a literal value: `PATH="$PATH"` or a
      `${{ }}` value counts as a passed selector. A passed `UV_PYTHON`
-     holding a trusted interpreter still pins uv.
+     holding a trusted interpreter still pins uv. The `env -i`
+     array may be a literal `NAME=value` array, extended by a top-level
+     `for name in A B C; do … clean+=("$name=${!name}"); done` over
+     literal names: each name passes with the caller's value, which
+     the check cannot read. A name outside the selectors, such as
+     `HTTPS_PROXY`, may pass so; an interpreter selector, or one of
+     the allowed names above, which need a literal value, drops the
+     exemption. A
+     `${{ runner.temp }}/…` value counts as literal here. Such an
+     array serves the trust of the lookup alone: when the check
+     cannot resolve the program after it, such as `"$UV"` from a
+     setup-uv step with an `if:`, the command reads as if the array
+     were unread too, as on the check's earlier releases.
+   - **Indirect reads and assignments.** An indirect read
+     (`${!name}`) assigns nothing: it never makes a step opaque, and
+     a variable bound in step `env:`, such as `UV`, keeps its
+     verdict. The value it reads is one the check does not follow.
+     An indirect assignment (`printf -v "$name"`, `read "$name"`,
+     `declare "$name=…"`, `eval`) may name any variable, so the step
+     trusts none, as **Assignments** says.
    - **Trusted interpreter values: limits.** The model is lexical
      and fixed. It trusts a value through these alone: one unconditional
      top-level assignment, or one unconditional top-level
@@ -1257,14 +1355,17 @@ annotates the right file.
      `continue-on-error:`; a double-quoted expansion, or an unquoted
      one as **Word splitting** allows; the assigning builtins named
      above; and the selector constant above for `env -i`. It models no
-     control flow, functions, arrays beyond the literal `env -i`
-     form, `eval`, `source` or arithmetic. Anything else is `PPA009`,
+     control flow beyond the unset filters and loop appends above, no
+     functions, no arrays beyond the literal `env -i` form, and no
+     `eval`, `source` or arithmetic. Anything else is `PPA009`,
      reported and never trusted. A request to model more of bash than
      this is out of the check's scope.
 
      This list is the whole model. A construct it does not name, such
-     as arithmetic, indirect expansion (`${!name}`), `declare -n`,
-     traps, co-processes, process substitution or a value that crosses
+     as arithmetic, indirect expansion (`${!name}`) outside the
+     cleared-array loop above, `declare -n`, traps, co-processes,
+     process substitution other than an unset filter's feed, or a
+     value that crosses
      a step through any channel other than `$GITHUB_OUTPUT`, leaves the
      value unresolved: `PPA009`, reported and never trusted. A request
      to model more of bash than this falls outside the check's scope.
