@@ -77,7 +77,7 @@ __all__ = [
 ENFORCEABLE_RULES = frozenset(f"PPA00{n}" for n in range(1, 9))
 """Rules ``--verify-python-path`` fails on. PPA009 and PPA010 are notices."""
 
-ACTION_ENFORCEABLE_RULES = frozenset({"PPA011", "PPA012", "PPA013"})
+ACTION_ENFORCEABLE_RULES = frozenset({"PPA011", "PPA012", "PPA013", "PPA014"})
 """Rules ``--verify-python-path`` fails on in a composite action alone.
 
 A workflow job sees its own environment, so in a workflow file they
@@ -681,7 +681,7 @@ def exit_code(config: Config, result: PythonPathResult | None) -> int:
     Returns:
         ``PYTHON_PATH_FOUND`` when enforcement was requested and an
         unsuppressed finding of a rule from PPA001 to PPA008 remains,
-        or of PPA011 to PPA013 in a composite action,
+        or of PPA011 to PPA014 in a composite action,
         and ``RUNTIME_ERROR`` when enforcement was requested and a file
         could not be read: a check that did not look must not pass.
         PPA009 and PPA010 never count. Without ``verify`` the check

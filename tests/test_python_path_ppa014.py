@@ -23,7 +23,6 @@ from gha_workflow_linter.python_path import _engine as audit
 from gha_workflow_linter.python_path_report import ACTION_ENFORCEABLE_RULES
 from tests.conftest import strip_ansi
 
-PENDING = pytest.mark.xfail(strict=True, reason="PPA014 not implemented")
 CORPUS = Path(__file__).parent / "fixtures" / "trusted_interpreter_corpus"
 SETUP_PYTHON = "    - id: py\n      uses: actions/setup-python@v5\n"
 PYTHON_PATH = "${{ steps.py.outputs.python-path }}"
@@ -68,7 +67,6 @@ def found(text: str, kind: str = "action") -> list[str]:
     ]
 
 
-@PENDING
 @pytest.mark.parametrize(
     "script",
     [
@@ -90,14 +88,12 @@ def test_earlier_setup_python_clears_it() -> None:
     assert found(action(SETUP_PYTHON, step("python3 -I -m json.tool f"))) == []
 
 
-@PENDING
 def test_later_setup_python_does_not() -> None:
     """Only a setup-python step ahead of the command counts."""
     text = action(step("python3 -I s.py"), SETUP_PYTHON)
     assert found(text) == [f"6: {MESSAGE}"]
 
 
-@PENDING
 @pytest.mark.parametrize(
     ("script", "env"),
     [
@@ -115,7 +111,6 @@ def test_safe_path_alone_is_partial(
     assert found(action(step(script, env))) == [f"{line}: {PARTIAL}"]
 
 
-@PENDING
 def test_isolated_mode_is_not_partial() -> None:
     """-I implies -P, so -P is not the only isolation."""
     assert found(action(step("python3 -I -P s.py"))) == [f"6: {MESSAGE}"]
@@ -143,12 +138,65 @@ def test_workflows_and_scripts_are_not_reported() -> None:
     assert found("python3 -I s.py\n", "script") == []
 
 
+UV_RUN = "uv run --no-config --no-project --python /usr/bin/python3"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f"{UV_RUN} python -I s.py",
+        "uvx --no-config --python /usr/bin/python3 python -I s.py",
+        "uvx --no-config --python /usr/bin/python3 python3.12 -I s.py",
+        "uv tool run --no-config --python /usr/bin/python3 python3 s.py",
+    ],
+)
+def test_python_uv_starts_is_not_reported(script: str) -> None:
+    """uv run maps python to its interpreter; uvx reads a request."""
+    assert found(action(step(script))) == []
+
+
+def test_uv_run_finds_other_names_on_path() -> None:
+    """uv run looks python3 up on PATH, its scripts directory first.
+
+    That directory is ``/usr/local/bin`` for Debian's ``/usr/bin/python3``,
+    so the caller's ``python3`` still runs.
+    """
+    assert found(action(step(f"{UV_RUN} python3 -I s.py"))) == [
+        f"6: {MESSAGE}; uv run finds python3 there, not its interpreter: "
+        "run python"
+    ]
+
+
+def test_wrapper_under_uv_run_finds_python_on_path() -> None:
+    """``env`` between uv and python looks the name up on PATH itself."""
+    script = f"{UV_RUN} env A=1 python -I s.py"
+    assert found(action(step(script))) == [f"6: {MESSAGE}"]
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        f'{UV_RUN} "$(command -v python)" -I s.py',
+        f"{UV_RUN} $(command -v python) -I s.py",
+        'uvx --no-config --python /usr/bin/python3 "$(command -v python)" s.py',
+    ],
+)
+def test_command_lookup_under_uv_is_reported(script: str) -> None:
+    """The shell resolves ``$(command -v python)`` on PATH before uv runs."""
+    assert found(action(step(script))) == [f"6: {MESSAGE}"]
+
+
+def test_uv_run_python_then_bare_python() -> None:
+    """uv's reading of its own program does not carry to the next one."""
+    script = f"{UV_RUN} python -I s.py\npython3 -I s.py"
+    assert found(action(step(script))) == [f"7: {MESSAGE}"]
+
+
 def test_ignore_mark_drops_it() -> None:
     script = "# python-path-audit: ignore\npython3 -I s.py"
     assert found(action(step(script))) == []
 
 
-@PENDING
 def test_rule_text_and_gating() -> None:
     assert audit.RULES["PPA014"] == MESSAGE
     assert "PPA014" in ACTION_ENFORCEABLE_RULES
@@ -184,7 +232,6 @@ def _repository(root: Path, name: str, text: str) -> Path:
     return root
 
 
-@PENDING
 @pytest.mark.parametrize("script", ["python3 -m json.tool f", "python3 -I f"])
 def test_verify_fails_in_an_action(tmp_path: Path, script: str) -> None:
     root = _repository(tmp_path, "action.yaml", action(step(script)))

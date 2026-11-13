@@ -133,8 +133,16 @@ def _scan_text(text: str, kind: str, repo: str, relpath: str) -> list[Finding]:
     lines = _yaml.split_lines(text)
     found = _yaml.read(text, kind)
     trust = file_trust(found, kind)
+    # The earliest actions/setup-python step, found once for every block.
+    setup_python = min(
+        (s.step for s in found.steps if s.action == "actions/setup-python"),
+        default=None,
+    )
     for yblock in found.blocks:
         block = yaml_block(yblock, found.expressions, kind, trust)
+        block.setup_python = (
+            setup_python is not None and setup_python < yblock.step
+        )
         BlockScan(block, repo, relpath, lines, out).run()
     for setting in found.uv_env:
         marks = lines[max(setting.line - 2, 0) : setting.line]

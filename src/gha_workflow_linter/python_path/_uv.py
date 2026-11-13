@@ -413,6 +413,9 @@ class UvChecks(PythonpathChecks):
 
     # What env wrappers do to the command being judged.
     wrapper_env: EnvOptions | None = None
+    # "run" or "tool" while uv itself starts the next program, with no
+    # wrapper between: uv, not PATH, then reads a bare Python name.
+    uv_target: str | None = None
     facts: ShellFacts
     program: Callable[..., None]
     python: Callable[..., None]
@@ -514,7 +517,7 @@ class UvChecks(PythonpathChecks):
         # whether the caller's environment reaches uv: env -u keeps it.
         if self.block.kind != "script":
             self.uv_steered(node, cmd, args, assigns, is_uvx)
-        self.uv_program(node, args, arg_origins, cmd, assigns)
+        self.uv_program(node, args, arg_origins, cmd, assigns, is_uvx)
 
     def uv_steered(
         self,
@@ -724,6 +727,7 @@ class UvChecks(PythonpathChecks):
         origins: list[Word],
         cmd: UvCommand,
         assigns: list[Node],
+        is_uvx: bool,
     ) -> None:
         """Judge the program uv run launches, as any other command's."""
         if cmd.program == -2:
@@ -756,11 +760,15 @@ class UvChecks(PythonpathChecks):
                 removed=set(base.removed),
             ),
         )
+        if inner == 0:
+            tool = is_uvx or cmd.subcommand[:2] == ["tool", "run"]
+            self.uv_target = "tool" if tool else "run"
         try:
             if inner < len(rest):
                 self.program(node, rest, rest_origins, inner, assigns)
         finally:
             self.wrapper_env = outer
+            self.uv_target = None
 
     def uv_readable(self, node: Node, args: list[str], is_uvx: bool) -> bool:
         """False, with PPA009 reported, when a deciding uv word is unknown.

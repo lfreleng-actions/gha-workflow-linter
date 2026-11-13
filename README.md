@@ -880,7 +880,7 @@ under a rate limit and when no action calls exist to check:
 gha-workflow-linter lint --python-path report
 
 # Fail with exit status 7 on a finding of PPA001 to PPA008, or of
-# PPA011 to PPA013 in a composite action
+# PPA011 to PPA014 in a composite action
 gha-workflow-linter lint --verify-python-path
 
 # Skip the check
@@ -909,6 +909,7 @@ run, and with which flags, needs a person.
 | `PPA011` | setup-uv runs an interpreter the caller's environment chooses            | Use the guarded step in [setup-uv and the caller's environment](#setup-uv-and-the-callers-environment)             |
 | `PPA012` | setup-uv adds a directory from the caller's environment to PATH          | Set `tool-bin-dir` under `${{ runner.temp }}` or `${{ github.action_path }}`, as the guarded step does             |
 | `PPA013` | uv chooses its interpreter from the caller's environment                 | Pass a [trusted interpreter](#trusted-interpreter-values) as `--python`; run `uv python find` under `env -i`       |
+| `PPA014` | Python resolved on the caller's PATH                                     | Run `actions/setup-python` first, or start a [trusted interpreter](#trusted-interpreter-values)                    |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1079,6 +1080,33 @@ A command that `env -i`, `env -`, `exec -c` or `sudo` runs gets no
 name, or passes a selector itself as `NAME=value` (see **Python path
 scope and limits**): the caller's environment does not reach it.
 
+#### Python found on the caller's PATH
+
+`PPA014` reports a composite action step that starts Python by bare
+name, `python`, `python3` or `python3.N`, with or without `-I`. The
+action runs on the caller's `PATH`, so the caller chooses which
+interpreter that name finds, and `-I` cannot help: it isolates the
+interpreter from the environment, not from the choice of interpreter.
+An earlier step of the same action that uses `actions/setup-python`
+puts its interpreter first on `PATH`, and the rule then stays silent;
+so does a [trusted interpreter](#trusted-interpreter-values) such as
+`"$PYTHON"` or `/usr/bin/python3`. When `-P` or `PYTHONSAFEPATH`
+isolates without `-I`, the finding adds `partial: -P leaves
+PYTHONPATH and other PYTHON* settings active`. The rule reads composite actions
+alone: a workflow job sets its own `PATH`, and a script's caller is
+unknown to the scan. A bare `python3 -m tool` without `-I` reports
+both `PPA014` and `PPA001`, and one directive on the line suppresses
+both.
+
+A bare name that uv starts itself is uv's choice, which `PPA013`
+judges: `uvx` and `uv tool run` read it as a Python request, and
+`uv run` maps `python` to its own interpreter. `uv run` looks up any
+other name, such as `python3`, on `PATH` after its interpreter's
+scripts directory, and that directory need not hold the name
+(`/usr/local/bin` for Debian's `/usr/bin/python3`), so `PPA014` still
+reports `uv run --python /usr/bin/python3 python3`; write `python`
+there instead.
+
 #### Trusted interpreter values
 
 `PPA013` and the program checks of the other rules trust these as an
@@ -1149,7 +1177,7 @@ carries them with `"suppressed": true`. The engine's own
 
 Without `--verify-python-path` the check reports and leaves the exit
 code alone. With it, an unsuppressed finding of `PPA001` to `PPA008`,
-or of `PPA011` to `PPA013` in a composite action, makes the run exit
+or of `PPA011` to `PPA014` in a composite action, makes the run exit
 `7`, and a file the check could not read makes it
 exit `1`: enforcement that never looked must not pass. A check that
 fails outright does the same under `--verify-python-path`, and
@@ -1174,8 +1202,12 @@ annotates the right file.
    through a value it cannot read, such as a step output or an
    unknown variable, as `PPA009`, without judging it.
 3. **The caller's environment.** `PPA011` and `PPA012` cover a
-   setup-uv step the caller's environment can steer, and `PPA013` a
-   uv command. #448 tracks the bare-`python` rule. The `PPA011`
+   setup-uv step the caller's environment can steer, `PPA013` a
+   uv command, and `PPA014` a bare `python` in a composite action.
+   `PPA014` matches an `actions/setup-python` step by its `uses:`
+   alone, in any earlier step of the action: it does not prove the
+   step runs first, under an `if:` for one, nor read a `PATH` a
+   wrapper such as `env PATH=…` or an assignment sets. The `PPA011`
    guard list follows the source of setup-uv v10.3.3 and may need
    revisiting for a later release. The rules read a step's values
    this way:
@@ -1375,9 +1407,10 @@ annotates the right file.
      builtin's target alike.
 5. **Workflow findings do not gate.** In a workflow file the linter
    reports `PPA011` to `PPA013` but they never fail a run: a job
-   sees its own environment. `PPA011` and `PPA012` do not read a
-   `$GITHUB_ENV` write earlier in the same job; `PPA013` reports one
-   that sets a uv interpreter setting.
+   sees its own environment. It does not report `PPA014` there.
+   `PPA011` and `PPA012` do not read a `$GITHUB_ENV` write earlier
+   in the same job; `PPA013` reports one that sets a uv interpreter
+   setting.
 6. **Out of scope.** The check does not read `.pth` files or Python
    source files.
 
@@ -1567,7 +1600,7 @@ repos:
       # Offline; fails the commit on a high or medium stderr merge
       - id: gha-stderr-merge
       # Offline; fails the commit on a Python run that takes in
-      # workspace files (PPA001 to PPA008, and PPA011 to PPA013
+      # workspace files (PPA001 to PPA008, and PPA011 to PPA014
       # in a composite action)
       - id: gha-python-path
 ```
@@ -2175,7 +2208,7 @@ file given with `config-file` still decides it.
 | `stderr-merge`        | Stderr-merge check mode: `off` or `report`                    | No       |         |
 | `verify-stderr-merge` | Fail when a high or medium stderr merge remains               | No       | `false` |
 | `python-path`         | Python-path check mode: `off` or `report`                     | No       |         |
-| `verify-python-path`  | Fail on PPA001 to PPA008, or PPA011 to PPA013 in an action    | No       | `false` |
+| `verify-python-path`  | Fail on PPA001 to PPA008, or PPA011 to PPA014 in an action    | No       | `false` |
 
 <!-- markdownlint-enable MD013 -->
 

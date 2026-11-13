@@ -319,15 +319,17 @@ def test_directives_are_read_as_shell_reads_them(
         tmp_path: The repository root.
         name: The file the text goes in.
         text: The file's text.
-        suppressed: Whether the one PPA001 finding is suppressed.
+        suppressed: Whether the one PPA001 finding, and in an action
+            the PPA014 finding on its line, is suppressed.
     """
     (tmp_path / ".git").mkdir()
     (tmp_path / name).write_text(text)
+    rules = ["PPA014", "PPA001"] if name == "action.yaml" else ["PPA001"]
 
     result = scan_repository(tmp_path)
 
     assert [(f.rule, f.suppressed) for f in result.findings] == [
-        ("PPA001", suppressed)
+        (rule, suppressed) for rule in rules
     ]
 
 
@@ -557,9 +559,10 @@ def test_aliased_findings_share_one_directive_lookup(
 
     result = scan_repository(tmp_path)
 
-    assert len(result.findings) == 17
+    assert len(result.findings) == 34
     assert {(f.rule, f.suppressed, f.reason) for f in result.findings} == {
-        ("PPA001", True, "vendored")
+        ("PPA001", True, "vendored"),
+        ("PPA014", True, "vendored"),
     }
     assert len(calls) == 1
 
@@ -586,7 +589,7 @@ def test_a_flow_sequence_looks_up_its_line_once(
 
     result = scan_repository(tmp_path)
 
-    assert len(result.findings) == count
+    assert len(result.findings) == 2 * count
     assert not any(f.suppressed for f in result.findings)
     assert len(calls) == count
 
@@ -633,22 +636,33 @@ def test_findings_match_the_standalone_engine(tmp_path: Path) -> None:
         (
             "[{run: 'python3 -m first # python-path-ok'}, "
             "{run: 'python3 -m second'}]",
-            [("PPA001", True), ("PPA001", False)],
+            [
+                ("PPA014", True),
+                ("PPA001", True),
+                ("PPA014", False),
+                ("PPA001", False),
+            ],
         ),
         (
             "[{run: 'python3 -m same'}, "
             "{run: 'python3 -m same # python-path-ok'}]",
-            [("PPA001", False), ("PPA001", True)],
+            [
+                ("PPA014", False),
+                ("PPA001", False),
+                ("PPA014", True),
+                ("PPA001", True),
+            ],
         ),
         (
             "[{run: 'python3 -m first'}, "
             "{run: 'python3 -m second'}]  # python-path-ok",
-            [("PPA001", True), ("PPA001", True)],
+            [("PPA014", True), ("PPA001", True)] * 2,
         ),
         (
             "[{uses: astral-sh/setup-uv@v6}, "
             "{run: 'python3 -m first # python-path-ok'}]",
             [
+                ("PPA014", True),
                 ("PPA001", True),
                 ("PPA008", False),
                 ("PPA011", False),
@@ -700,7 +714,8 @@ def test_a_shell_directive_above_covers_its_own_step_alone(
     result = scan_repository(tmp_path)
 
     assert [(f.rule, f.line, f.suppressed) for f in result.findings] == [
-        ("PPA001", 9, False)
+        ("PPA014", 9, False),
+        ("PPA001", 9, False),
     ]
 
 
@@ -719,7 +734,8 @@ def test_a_shell_directive_above_covers_its_own_block(tmp_path: Path) -> None:
     result = scan_repository(tmp_path)
 
     assert [(f.rule, f.suppressed) for f in result.findings] == [
-        ("PPA001", True)
+        ("PPA014", True),
+        ("PPA001", True),
     ]
 
 
@@ -775,7 +791,7 @@ def test_block_keys_are_built_once_per_block(
 
     result = scan_repository(tmp_path)
 
-    assert [f.rule for f in result.findings] == ["PPA001"]
+    assert [f.rule for f in result.findings] == ["PPA014", "PPA001"]
     assert len(built) <= 2
 
 

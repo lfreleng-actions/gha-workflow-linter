@@ -1179,6 +1179,24 @@ class TestPythonPath:
             stdout
         )
 
+    def test_caller_path_python_is_an_error_in_an_action_alone(
+        self, run_action: Any
+    ) -> None:
+        """PPA014 fails a run only in a composite action."""
+        document = _with_python_paths(
+            _python_path_finding("PPA014"),
+            _python_path_finding("PPA014", path="action.yaml", kind="action"),
+        )
+
+        stdout = run_action({"verify-python-path": "true"}, document).stdout
+
+        assert "::warning file=ci.yaml,line=9,title=python path PPA014" in (
+            stdout
+        )
+        assert "::error file=action.yaml,line=9,title=python path PPA014" in (
+            stdout
+        )
+
     def test_configured_verification_makes_errors(
         self, run_action: Any
     ) -> None:

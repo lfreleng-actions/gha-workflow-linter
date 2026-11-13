@@ -26,8 +26,16 @@ PLANTED_MARKER = "PLANTED-CODE-RAN"
 
 
 def rules(text: str, kind: str = "script") -> list[str]:
-    """The rule of each finding in ``text``."""
-    return [f.rule for f in audit.scan_text(text, kind, "repo", "file")]
+    """The rule of each finding in ``text``, PPA014 left out.
+
+    PPA014 reports any bare ``python3`` in a composite action, which
+    most cases here start; ``test_python_path_ppa014`` covers it.
+    """
+    return [
+        f.rule
+        for f in audit.scan_text(text, kind, "repo", "file")
+        if f.rule != "PPA014"
+    ]
 
 
 def rules_before_ppa011(text: str, kind: str = "script") -> list[str]:
@@ -960,7 +968,13 @@ class ParsingTest(unittest.TestCase):
         findings = audit.scan_text(text, "action", "repo", "action.yaml")
         self.assertEqual(
             [(f.rule, f.line) for f in findings],
-            [("PPA001", 6), ("PPA002", 12)],
+            [
+                ("PPA014", 6),
+                ("PPA001", 6),
+                ("PPA014", 12),
+                ("PPA002", 12),
+                ("PPA014", 14),
+            ],
         )
 
     def test_quoted_single_line_run(self) -> None:
@@ -1847,7 +1861,8 @@ class ContextTest(unittest.TestCase):
         findings = audit.scan_text(text, "action", "repo", "action.yaml")
         # working-directory exempts nothing (R1).
         self.assertEqual(
-            [(f.rule, f.line) for f in findings], [("PPA001", 3), ("PPA001", 5)]
+            [(f.rule, f.line) for f in findings],
+            [("PPA014", 3), ("PPA001", 3), ("PPA014", 5), ("PPA001", 5)],
         )
 
     def test_github_env_pythonpath(self) -> None:
@@ -2020,7 +2035,10 @@ class YamlTest(unittest.TestCase):
             "        echo before\n          python3 -m tool\n        echo after\n"
         )
         findings = audit.scan_text(text, "action", "repo", "action.yaml")
-        self.assertEqual([(f.rule, f.line) for f in findings], [("PPA001", 6)])
+        self.assertEqual(
+            [(f.rule, f.line) for f in findings],
+            [("PPA014", 6), ("PPA001", 6)],
+        )
 
     def test_joined_lines_map_to_their_own_line(self) -> None:
         """A finding names the line a command is on, however YAML joins it."""
@@ -2476,7 +2494,9 @@ class DiscoveryTest(unittest.TestCase):
             "repo-a/node_modules/dep/x.sh": "python3 -m ignored\n",
             "repo-a/docs/README.md": "python3 -m ignored\n",
             "repo-b/.git/HEAD": "",
-            "repo-b/action.yml": "runs:\n  steps:\n    - run: python3 -I -m safe\n",
+            "repo-b/action.yml": (
+                "runs:\n  steps:\n    - run: /usr/bin/python3 -I -m safe\n"
+            ),
         }
         for relpath, text in files.items():
             path = os.path.join(root, relpath)
@@ -2490,6 +2510,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(
             got,
             [
+                ("action", "repo-a", "action.yaml", "PPA014"),
                 ("action", "repo-a", "action.yaml", "PPA001"),
                 ("workflow", "repo-a", ".github/workflows/ci.yaml", "PPA002"),
                 ("script", "repo-a", "bin/tool", "PPA001"),
@@ -2504,9 +2525,9 @@ class DiscoveryTest(unittest.TestCase):
             "helper": "echo x | python3\n",
         }
         expected = {
-            "saved-action.yaml": ("action", "PPA001"),
-            "saved-workflow.yml": ("workflow", "PPA001"),
-            "helper": ("script", "PPA003"),
+            "saved-action.yaml": [("action", "PPA014"), ("action", "PPA001")],
+            "saved-workflow.yml": [("workflow", "PPA001")],
+            "helper": [("script", "PPA003")],
         }
         for name, text in files.items():
             path = os.path.join(self.root, name)
@@ -2515,7 +2536,7 @@ class DiscoveryTest(unittest.TestCase):
             with self.subTest(name=name):
                 findings = audit.scan([path])
                 self.assertEqual(
-                    [(f.kind, f.rule) for f in findings], [expected[name]]
+                    [(f.kind, f.rule) for f in findings], expected[name]
                 )
 
     def test_main_exit_codes_and_json(self) -> None:
@@ -2524,7 +2545,8 @@ class DiscoveryTest(unittest.TestCase):
             code = audit.main([self.root, "--json", "--kinds", "action"])
         self.assertEqual(code, 1)
         self.assertEqual(
-            [f["repo"] for f in json.loads(out.getvalue())], ["repo-a"]
+            [f["repo"] for f in json.loads(out.getvalue())],
+            ["repo-a", "repo-a"],
         )
         with redirect_stdout(io.StringIO()):
             clean = audit.main([os.path.join(self.root, "repo-b")])
@@ -3658,7 +3680,9 @@ class ReviewRoundElevenTest(unittest.TestCase):
         head = "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: |\n"
         step = head + "        echo \ue000temp:0\ue001\n        python3 -m x\n"
         found = audit.scan_text(step, "action", "repo", "action.yaml")
-        self.assertEqual([(f.rule, f.line) for f in found], [("PPA001", 7)])
+        self.assertEqual(
+            [(f.rule, f.line) for f in found], [("PPA014", 7), ("PPA001", 7)]
+        )
         # Nor can they name an interpreter, in a script or a step.
         self.assertEqual(rules("\ue002PYTHON\ue003 -m x\n"), [])
         self.assertEqual(

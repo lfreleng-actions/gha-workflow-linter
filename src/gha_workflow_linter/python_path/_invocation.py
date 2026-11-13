@@ -23,6 +23,7 @@ RULES = {
     "PPA011": "setup-uv runs an interpreter the caller's environment chooses",
     "PPA012": "setup-uv adds a directory from the caller's environment to PATH",
     "PPA013": "uv chooses its interpreter from the caller's environment",
+    "PPA014": "Python resolved on the caller's PATH",
 }
 INTERPRETER = re.compile(r"^(?:.*/)?python(?:3(?:\.\d+t?)?)?$")
 # Each ${{ }} expression in a run: block reaches the parser as a word
