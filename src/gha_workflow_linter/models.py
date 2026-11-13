@@ -680,7 +680,7 @@ class PythonPathConfig(BaseModel):
 
     Advisory by default: it reports findings but never changes the exit
     code. ``verify`` opts in to enforcement of PPA001 to PPA008, and of
-    PPA011 to PPA013 in a composite action; PPA009 and PPA010 never
+    PPA011 to PPA014 in a composite action; PPA009 and PPA010 never
     fail a run.
     """
 
@@ -702,7 +702,7 @@ class PythonPathConfig(BaseModel):
         default=False,
         description=(
             "Treat unsuppressed findings of PPA001 to PPA008, and of PPA011 "
-            "to PPA013 in a composite action, as errors and exit with the "
+            "to PPA014 in a composite action, as errors and exit with the "
             "PYTHON_PATH_FOUND status"
         ),
     )
@@ -993,7 +993,7 @@ class CLIOptions(BaseModel):
         default=False,
         description=(
             "Treat python-path findings of PPA001 to PPA008, and of PPA011 "
-            "to PPA013 in a composite action, as errors"
+            "to PPA014 in a composite action, as errors"
         ),
     )
     multi_repo: bool = Field(

@@ -27,7 +27,7 @@ Code  Name                      Meaning
                                 verify or update something.
 7     PYTHON_PATH_FOUND         ``--verify-python-path`` and a python-path
                                 finding of PPA001 to PPA008, or of PPA011
-                                to PPA013 in a composite action, remains.
+                                to PPA014 in a composite action, remains.
 8     STDERR_MERGE_FOUND        ``--verify-stderr-merge`` and stderr-merge
                                 findings at or above the floor remain.
 ===== ========================= ================================================
@@ -92,7 +92,7 @@ never managed to examine.
 
 PYTHON_PATH_FOUND: Final = 7
 """``--verify-python-path`` was requested and an unsuppressed finding of
-a rule from PPA001 to PPA008, or of PPA011 to PPA013 in a composite
+a rule from PPA001 to PPA008, or of PPA011 to PPA014 in a composite
 action, remains.
 
 PPA009 and PPA010 never set it: they say the scan could not prove a

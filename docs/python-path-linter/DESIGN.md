@@ -52,7 +52,7 @@ design accepts false positives and handles them with the ignore mark
 (`python-path-audit: ignore`) or the linter's allowlist; it does not
 accept a silent pass on a construct the tool did not model, short of
 the known limits listed below. The ignore mark applies to every rule,
-PPA008, PPA011, PPA012 and PPA013 included, on the finding's line or the line
+PPA008 and PPA011 to PPA014 included, on the finding's line or the line
 above. Where a case
 raises a question, the answer that reports PPA009 is the right one.
 
@@ -332,6 +332,36 @@ unread (PPA009), while the command's own or a wrapper's value still
 decides. A Python-named `${{ }}` expression with no trusted producer
 is PPA009 in program position, as a variable is, unless the Python
 invocation is itself a finding.
+
+### PPA014 and the caller's PATH
+
+Issue #448 adds PPA014, "Python resolved on the caller's PATH", for
+composite actions alone. A Python program whose word, after quote
+removal, has no `/` and names `python`, `python3` or `python3.N`
+resolves through `PATH`, which in an action is the caller's: `-I`
+does not change which interpreter runs, so the rule ignores the
+flags, save that `-P` or `PYTHONSAFEPATH` without `-I` adds
+"partial: -P leaves PYTHONPATH and other PYTHON* settings active".
+The engine finds the earliest step in the file that names
+`actions/setup-python` in `uses:`, once per file, and sets
+`Block.setup_python` for each block whose step comes after it; the
+rule is then silent for that block. The match is lexical: it does
+not prove the step runs first (an `if:` or `continue-on-error:`
+step counts), and the rule does not read a `PATH` set by a wrapper
+(`env PATH=…`, `env -i`) or an assignment. A trusted interpreter or
+an absolute literal path is not a bare name, so it passes. The
+program uv starts itself, with no wrapper between, reaches
+`program()` with `uv_target` set: under `uvx` or `uv tool run` a
+bare name is a Python request, and under `uv run` the name `python`
+is uv's own interpreter, so PPA013 judges both and PPA014 stays
+silent. `uv run` finds any other bare name on `PATH` after its
+interpreter's scripts directory, measured on uv 0.13.8 to run
+a planted `python3` under `--python /usr/bin/python3`, whose scripts
+directory is `/usr/local/bin`; PPA014 reports it with a note to run
+`python`. PPA014 reports through `BlockScan.report`, so the ignore
+mark and the de-duplication on line, rule and snippet hold, and it
+sits next to PPA001 to PPA003 on the same line without replacing
+them.
 
 ## Known limits
 

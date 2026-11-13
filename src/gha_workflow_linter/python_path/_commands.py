@@ -409,8 +409,13 @@ class CommandChecks(UvChecks):
         """
         name = texts[start]
         word = origins[start]
+        # Only the program uv itself starts; anything it runs is PATH's.
+        launcher, self.uv_target = self.uv_target, None
         substituted = self.substituted(word.node)
         inner = sole_child(word.node)
+        if inner.type == "command_substitution":
+            # The shell looks $(command -v X) up on PATH before uv starts.
+            launcher = None
         traced = substituted is not None or (
             not word.literal
             and inner.type != "command_substitution"
@@ -434,6 +439,8 @@ class CommandChecks(UvChecks):
             or name == TRUSTED_PYTHON
             or written.startswith(expression_marker("PYTHON"))
         ):
+            if "/" not in written and INTERPRETER.match(written):
+                self.caller_path(node, written, arguments, assigns, launcher)
             found = len(self.out)
             self.python(node, arguments, origin, assigns)
             # A Python-named expression no trusted step produces is
@@ -458,6 +465,46 @@ class CommandChecks(UvChecks):
                     "PPA009",
                     f"program is {written!r}, which the scan cannot resolve",
                 )
+
+    def caller_path(
+        self,
+        node: Node,
+        name: str,
+        args: list[str],
+        assigns: list[Node],
+        launcher: str | None,
+    ) -> None:
+        """PPA014: a composite action starts Python by bare name.
+
+        The caller's ``PATH`` picks the interpreter unless an earlier
+        step of the file runs ``actions/setup-python``, matched by its
+        ``uses:`` alone. A workflow job's ``PATH`` is its own, and a
+        script's caller is unknown, so neither is reported.
+
+        uv reads the program it starts itself (``launcher``): ``uvx``
+        and ``uv tool run`` take a bare Python name as a request, and
+        ``uv run`` maps ``python`` to its own interpreter, so PPA013
+        judges those. ``uv run`` looks any other name up on ``PATH``
+        after its interpreter's scripts directory, which need not hold
+        that name (``/usr/local/bin`` for Debian's ``/usr/bin/python3``).
+        """
+        if self.block.kind != "action" or self.block.setup_python:
+            return
+        if launcher == "tool" or (launcher == "run" and name == "python"):
+            return
+        _mode, flags = parse_python(args)
+        safepath = "P" in flags or self.env_truthy("PYTHONSAFEPATH", assigns)
+        detail = RULES["PPA014"]
+        if launcher == "run":
+            detail += (
+                f"; uv run finds {name} there, not its interpreter: run python"
+            )
+        if safepath and "I" not in flags:
+            detail += (
+                "; partial: -P leaves PYTHONPATH and other PYTHON* "
+                "settings active"
+            )
+        self.report(node, "PPA014", detail)
 
     def substituted(self, node: Node) -> str | None:
         """A word's source with each traced step output as written.

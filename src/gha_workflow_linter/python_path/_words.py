@@ -61,6 +61,8 @@ class Block:
     # The literals a YAML env value may hold, by name, when it is one
     # ${{ COND && 'A' || 'B' }} expression.
     choices: dict[str, list[str]] = field(default_factory=dict)
+    # An earlier step of the same file runs actions/setup-python.
+    setup_python: bool = False
 
     @cached_property
     def traced_starts(self) -> list[int]:

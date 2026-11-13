@@ -151,14 +151,14 @@ inputs:
       What the python-path check does: off or report. Unset leaves the
       choice to the configuration file, whose default is 'report'. The
       check reads shell offline and annotates each finding: PPA001 to
-      PPA008, and PPA011 to PPA013 in a composite action, as a warning,
+      PPA008, and PPA011 to PPA014 in a composite action, as a warning,
       or as an error under 'verify-python-path'; PPA011 to PPA013 in a
       workflow as a warning; PPA009 and PPA010 as a notice.
     required: false
   verify-python-path:
     description: >
       Fail the run, with exit status 7, when a python-path finding of
-      PPA001 to PPA008, or of PPA011 to PPA013 in a composite action,
+      PPA001 to PPA008, or of PPA011 to PPA014 in a composite action,
       remains unsuppressed. PPA009 and PPA010 never fail the run.
       Without this the findings are advisory only.
     required: false
@@ -661,7 +661,7 @@ runs:
         # One annotation per unsuppressed python-path finding, escaped
         # the same way. PPA009 and PPA010 say the scan could not prove a
         # command safe, so they are notices whatever the verification.
-        # PPA011 to PPA013 fail a run only in a composite action, so
+        # PPA011 to PPA014 fail a run only in a composite action, so
         # elsewhere they are warnings whatever the verification.
         # Verification is what the run enforced, which a configuration
         # file can turn on without the input.
@@ -690,7 +690,7 @@ runs:
             | (if .rule == "PPA009" or .rule == "PPA010"
                then "notice"
                elif (.rule == "PPA011" or .rule == "PPA012"
-                     or .rule == "PPA013")
+                     or .rule == "PPA013" or .rule == "PPA014")
                  and .kind != "action"
                then "warning" else $level end) as $kind
             | (if .path | startswith("/") then .path

@@ -1069,7 +1069,7 @@ _VERIFY_PYTHON_PATH_OPTION = typer.Option(
     "--verify-python-path",
     help=(
         "Treat python-path findings of PPA001 to PPA008, and of PPA011 to "
-        "PPA013 in a composite action, as errors and exit with status 7. "
+        "PPA014 in a composite action, as errors and exit with status 7. "
         "PPA009 and PPA010 never fail the run"
     ),
 )
