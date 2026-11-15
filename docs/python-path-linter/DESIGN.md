@@ -406,9 +406,9 @@ MIT). Both ship binary wheels: py-tree-sitter for CPython 3.10–3.14 on
 manylinux x86_64/aarch64, musllinux, macOS x86_64/arm64 and Windows
 amd64/arm64; tree-sitter-bash as `cp310-abi3` wheels (one build serves
 every later CPython) for the same platforms. Both carry an sdist as a
-fallback. The linter requires Python >= 3.10, which matches. The
-pre-commit hook and the GitHub Action install the package from PyPI, so
-both pick the wheels up.
+fallback. The linter requires Python >= 3.11, which those wheels
+cover. The pre-commit hook and the GitHub Action install the package
+from PyPI, so both pick the wheels up.
 
 Measured cost: 3,460 shell blocks across 157 repositories parse in 6 s;
 a full estate scan takes 8–9 s against 35 s for the interpreter. The
