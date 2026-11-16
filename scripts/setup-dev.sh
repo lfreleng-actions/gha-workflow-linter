@@ -40,8 +40,8 @@ info "Setting up gha-workflow-linter development environment..."
 # Check Python version
 python_version=$(python3 --version 2>&1 | awk '{print $2}' | cut -d. -f1,2)
 
-if ! python3 -c "import sys; exit(0 if sys.version_info >= (3, 9) else 1)" 2>/dev/null; then
-    error "Python 3.9+ required, found: $python_version"
+if ! python3 -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+    error "Python 3.11+ required, found: $python_version"
 fi
 success "Python version check passed: $python_version"
 
