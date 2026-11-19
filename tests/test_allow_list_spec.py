@@ -577,7 +577,7 @@ class TestRenderSpecRefBump:
 
     @pytest.mark.parametrize(
         "ref",
-        ["", "-badref", "/badref", "ref..dots", "ref@{0}", "bad ref"],
+        ["", "-badref", "/badref", "ref..dots", "ref@{0}", "bad ref", "main\n"],
     )
     def test_invalid_target_ref_rejected(self, ref: str) -> None:
         """A bad replacement ref never reaches a workflow file."""
