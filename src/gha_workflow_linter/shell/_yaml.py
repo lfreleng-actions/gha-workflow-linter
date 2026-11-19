@@ -306,12 +306,18 @@ def literal_word(text: str, table: list[Expression]) -> Word:
 
 
 def read(text: str, kind: str) -> YamlFile:
-    """Read a workflow or action file. Raises ValueError if it is not YAML."""
+    """Read a workflow or action file. Raises ValueError if it is not YAML.
+
+    PyYAML composes nodes recursively, so a file nested deeper than the
+    interpreter's recursion limit is refused with ValueError too.
+    """
     try:
         documents = list(yaml.compose_all(text, Loader=yaml.SafeLoader))
     except yaml.YAMLError as error:
         problem = str(error).splitlines()[0] if str(error) else "invalid"
         raise ValueError(f"not valid YAML: {problem}") from error
+    except RecursionError as error:
+        raise ValueError("not valid YAML: nested too deeply") from error
     found = YamlFile()
     reader = _Reader(split_lines(text), kind, found)
     for document in documents:
