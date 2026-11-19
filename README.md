@@ -2371,6 +2371,30 @@ uv run pytest -m integration
 uv run pytest -m "not slow"
 ```
 
+### Fuzzing
+
+Three [Atheris](https://github.com/google/atheris) harnesses in
+`tests/fuzz` feed crafted input to the code that reads untrusted text:
+
+- `fuzz_yaml_reader.py`: the workflow and action file reader
+- `fuzz_shell_analyses.py`: the `python_path` and `stderr_merge` scans
+- `fuzz_grammars.py`: the allow-list coordinate and directive grammars
+
+Each harness names the contract it checks. Atheris is not a project
+dependency: install it for a manual run, then run a harness from the
+repository root.
+
+```bash
+uv pip install atheris
+# Fuzz from the built-in seeds for one minute
+uv run python tests/fuzz/fuzz_yaml_reader.py -max_total_time=60
+# Replay saved inputs once each
+uv run python tests/fuzz/fuzz_yaml_reader.py crash-file other-file
+```
+
+`tests/test_fuzz_harnesses.py` replays every seed in the normal test
+suite, without Atheris.
+
 ### Code Quality
 
 ```bash

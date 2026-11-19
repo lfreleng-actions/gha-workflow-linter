@@ -1093,6 +1093,13 @@ def test_invalid_yaml_raises() -> None:
         scan_text("jobs: [\n", "workflow", "w.yml")
 
 
+@pytest.mark.parametrize("text", ["[" * 5000, "- " * 3000 + "a\n"])
+def test_deeply_nested_yaml_raises_value_error(text: str) -> None:
+    """Nesting past the recursion limit is the documented ValueError."""
+    with pytest.raises(ValueError, match="nested too deeply"):
+        scan_text(text, "workflow", "w.yml")
+
+
 def test_finding_fields() -> None:
     """A finding carries its rule's confidence, fix and JSON form."""
     found = scan_text("gh api x 2>&1 | jq .\n", "script", "s.sh")[0]

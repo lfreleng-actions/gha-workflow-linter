@@ -316,7 +316,7 @@ def _validate_ref(ref: str) -> str:
         or ".." in ref
         or "@{" in ref
         or len(ref) > MAX_REF_LENGTH
-        or not REF_RE.match(ref)
+        or not REF_RE.fullmatch(ref)
     ):
         raise SpecError(f"invalid git ref in config: '{ref}'")
     return ref

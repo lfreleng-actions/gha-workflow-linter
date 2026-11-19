@@ -10,7 +10,7 @@ import logging
 import os
 from pathlib import Path, PurePath
 import stat
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -517,9 +517,7 @@ class WorkflowScanner:
             self.logger.warning(f"Invalid YAML in {file_path}: {e}")
             return _ComposeResult(valid=False, node=None)
 
-        return _ComposeResult(
-            valid=True, node=cast("yaml.nodes.Node | None", node)
-        )
+        return _ComposeResult(valid=True, node=node)
 
     def scan_directory(
         self,
