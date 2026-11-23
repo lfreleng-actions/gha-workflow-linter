@@ -63,6 +63,7 @@ class _ReferenceResolutionMixin:
     _cache: ValidationCache
     _git_client: GitValidationClient | None
     _latest_versions_cache: dict[str, tuple[str, str, float]]
+    _exempt_latest_versions_cache: dict[str, tuple[str, str, float]]
     _cache_ttl: int
 
     async def _get_repository_info(

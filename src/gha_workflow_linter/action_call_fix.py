@@ -89,6 +89,10 @@ class AutoFixer(_VersionResolutionMixin):
         self._latest_versions_cache: dict[
             str, tuple[str, str, float]
         ] = {}  # {repo: (tag, sha, timestamp)}
+        # Answers for calls the Dependabot cooldown lists exempt
+        self._exempt_latest_versions_cache: dict[
+            str, tuple[str, str, float]
+        ] = {}
         self._cache_ttl = 300  # 5 minutes
 
         # Redirect tracking
@@ -469,6 +473,12 @@ class AutoFixer(_VersionResolutionMixin):
         )
 
         unique_repos: set[str] = set()
+        # Repositories resolved under the cooldown, and those resolved
+        # for calls the Dependabot cooldown lists exempt. One repository
+        # can sit in both when its calls differ by path.
+        cooled_repos: set[str] = set()
+        exempt_repos: set[str] = set()
+        exempt_calls: set[tuple[Path, int]] = set()
         action_call_list: list[tuple[Path, int, ActionCall]] = []
 
         for file_path, calls in all_action_calls.items():
@@ -490,6 +500,11 @@ class AutoFixer(_VersionResolutionMixin):
                 )
                 base_repo_key = self._get_base_repository(repo_key)
                 unique_repos.add(base_repo_key)
+                if self._cooldown_exempt(action_call):
+                    exempt_calls.add((file_path, line_num))
+                    exempt_repos.add(base_repo_key)
+                else:
+                    cooled_repos.add(base_repo_key)
 
         if not action_call_list:
             return fixes_by_file, skipped_by_file, {}
@@ -520,7 +535,14 @@ class AutoFixer(_VersionResolutionMixin):
             )
 
         latest_versions = await self._get_latest_versions_batch(
-            list(unique_repos)
+            list(cooled_repos)
+        )
+        exempt_versions = (
+            await self._get_latest_versions_batch(
+                list(exempt_repos), cooldown_exempt=True
+            )
+            if exempt_repos
+            else {}
         )
 
         refs_to_resolve: list[tuple[str, str]] = []
@@ -572,22 +594,42 @@ class AutoFixer(_VersionResolutionMixin):
                         style="dim",
                     )
                 )
-            redirected_versions = await self._get_latest_versions_batch(
-                redirected_repos
-            )
-            latest_versions.update(redirected_versions)
+            redirected_cooled = [
+                new_repo
+                for old_repo, new_repo in redirect_map.items()
+                if old_repo in cooled_repos
+            ]
+            redirected_exempt = [
+                new_repo
+                for old_repo, new_repo in redirect_map.items()
+                if old_repo in exempt_repos
+            ]
+            if redirected_cooled:
+                latest_versions.update(
+                    await self._get_latest_versions_batch(redirected_cooled)
+                )
+            if redirected_exempt:
+                exempt_versions.update(
+                    await self._get_latest_versions_batch(
+                        redirected_exempt, cooldown_exempt=True
+                    )
+                )
 
         # Step 3c: Collect refs that need SHA resolution (use set for O(1) lookup)
         refs_to_resolve_set: set[tuple[str, str]] = set()
 
-        for repo_key in unique_repos:
-            effective_repo = redirect_map.get(repo_key, repo_key)
+        for versions, repos in (
+            (latest_versions, cooled_repos),
+            (exempt_versions, exempt_repos),
+        ):
+            for repo_key in repos:
+                effective_repo = redirect_map.get(repo_key, repo_key)
 
-            # Check in latest_versions using effective (possibly redirected) repo
-            if effective_repo in latest_versions:
-                tag, sha = latest_versions[effective_repo]
-                if not sha:  # SHA not available yet, need to resolve
-                    refs_to_resolve_set.add((effective_repo, tag))
+                # Check using the effective (possibly redirected) repo
+                if effective_repo in versions:
+                    tag, sha = versions[effective_repo]
+                    if not sha:  # SHA not available yet, need to resolve
+                        refs_to_resolve_set.add((effective_repo, tag))
 
         # Step 3d: Collect existing version comments that need SHA verification
         # This avoids N individual API calls during the update loop
@@ -633,6 +675,11 @@ class AutoFixer(_VersionResolutionMixin):
             )
 
         for file_path, line_num, action_call in action_call_list:
+            call_versions = (
+                exempt_versions
+                if (file_path, line_num) in exempt_calls
+                else latest_versions
+            )
             try:
                 repo_key = (
                     f"{action_call.organization}/{action_call.repository}"
@@ -675,7 +722,7 @@ class AutoFixer(_VersionResolutionMixin):
                         action_call,
                         base_repo_key,
                         sha_map,
-                        latest_versions,
+                        call_versions,
                         repo_changed=repo_was_redirected,
                     )
 
@@ -737,8 +784,8 @@ class AutoFixer(_VersionResolutionMixin):
                 effective_lookup_repo = (
                     base_repo_key  # Use the potentially redirected repo
                 )
-                if effective_lookup_repo in latest_versions:
-                    target_ref, cached_sha = latest_versions[
+                if effective_lookup_repo in call_versions:
+                    target_ref, cached_sha = call_versions[
                         effective_lookup_repo
                     ]
 
@@ -931,264 +978,6 @@ class AutoFixer(_VersionResolutionMixin):
                 )
 
         return fixes_by_file, skipped_by_file, dict(outdated_actions_summary)
-
-    async def _fix_action_call_with_redirect(
-        self,
-        action_call: ActionCall,
-        validation_result: ValidationResult,
-        live: Live | None = None,
-        show_live_updates: bool = True,
-    ) -> dict[str, Any] | None:
-        """
-        Fix a single action call and track redirects.
-
-        Args:
-            action_call: The action call to fix
-            validation_result: The validation result that indicates what needs fixing
-            live: Optional Rich Live display for showing redirect messages
-
-        Returns:
-            Dictionary with 'fixed_line' and optional redirect info, or None if couldn't be fixed
-        """
-        repo_key = f"{action_call.organization}/{action_call.repository}"
-        base_repo_key = self._get_base_repository(repo_key)
-
-        # Check if repository has been redirected/moved
-        (
-            repo_key,
-            base_repo_key,
-            redirect_info,
-        ) = await self._resolve_redirect_for_fix(
-            action_call, repo_key, base_repo_key, live
-        )
-
-        # Get repository information (if API available) - use base repo
-        repo_info = await self._get_repository_info(base_repo_key)
-        default_branch = (
-            repo_info.get("default_branch", "main") if repo_info else "main"
-        )
-
-        # Determine the target reference
-        original_ref = action_call.reference
-        target_ref = await self._determine_target_ref(
-            action_call, validation_result, base_repo_key, default_branch
-        )
-
-        # Resolve the target SHA and version comment (pinning as configured)
-        (
-            target_sha,
-            version_comment,
-            cannot_pin,
-        ) = await self._resolve_sha_and_comment(
-            action_call,
-            validation_result,
-            base_repo_key,
-            target_ref,
-            original_ref,
-            default_branch,
-        )
-        if cannot_pin:
-            # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA.
-            return (
-                {"fixed_line": None, "redirect_info": redirect_info}
-                if redirect_info
-                else None
-            )
-
-        # Check if we actually have a change to make
-        final_ref = target_sha or target_ref
-        repo_changed = base_repo_key != self._get_base_repository(
-            f"{action_call.organization}/{action_call.repository}"
-        )
-
-        # Fix false update bug: Check if version comment actually changed
-        existing_comment = None
-        if action_call.comment:
-            existing_comment = action_call.comment.strip().lstrip("#").strip()
-        comment_changed = (
-            (version_comment != existing_comment) if version_comment else False
-        )
-
-        if (
-            final_ref == action_call.reference
-            and not comment_changed
-            and not repo_changed
-        ):
-            # No actual change needed
-            return (
-                {"fixed_line": None, "redirect_info": redirect_info}
-                if redirect_info
-                else None
-            )
-
-        # Build the fixed line - pass new repo if it changed
-        fixed_line = self._build_fixed_line(
-            action_call,
-            final_ref,
-            version_comment,
-            repo_key if repo_changed else None,
-        )
-
-        return {"fixed_line": fixed_line, "redirect_info": redirect_info}
-
-    async def _resolve_redirect_for_fix(
-        self,
-        action_call: ActionCall,
-        repo_key: str,
-        base_repo_key: str,
-        live: Live | None,
-    ) -> tuple[str, str, dict[str, Any] | None]:
-        """Detect and apply a repository redirect for an action call.
-
-        Returns the (possibly updated) ``repo_key`` and ``base_repo_key``
-        alongside ``redirect_info`` (``None`` when the repository has not
-        moved). Also records the redirect for statistics and, when a live
-        display is supplied, surfaces a one-off "Action has moved" message.
-        """
-        new_base_repo = await self._detect_repository_redirect(base_repo_key)
-        if not new_base_repo:
-            return repo_key, base_repo_key, None
-
-        # Repository has moved - update the repo key, preserving any path
-        # component from the original reference.
-        if len(repo_key.split("/")) > 2:
-            path_component = "/".join(repo_key.split("/")[2:])
-            repo_key = f"{new_base_repo}/{path_component}"
-        else:
-            repo_key = new_base_repo
-        base_repo_key = new_base_repo
-        self.logger.debug(
-            f"Using redirected repository: {action_call.organization}/"
-            f"{action_call.repository} -> {repo_key}"
-        )
-
-        old_repo = f"{action_call.organization}/{action_call.repository}"
-        # Track unique redirected actions
-        self._redirects_found.add(old_repo)
-
-        if old_repo not in self._redirects_seen and live:
-            self._redirects_seen.add(old_repo)
-            await self._display_redirect_messages(old_repo, new_base_repo, live)
-
-        redirect_info = {"old_repo": old_repo, "new_repo": new_base_repo}
-        return repo_key, base_repo_key, redirect_info
-
-    async def _display_redirect_messages(
-        self, old_repo: str, new_base_repo: str, live: Live
-    ) -> None:
-        """Show the "Action has moved / New location" live-display messages."""
-        # Show "Action has moved" message in orange
-        moved_msg = Text()
-        moved_msg.append("  Action has moved: ", style="dim")
-        moved_msg.append(old_repo, style="orange3")
-        live.update(moved_msg)
-        await asyncio.sleep(0.5)  # Brief pause so user can see the message
-
-        # Show "New location" message in green
-        new_location_msg = Text()
-        new_location_msg.append("  New location: ", style="dim")
-        new_location_msg.append(new_base_repo, style="green")
-        live.update(new_location_msg)
-        await asyncio.sleep(0.5)  # Brief pause so user can see the message
-
-    async def _determine_target_ref(
-        self,
-        action_call: ActionCall,
-        validation_result: ValidationResult,
-        base_repo_key: str,
-        default_branch: str,
-    ) -> str:
-        """Choose the reference to fix an action call to.
-
-        Uses the latest release/tag when ``update_actions`` is set, otherwise
-        repairs an invalid reference (with a fallback), and finally falls
-        back to the default branch. Non-fixable cases keep the current
-        reference (e.g. NOT_PINNED_TO_SHA).
-        """
-        if self.config.update_actions:
-            # Use latest release/tag if available - use base repo
-            target_ref = await self._get_latest_release_or_tag(base_repo_key)
-            if not target_ref:
-                # Fall back to default branch
-                target_ref = default_branch
-        elif validation_result == ValidationResult.INVALID_REFERENCE:
-            # Invalid reference, try to find a valid one - use base repo
-            target_ref = await self._find_valid_reference(
-                base_repo_key, action_call.reference
-            )
-            if not target_ref:
-                target_ref = await self._get_fallback_reference(
-                    base_repo_key, action_call.reference
-                )
-            if not target_ref:
-                # Fall back to default branch
-                target_ref = default_branch
-        else:
-            # Keep the current reference for NOT_PINNED_TO_SHA cases
-            target_ref = action_call.reference
-        return target_ref
-
-    async def _resolve_sha_and_comment(
-        self,
-        action_call: ActionCall,
-        validation_result: ValidationResult,
-        base_repo_key: str,
-        target_ref: str,
-        original_ref: str,
-        default_branch: str,
-    ) -> tuple[str | None, str | None, bool]:
-        """Resolve the commit SHA and version comment for a fix.
-
-        Returns ``(target_sha, version_comment, cannot_pin)``. ``cannot_pin``
-        is ``True`` only when a NOT_PINNED_TO_SHA reference could not be
-        resolved to a SHA, signalling the caller to abandon the fix.
-        """
-        target_sha = None
-        version_comment = None
-
-        if not (
-            self.config.require_pinned_sha
-            or action_call.reference_type != ReferenceType.COMMIT_SHA
-        ):
-            return target_sha, version_comment, False
-
-        # Try to get SHA (API or Git) - use base repo
-        sha_info = await self._get_commit_sha_for_reference(
-            base_repo_key, target_ref
-        )
-        if sha_info:
-            target_sha = sha_info["sha"]
-            # If target_ref looks like a version tag, use it in comment
-            if (
-                ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
-                or target_ref != default_branch
-            ):
-                version_comment = target_ref
-            elif (
-                original_ref != default_branch
-                and validation_result == ValidationResult.NOT_PINNED_TO_SHA
-            ):
-                # Preserve original branch name when falling back to default
-                version_comment = original_ref
-        # Without access to resolve SHAs, we can't fix NOT_PINNED_TO_SHA issues
-        elif validation_result == ValidationResult.NOT_PINNED_TO_SHA:
-            self.logger.debug(
-                f"Cannot resolve SHA for {base_repo_key}@{target_ref}, "
-                f"skipping SHA pinning"
-            )
-            return target_sha, version_comment, True
-
-        # If we couldn't get SHA but target_ref is a version tag, still set the
-        # comment. This handles cases where SHA resolution fails but we're
-        # still updating the version.
-        if (
-            not target_sha
-            and target_ref
-            and ActionCallPatterns.VERSION_TAG_PATTERN.match(target_ref)
-        ):
-            version_comment = target_ref
-
-        return target_sha, version_comment, False
 
     def _build_fixed_line(
         self,

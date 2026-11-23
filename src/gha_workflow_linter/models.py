@@ -785,6 +785,22 @@ class Config(BaseModel):
             "the cooldown). Allow-list pins use allow_list.cooldown_days"
         ),
     )
+    cooldown_exclude: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Dependabot cooldown.exclude patterns: a matching action call "
+            "takes no cooldown. Set from the Dependabot configuration "
+            "when it supplies cooldown_days"
+        ),
+    )
+    cooldown_include: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Dependabot cooldown.include patterns: when present, only a "
+            "matching action call takes the cooldown. Set from the "
+            "Dependabot configuration when it supplies cooldown_days"
+        ),
+    )
 
     # pydantic BaseModel subclasses with all-defaulted fields require no
     # arguments (keyword args are still accepted), but basedpyright reports
