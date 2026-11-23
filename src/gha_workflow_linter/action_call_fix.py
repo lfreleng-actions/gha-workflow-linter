@@ -89,6 +89,10 @@ class AutoFixer(_VersionResolutionMixin):
         self._latest_versions_cache: dict[
             str, tuple[str, str, float]
         ] = {}  # {repo: (tag, sha, timestamp)}
+        # Answers for calls the Dependabot cooldown lists exempt
+        self._exempt_latest_versions_cache: dict[
+            str, tuple[str, str, float]
+        ] = {}
         self._cache_ttl = 300  # 5 minutes
 
         # Redirect tracking
@@ -469,6 +473,12 @@ class AutoFixer(_VersionResolutionMixin):
         )
 
         unique_repos: set[str] = set()
+        # Repositories resolved under the cooldown, and those resolved
+        # for calls the Dependabot cooldown lists exempt. One repository
+        # can sit in both when its calls differ by path.
+        cooled_repos: set[str] = set()
+        exempt_repos: set[str] = set()
+        exempt_calls: set[tuple[Path, int]] = set()
         action_call_list: list[tuple[Path, int, ActionCall]] = []
 
         for file_path, calls in all_action_calls.items():
@@ -490,6 +500,11 @@ class AutoFixer(_VersionResolutionMixin):
                 )
                 base_repo_key = self._get_base_repository(repo_key)
                 unique_repos.add(base_repo_key)
+                if self._cooldown_exempt(action_call):
+                    exempt_calls.add((file_path, line_num))
+                    exempt_repos.add(base_repo_key)
+                else:
+                    cooled_repos.add(base_repo_key)
 
         if not action_call_list:
             return fixes_by_file, skipped_by_file, {}
@@ -520,7 +535,14 @@ class AutoFixer(_VersionResolutionMixin):
             )
 
         latest_versions = await self._get_latest_versions_batch(
-            list(unique_repos)
+            list(cooled_repos)
+        )
+        exempt_versions = (
+            await self._get_latest_versions_batch(
+                list(exempt_repos), cooldown_exempt=True
+            )
+            if exempt_repos
+            else {}
         )
 
         refs_to_resolve: list[tuple[str, str]] = []
@@ -572,22 +594,42 @@ class AutoFixer(_VersionResolutionMixin):
                         style="dim",
                     )
                 )
-            redirected_versions = await self._get_latest_versions_batch(
-                redirected_repos
-            )
-            latest_versions.update(redirected_versions)
+            redirected_cooled = [
+                new_repo
+                for old_repo, new_repo in redirect_map.items()
+                if old_repo in cooled_repos
+            ]
+            redirected_exempt = [
+                new_repo
+                for old_repo, new_repo in redirect_map.items()
+                if old_repo in exempt_repos
+            ]
+            if redirected_cooled:
+                latest_versions.update(
+                    await self._get_latest_versions_batch(redirected_cooled)
+                )
+            if redirected_exempt:
+                exempt_versions.update(
+                    await self._get_latest_versions_batch(
+                        redirected_exempt, cooldown_exempt=True
+                    )
+                )
 
         # Step 3c: Collect refs that need SHA resolution (use set for O(1) lookup)
         refs_to_resolve_set: set[tuple[str, str]] = set()
 
-        for repo_key in unique_repos:
-            effective_repo = redirect_map.get(repo_key, repo_key)
+        for versions, repos in (
+            (latest_versions, cooled_repos),
+            (exempt_versions, exempt_repos),
+        ):
+            for repo_key in repos:
+                effective_repo = redirect_map.get(repo_key, repo_key)
 
-            # Check in latest_versions using effective (possibly redirected) repo
-            if effective_repo in latest_versions:
-                tag, sha = latest_versions[effective_repo]
-                if not sha:  # SHA not available yet, need to resolve
-                    refs_to_resolve_set.add((effective_repo, tag))
+                # Check using the effective (possibly redirected) repo
+                if effective_repo in versions:
+                    tag, sha = versions[effective_repo]
+                    if not sha:  # SHA not available yet, need to resolve
+                        refs_to_resolve_set.add((effective_repo, tag))
 
         # Step 3d: Collect existing version comments that need SHA verification
         # This avoids N individual API calls during the update loop
@@ -633,6 +675,11 @@ class AutoFixer(_VersionResolutionMixin):
             )
 
         for file_path, line_num, action_call in action_call_list:
+            call_versions = (
+                exempt_versions
+                if (file_path, line_num) in exempt_calls
+                else latest_versions
+            )
             try:
                 repo_key = (
                     f"{action_call.organization}/{action_call.repository}"
@@ -675,7 +722,7 @@ class AutoFixer(_VersionResolutionMixin):
                         action_call,
                         base_repo_key,
                         sha_map,
-                        latest_versions,
+                        call_versions,
                         repo_changed=repo_was_redirected,
                     )
 
@@ -737,8 +784,8 @@ class AutoFixer(_VersionResolutionMixin):
                 effective_lookup_repo = (
                     base_repo_key  # Use the potentially redirected repo
                 )
-                if effective_lookup_repo in latest_versions:
-                    target_ref, cached_sha = latest_versions[
+                if effective_lookup_repo in call_versions:
+                    target_ref, cached_sha = call_versions[
                         effective_lookup_repo
                     ]
 

@@ -17,6 +17,7 @@ reference-resolution primitives keeps each module focused and reviewable.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from .action_call_git import _get_remote_tags
 from .action_call_resolver import _ReferenceResolutionMixin
 from .action_call_scanner import ActionCallPatterns
+from .dependabot import cooldown_applies, dependency_name
 from .exceptions import GitError
 from .models import ValidationMethod
 from .utils import comment_text
@@ -42,6 +44,13 @@ if TYPE_CHECKING:
 
     from .models import ActionCall
 
+# Set while a batch resolves calls the Dependabot cooldown lists exempt.
+# A context variable rather than an attribute, so the tasks a batch
+# gathers inherit it and a concurrent batch cannot see it.
+_COOLDOWN_EXEMPT: ContextVar[bool] = ContextVar(
+    "_COOLDOWN_EXEMPT", default=False
+)
+
 
 class _VersionResolutionMixin(_ReferenceResolutionMixin):
     """Latest-version discovery behaviour for ``AutoFixer``.
@@ -50,6 +59,52 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
     declarations) from :class:`_ReferenceResolutionMixin`, adding the
     higher-level latest-version lookups that build on them.
     """
+
+    @property
+    def _cooldown_days(self) -> int:
+        """Cooldown window for the lookup in progress.
+
+        Returns:
+            ``0`` inside a batch for cooldown-exempt calls, otherwise
+            the configured ``cooldown_days``.
+        """
+        return 0 if _COOLDOWN_EXEMPT.get() else self.config.cooldown_days
+
+    @property
+    def _session_versions_cache(self) -> dict[str, tuple[str, str, float]]:
+        """Session cache for the lookup in progress.
+
+        Exempt and cooled-down answers for one repository differ, so
+        each keeps its own cache and neither is handed to the other.
+
+        Returns:
+            The session cache matching the active cooldown policy.
+        """
+        if _COOLDOWN_EXEMPT.get():
+            return self._exempt_latest_versions_cache
+        return self._latest_versions_cache
+
+    def _cooldown_exempt(self, action_call: ActionCall) -> bool:
+        """Report whether Dependabot's cooldown lists exempt a call.
+
+        Args:
+            action_call: The call being resolved.
+
+        Returns:
+            ``True`` when a cooldown is configured, the Dependabot
+            ``exclude``/``include`` lists are in force, and they leave
+            this call outside the cooldown.
+        """
+        exclude = tuple(self.config.cooldown_exclude)
+        include = tuple(self.config.cooldown_include)
+        if self.config.cooldown_days <= 0 or not (exclude or include):
+            return False
+        name = dependency_name(
+            action_call.organization,
+            action_call.repository,
+            action_call.reference,
+        )
+        return not cooldown_applies(name, exclude, include)
 
     @property
     def _persistent_cache_usable(self) -> bool:
@@ -77,7 +132,8 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         on-disk cache.
 
         The session cache is unaffected: it lives on one ``AutoFixer``,
-        which serves exactly one repository and therefore one policy.
+        which serves exactly one repository, and keeps cooldown-exempt
+        answers apart from the rest (see :attr:`_session_versions_cache`).
 
         Mirrors
         :attr:`gha_workflow_linter.allow_list_resolver.AllowListResolver.cache_usable`,
@@ -87,9 +143,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
             ``True`` when the default policy applies, so a stored answer
             means the same thing to every reader.
         """
-        return (
-            self.config.cooldown_days <= 0 and not self.config.allow_prerelease
-        )
+        return self._cooldown_days <= 0 and not self.config.allow_prerelease
 
     def _moves_backwards(
         self,
@@ -253,14 +307,35 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         return sha_info["sha"] if sha_info else None
 
     async def _get_latest_versions_batch(
-        self, repo_keys: list[str]
+        self, repo_keys: list[str], *, cooldown_exempt: bool = False
     ) -> dict[str, tuple[str, str]]:
         """
         Batch-fetch latest versions for multiple repositories.
 
         Returns dict mapping repo_key to (tag, sha) tuple.
         Uses both persistent disk cache and session cache for optimal performance.
+
+        ``cooldown_exempt`` resolves the batch as though the cooldown
+        were 0, for calls the Dependabot cooldown lists exempt.
         """
+        token = _COOLDOWN_EXEMPT.set(cooldown_exempt)
+        try:
+            return await self._fetch_latest_versions(repo_keys)
+        finally:
+            _COOLDOWN_EXEMPT.reset(token)
+
+    async def _fetch_latest_versions(
+        self, repo_keys: list[str]
+    ) -> dict[str, tuple[str, str]]:
+        """Resolve latest versions under the active cooldown policy.
+
+        Args:
+            repo_keys: Repositories to resolve.
+
+        Returns:
+            Mapping of repository to its ``(tag, sha)``.
+        """
+        session_cache = self._session_versions_cache
         results: dict[str, tuple[str, str]] = {}
         repos_to_fetch: list[str] = []
         session_cache_hits = 0
@@ -269,8 +344,8 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         # Check session cache first (fastest)
         current_time = time.time()
         for repo_key in repo_keys:
-            if repo_key in self._latest_versions_cache:
-                tag, sha, timestamp = self._latest_versions_cache[repo_key]
+            if repo_key in session_cache:
+                tag, sha, timestamp = session_cache[repo_key]
                 if current_time - timestamp < self._cache_ttl:
                     results[repo_key] = (tag, sha)
                     session_cache_hits += 1
@@ -285,7 +360,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                 tag, sha = cached_version
                 results[repo_key] = (tag, sha)
                 # Also populate session cache for faster subsequent access
-                self._latest_versions_cache[repo_key] = (tag, sha, current_time)
+                session_cache[repo_key] = (tag, sha, current_time)
                 disk_cache_hits += 1
                 continue
 
@@ -313,7 +388,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                 for repo_key, (tag, sha) in graphql_results.items():
                     results[repo_key] = (tag, sha)
                     # Cache in both session and persistent storage
-                    self._latest_versions_cache[repo_key] = (
+                    session_cache[repo_key] = (
                         tag,
                         sha,
                         current_time,
@@ -357,7 +432,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                 tag, sha = result
                 results[repo_key] = (tag, sha)
                 # Cache in both session and persistent storage
-                self._latest_versions_cache[repo_key] = (tag, sha, current_time)
+                session_cache[repo_key] = (tag, sha, current_time)
                 if self._persistent_cache_usable:
                     self._cache.put_latest_version(repo_key, tag, sha)
 
@@ -534,7 +609,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         # When a cooldown is active, select the newest version that has been
         # available long enough, falling back to older eligible versions when
         # the very latest is still "warming".
-        if self.config.cooldown_days > 0:
+        if self._cooldown_days > 0:
             cooldown_choice = self._select_cooldown_version_graphql(
                 repo_data, all_tags, tag_dates
             )
@@ -543,7 +618,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
                     "No release for %s satisfies the %d-day "
                     "cooldown; leaving reference unchanged",
                     repo_key,
-                    self.config.cooldown_days,
+                    self._cooldown_days,
                 )
             return cooldown_choice
 
@@ -627,7 +702,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         )
 
         selected = _select_version_with_cooldown(
-            candidates, self.config.cooldown_days, now=now
+            candidates, self._cooldown_days, now=now
         )
         if not selected:
             return None
@@ -655,7 +730,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
             cooldown window. When the cooldown is disabled the newest tag
             is returned unchanged.
         """
-        if self.config.cooldown_days <= 0:
+        if self._cooldown_days <= 0:
             return sorted_releases[0].get("tag_name")
 
         candidates = [
@@ -669,13 +744,13 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
             for release in sorted_releases
         ]
         selected = _select_version_with_cooldown(
-            candidates, self.config.cooldown_days
+            candidates, self._cooldown_days
         )
         if selected is None:
             self.logger.debug(
                 "No release for %s satisfies the %d-day cooldown",
                 repo_key,
-                self.config.cooldown_days,
+                self._cooldown_days,
             )
             return None
         return selected[0]
@@ -787,7 +862,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
         ]
         if not clean_tags:
             return None
-        if self.config.cooldown_days > 0:
+        if self._cooldown_days > 0:
             # The tags endpoint carries no release dates, so we cannot verify
             # the cooldown window here.
             self.logger.debug(
@@ -827,7 +902,7 @@ class _VersionResolutionMixin(_ReferenceResolutionMixin):
             ]
             if not clean_tags:
                 return None
-            if self.config.cooldown_days > 0:
+            if self._cooldown_days > 0:
                 # ``git ls-remote`` does not expose tag dates, so the
                 # cooldown cannot be enforced for the Git validation method.
                 self.logger.debug(

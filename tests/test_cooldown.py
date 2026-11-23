@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
+from unittest import mock
 
 import pytest
 from typer.testing import CliRunner
@@ -17,8 +18,14 @@ from gha_workflow_linter import cli
 from gha_workflow_linter.action_call_fix import (
     AutoFixer,
 )
+from gha_workflow_linter.action_call_scanner import ActionCallPatterns
 from gha_workflow_linter.cache import ValidationCache
-from gha_workflow_linter.models import CacheConfig, Config, ValidationMethod
+from gha_workflow_linter.models import (
+    CacheConfig,
+    Config,
+    GitHubAPIConfig,
+    ValidationMethod,
+)
 from gha_workflow_linter.version_utils import (
     _parse_iso_datetime,
     _select_version_with_cooldown,
@@ -341,10 +348,11 @@ class TestResolveCooldownDays:
             "gha_workflow_linter.cli.console.print",
             lambda *args, **kwargs: printed.append(str(args[0])),
         )
-        result = cli._resolve_cooldown_days(
-            3, tmp_path, quiet=False, output_format="text"
+        config = Config()
+        cli._apply_action_cooldown(
+            config, 3, tmp_path, quiet=False, output_format="text"
         )
-        assert result == 3
+        assert config.cooldown_days == 3
         # No Dependabot message when the flag is explicit.
         assert printed == []
 
@@ -363,10 +371,11 @@ class TestResolveCooldownDays:
             "gha_workflow_linter.cli.console.print",
             lambda *args, **kwargs: printed.append(str(args[0])),
         )
-        result = cli._resolve_cooldown_days(
-            None, tmp_path, quiet=False, output_format="text"
+        config = Config()
+        cli._apply_action_cooldown(
+            config, None, tmp_path, quiet=False, output_format="text"
         )
-        assert result == 7
+        assert config.cooldown_days == 7
         assert len(printed) == 1
         assert "[7]" in printed[0]
         assert "dependabot configuration" in printed[0]
@@ -377,10 +386,11 @@ class TestResolveCooldownDays:
             "gha_workflow_linter.cli.console.print",
             lambda *args, **kwargs: printed.append(str(args[0])),
         )
-        result = cli._resolve_cooldown_days(
-            None, tmp_path, quiet=False, output_format="text"
+        config = Config()
+        cli._apply_action_cooldown(
+            config, None, tmp_path, quiet=False, output_format="text"
         )
-        assert result == 0
+        assert config.cooldown_days == 0
         assert printed == []
 
     def test_quiet_suppresses_message(
@@ -398,10 +408,11 @@ class TestResolveCooldownDays:
             "gha_workflow_linter.cli.console.print",
             lambda *args, **kwargs: printed.append(str(args[0])),
         )
-        result = cli._resolve_cooldown_days(
-            None, tmp_path, quiet=True, output_format="text"
+        config = Config()
+        cli._apply_action_cooldown(
+            config, None, tmp_path, quiet=True, output_format="text"
         )
-        assert result == 7
+        assert config.cooldown_days == 7
         assert printed == []
 
 
@@ -745,3 +756,240 @@ class TestPersistentCacheUnderReleasePolicy:
 
         assert results == {REPO_KEY: (FRESH_TAG, FRESH_SHA)}
         assert cache.get_latest_version(REPO_KEY) == (FRESH_TAG, FRESH_SHA)
+
+
+_DEPENDABOT_EXCLUDE = (
+    "version: 2\nupdates:\n  - package-ecosystem: github-actions\n"
+    "    directory: /\n    cooldown:\n      default-days: 7\n"
+    "      exclude:\n        - lfreleng-actions/*\n"
+)
+
+
+class TestDependabotCooldownListsResolution:
+    """The Dependabot lists apply in default mode only."""
+
+    @staticmethod
+    def _capture(monkeypatch: Any) -> list[str]:
+        printed: list[str] = []
+        monkeypatch.setattr(
+            "gha_workflow_linter.cli.console.print",
+            lambda *args, **kwargs: printed.append(str(args[0])),
+        )
+        return printed
+
+    def test_default_mode_reads_and_reports_the_lists(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "dependabot.yml").write_text(
+            _DEPENDABOT_EXCLUDE, encoding="utf-8"
+        )
+        printed = self._capture(monkeypatch)
+        config = Config()
+
+        cli._apply_action_cooldown(
+            config, None, tmp_path, quiet=False, output_format="text"
+        )
+
+        assert config.cooldown_days == 7
+        assert config.cooldown_exclude == ["lfreleng-actions/*"]
+        assert config.cooldown_include == []
+        assert printed == [
+            "Using cooldown timer/value [7] from dependabot configuration, "
+            "exclude [lfreleng-actions/*] :robot_face:"
+        ]
+
+    def test_an_explicit_cooldown_ignores_the_lists(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "dependabot.yml").write_text(
+            _DEPENDABOT_EXCLUDE, encoding="utf-8"
+        )
+        self._capture(monkeypatch)
+        config = Config(cooldown_exclude=["stale/*"])
+
+        cli._apply_action_cooldown(
+            config, 7, tmp_path, quiet=False, output_format="text"
+        )
+
+        assert config.cooldown_days == 7
+        assert config.cooldown_exclude == []
+        assert config.cooldown_include == []
+
+
+OLD_SHA = "a" * 40
+#: What a lookup answers under the 7-day cooldown, and without one.
+COOLED = ("v1.5.0", "c" * 40)
+NEWEST = ("v2.0.0", "e" * 40)
+
+
+async def _update_calls(
+    tmp_path: Path,
+    uses: list[str],
+    *,
+    exclude: list[str] | None = None,
+    include: list[str] | None = None,
+) -> tuple[dict[str, str], list[tuple[str, bool]]]:
+    """Run the batch updater over ``uses:`` lines, mocking the network.
+
+    Each latest-version lookup answers ``COOLED`` under an active
+    cooldown and ``NEWEST`` without one, so the SHA a call moves to
+    shows which policy resolved it.
+
+    Args:
+        tmp_path: Directory to hold the workflow.
+        uses: The ``owner/repo[/path]`` each call names.
+        exclude: Dependabot ``cooldown.exclude`` patterns.
+        include: Dependabot ``cooldown.include`` patterns.
+
+    Returns:
+        The SHA each call was moved to, keyed by its ``uses:`` value,
+        and every ``(repository, cooldown_active)`` lookup made.
+    """
+    lines = [f"      - uses: {name}@{OLD_SHA}  # v1.0.0" for name in uses]
+    workflow = tmp_path / "ci.yaml"
+    header = "---\non: [push]\njobs:\n  b:\n    runs-on: x\n    steps:\n"
+    workflow.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
+    first = header.count("\n") + 1
+    calls = {}
+    for offset, line in enumerate(lines):
+        call = ActionCallPatterns.parse_action_call(line, first + offset)
+        assert call is not None
+        calls[first + offset] = call
+
+    config = Config(
+        auto_fix=True,
+        update_actions=True,
+        require_pinned_sha=True,
+        validation_method=ValidationMethod.GITHUB_API,
+        cache=CacheConfig(enabled=True, cache_dir=tmp_path / "cache"),
+        github_api=GitHubAPIConfig(token="test-token"),
+        cooldown_days=7,
+        cooldown_exclude=exclude or [],
+        cooldown_include=include or [],
+    )
+    lookups: list[tuple[str, bool]] = []
+
+    async def single(fixer: AutoFixer, repo_key: str) -> tuple[str, str] | None:
+        active = fixer._cooldown_days > 0
+        lookups.append((repo_key, active))
+        return COOLED if active else NEWEST
+
+    async def no_batch(
+        _fixer: AutoFixer, _repo_keys: list[str]
+    ) -> dict[str, tuple[str, str]]:
+        return {}
+
+    with (
+        mock.patch.object(
+            AutoFixer,
+            "_get_latest_version_single",
+            autospec=True,
+            side_effect=single,
+        ),
+        mock.patch.object(
+            AutoFixer,
+            "_get_latest_versions_graphql_batch",
+            autospec=True,
+            side_effect=no_batch,
+        ),
+        mock.patch.object(
+            AutoFixer, "_detect_repository_redirect", return_value=None
+        ),
+        mock.patch.object(
+            AutoFixer,
+            "_get_shas_batch",
+            return_value={
+                (
+                    call.organization + "/" + call.repository.split("/")[0],
+                    "v1.0.0",
+                ): OLD_SHA
+                for call in calls.values()
+            },
+        ),
+    ):
+        async with AutoFixer(config, base_path=tmp_path, quiet=True) as fixer:
+            applied, _, _ = await fixer.fix_validation_errors(
+                [], {workflow: calls}, check_for_updates=True
+            )
+
+    moved: dict[str, str] = {}
+    for change in applied.get(workflow, []):
+        new_line = change["new_line"]
+        name = new_line.split("uses: ", 1)[1].split("@", 1)[0]
+        moved[name] = new_line.split("@", 1)[1].split()[0]
+    return moved, lookups
+
+
+class TestDependabotCooldownListsApplied:
+    """Exempt calls resolve with no cooldown; the rest keep it."""
+
+    @pytest.mark.asyncio
+    async def test_excluded_calls_take_the_newest_release(
+        self, tmp_path: Path
+    ) -> None:
+        moved, _ = await _update_calls(
+            tmp_path,
+            [
+                "lfreleng-actions/harden-runner-block-action",
+                "lfreleng-actions/security-workflows/.github/workflows/"
+                "openssf-scorecard.yaml",
+                "github/codeql-action/upload-sarif",
+                "actions/checkout",
+            ],
+            exclude=["lfreleng-actions/*"],
+        )
+
+        assert moved == {
+            "lfreleng-actions/harden-runner-block-action": NEWEST[1],
+            "lfreleng-actions/security-workflows/.github/workflows/"
+            "openssf-scorecard.yaml": NEWEST[1],
+            "github/codeql-action/upload-sarif": COOLED[1],
+            "actions/checkout": COOLED[1],
+        }
+
+    @pytest.mark.asyncio
+    async def test_paths_in_one_repository_resolve_apart(
+        self, tmp_path: Path
+    ) -> None:
+        """One repository, two answers: neither may leak to the other."""
+        moved, lookups = await _update_calls(
+            tmp_path,
+            ["org/repo/.github/workflows/a.yaml", "org/repo/sub"],
+            exclude=["org/repo/.github/workflows/*"],
+        )
+
+        assert moved == {
+            "org/repo/.github/workflows/a.yaml": NEWEST[1],
+            "org/repo/sub": COOLED[1],
+        }
+        assert sorted(lookups) == [("org/repo", False), ("org/repo", True)]
+
+    @pytest.mark.asyncio
+    async def test_include_and_exclude(self, tmp_path: Path) -> None:
+        """Only included calls cool down, and exclude wins over include."""
+        moved, _ = await _update_calls(
+            tmp_path,
+            ["actions/checkout", "actions/cache", "github/codeql-action"],
+            exclude=["actions/cache"],
+            include=["actions/*"],
+        )
+
+        assert moved == {
+            "actions/checkout": COOLED[1],
+            "actions/cache": NEWEST[1],
+            "github/codeql-action": NEWEST[1],
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_lists_cools_every_call(self, tmp_path: Path) -> None:
+        moved, lookups = await _update_calls(
+            tmp_path, ["lfreleng-actions/a-action", "actions/checkout"]
+        )
+
+        assert moved == {
+            "lfreleng-actions/a-action": COOLED[1],
+            "actions/checkout": COOLED[1],
+        }
+        assert all(active for _, active in lookups)

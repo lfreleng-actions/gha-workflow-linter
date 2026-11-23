@@ -94,8 +94,11 @@ inputs:
   cooldown:
     description: >
       Minimum days an action release must have been available before
-      updating to it. Read from .github/dependabot.yml when unset. Does
-      not apply to allow-list pins; see 'allow-list-cooldown'.
+      updating to it. Read from .github/dependabot.yml when unset: a
+      call matching its cooldown exclude list takes no cooldown, and
+      when its include list is not empty only the calls it matches take
+      one (exclude wins). A set value applies to every call. Does not
+      apply to allow-list pins; see 'allow-list-cooldown'.
     required: false
   allow-list-cooldown:
     description: >

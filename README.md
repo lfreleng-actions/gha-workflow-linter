@@ -465,6 +465,47 @@ The linter reports that value once:
 Using cooldown timer/value [7] from dependabot configuration 🤖
 ```
 
+The linter also honours the `exclude` and `include` lists in the same
+`cooldown` block, as Dependabot does. A call whose dependency name
+matches an `exclude` pattern takes no cooldown and moves to the newest
+release. When `include` is not empty, a call takes the cooldown when
+it matches one of its patterns, and moves straight to the newest
+release otherwise. `exclude` wins over `include`. Patterns follow
+Ruby's `File.fnmatch?` with no flags, as Dependabot matches them: they
+are case-sensitive, `*` also matches `/`, `[!a]` and `[^a]` both
+negate, and a backslash escapes the next character. So
+`lfreleng-actions/*` covers every action and reusable workflow in that
+organisation:
+
+```yaml
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "lfreleng-actions/*"
+```
+
+The dependency name follows Dependabot: `owner/repo` for most calls,
+extended by the path for a reusable workflow
+(`owner/repo/.github/workflows/ci.yaml`) and for an action in a
+subdirectory pinned by commit SHA (`github/codeql-action/upload-sarif`).
+A path-based version reference such as `org/repo@component/v1` names
+the whole `uses:` value, so `org/repo@component/*` matches it.
+The report line names any lists in force:
+
+<!-- markdownlint-disable MD013 -->
+
+```text
+Using cooldown timer/value [7] from dependabot configuration, exclude [lfreleng-actions/*] 🤖
+```
+
+<!-- markdownlint-enable MD013 -->
+
+The lists apply when the cooldown comes from the Dependabot file. An
+explicit `--cooldown N` applies N days to every action call and
+ignores them.
+
 When the linter finds no Dependabot configuration (and no flag sets a
 value) the cooldown defaults to `0`, preserving the original behaviour.
 The linter picks the newest release that satisfies the cooldown window,
@@ -2280,8 +2321,9 @@ Options:
   --no-skip-actions          Scan action.yaml/action.yml files (default)
   --fix-test-calls           Fix actions with 'test' in comments
   --cooldown INTEGER         Days an action release must be public before
-                             updating (defaults to the Dependabot cooldown
-                             setting, then 0)
+                             updating, for every call (defaults to the
+                             Dependabot cooldown, honouring its
+                             exclude/include lists, then 0)
   --version                  Show version and exit
   --help                     Show this message and exit
 

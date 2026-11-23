@@ -127,49 +127,64 @@ def _get_relative_path(file_path: Path, base_path: Path) -> Path:
         return file_path
 
 
-def _resolve_cooldown_days(
+def _apply_action_cooldown(
+    config: Config,
     explicit: int | None,
     scan_path: Path,
     quiet: bool,
     output_format: str,
-) -> int:
-    """Resolve the action-update cooldown window in days.
+) -> None:
+    """Resolve the action-update cooldown into ``config``.
 
     Precedence:
-        1. An explicit ``--cooldown`` CLI value.
-        2. The repository's Dependabot ``cooldown.default-days`` setting.
+        1. An explicit ``--cooldown`` CLI value, applied to every call.
+        2. The repository's Dependabot ``cooldown.default-days`` setting,
+           with the ``cooldown.exclude`` and ``cooldown.include`` lists
+           beside it deciding which calls it applies to.
         3. ``0`` (cooldown disabled; original behaviour).
 
     When the value is sourced from the Dependabot configuration a single
     informational line is emitted (unless suppressed by quiet/JSON mode).
 
     Args:
+        config: Configuration whose ``cooldown_days``,
+            ``cooldown_exclude`` and ``cooldown_include`` are set.
         explicit: The value passed via ``--cooldown`` (``None`` if unset).
         scan_path: Path being linted; used to locate the Dependabot config.
         quiet: Whether quiet mode is active.
         output_format: The selected output format (``text`` or ``json``).
-
-    Returns:
-        The resolved cooldown window in days.
     """
+    config.cooldown_exclude = []
+    config.cooldown_include = []
     if explicit is not None:
-        return explicit
+        config.cooldown_days = explicit
+        return
 
     cooldown = resolve_cooldown(scan_path)
     if cooldown is None:
-        return 0
+        config.cooldown_days = 0
+        return
+
+    config.cooldown_days = cooldown.days
+    config.cooldown_exclude = list(cooldown.exclude)
+    config.cooldown_include = list(cooldown.include)
 
     if not quiet and output_format != "json":
+        lists = ""
+        if cooldown.days > 0:
+            if cooldown.exclude:
+                lists += f", exclude [{', '.join(cooldown.exclude)}]"
+            if cooldown.include:
+                lists += f", include [{', '.join(cooldown.include)}]"
         # ``markup=False`` keeps the literal square brackets visible in the
         # terminal instead of having Rich parse them as style tags. Emoji
         # shortcodes are still rendered because emoji handling is a
         # separate Rich option.
         console.print(
             f"Using cooldown timer/value [{cooldown.days}] from "
-            "dependabot configuration :robot_face:",
+            f"dependabot configuration{lists} :robot_face:",
             markup=False,
         )
-    return cooldown.days
 
 
 def help_callback(ctx: typer.Context, _param: Any, value: bool) -> None:
@@ -565,15 +580,17 @@ def _resolve_cooldown(config: Config, options: CLIOptions) -> None:
         config: Configuration to update in place.
         options: Resolved CLI options.
     """
-    config.cooldown_days = (
-        0
-        if options.multi_repo
-        else _resolve_cooldown_days(
-            options.cooldown,
-            options.path,
-            options.quiet,
-            options.output_format,
-        )
+    if options.multi_repo:
+        config.cooldown_days = 0
+        config.cooldown_exclude = []
+        config.cooldown_include = []
+        return
+    _apply_action_cooldown(
+        config,
+        options.cooldown,
+        options.path,
+        options.quiet,
+        options.output_format,
     )
 
 
@@ -1245,10 +1262,14 @@ def lint(
         "--cooldown",
         help=(
             "Minimum number of days an action release must have been "
-            "available before updating to it. When unset, the value is "
-            "read from the repository's .github/dependabot.yml cooldown "
-            "setting, falling back to 0 (no cooldown). Does not apply to "
-            "allow-list pins; see --allow-list-cooldown."
+            "available before updating to it, for every action call. When "
+            "unset, the value is read from the repository's "
+            ".github/dependabot.yml cooldown.default-days, and its lists "
+            "apply as Dependabot applies them: a call matching "
+            "cooldown.exclude takes no cooldown, and when cooldown.include "
+            "is not empty only the calls it matches take one (exclude "
+            "wins). Falls back to 0 (no cooldown). Does not "
+            "apply to allow-list pins; see --allow-list-cooldown."
         ),
         min=0,
     ),
@@ -4307,8 +4328,12 @@ def _run_repository_in_sweep(
         repo_options = options.model_copy(
             update={"path": repository, "quiet": silent}
         )
-        repo_config.cooldown_days = _resolve_cooldown_days(
-            options.cooldown, repository, quiet=True, output_format="text"
+        _apply_action_cooldown(
+            repo_config,
+            options.cooldown,
+            repository,
+            quiet=True,
+            output_format="text",
         )
         # GITHUB_REPOSITORY_OWNER names the repository the workflow was
         # launched for, so across a sweep it would answer identically
