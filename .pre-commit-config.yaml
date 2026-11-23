@@ -7,7 +7,6 @@ ci:
   skip:
     - gha-workflow-linter
     - aislop
-    - pytest
   autofix_commit_msg: |
     Chore: Pre-commit autofixes
 
@@ -145,16 +144,6 @@ repos:
         args: [lint, ., --quiet]
         always_run: false
         require_serial: true
-
-  - repo: local
-    hooks:
-      - id: pytest
-        name: pytest
-        entry: uv
-        args: [run, --extra, dev, pytest, --tb=short, -q]
-        language: system
-        pass_filenames: false
-        always_run: true
 
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror
     rev: a11caebebdbf797e1e96611123db279b334a7675  # frozen: 1.40.2
