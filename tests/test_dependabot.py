@@ -6,11 +6,17 @@
 from __future__ import annotations
 
 import textwrap
+import time
 from typing import TYPE_CHECKING
+
+import pytest
 
 from gha_workflow_linter.dependabot import (
     DependabotCooldown,
+    cooldown_applies,
+    dependency_name,
     find_dependabot_config,
+    fnmatch_ruby,
     resolve_cooldown,
 )
 
@@ -261,3 +267,218 @@ class TestResolveCooldown:
         result = resolve_cooldown(tmp_path)
         assert result is not None
         assert result.days == 0
+
+    def test_reads_exclude_and_include(self, tmp_path: Path) -> None:
+        content = textwrap.dedent(
+            """\
+            version: 2
+            updates:
+              - package-ecosystem: "uv"
+                directory: "/"
+                cooldown:
+                  default-days: 3
+                  exclude: ["uv-only/*"]
+              - package-ecosystem: "github-actions"
+                directory: "/"
+                cooldown:
+                  default-days: 7
+                  exclude:
+                    - "lfreleng-actions/*"
+                  include:
+                    - "actions/*"
+            """
+        )
+        _write_dependabot(tmp_path, content)
+        result = resolve_cooldown(tmp_path)
+        assert result is not None
+        assert result.days == 7
+        assert result.exclude == ("lfreleng-actions/*",)
+        assert result.include == ("actions/*",)
+
+    def test_lists_default_to_empty(self, tmp_path: Path) -> None:
+        _write_dependabot(tmp_path, GITHUB_ACTIONS_CONFIG)
+        result = resolve_cooldown(tmp_path)
+        assert result is not None
+        assert result.exclude == ()
+        assert result.include == ()
+
+    @pytest.mark.parametrize(
+        "value",
+        ['"lfreleng-actions/*"', "[1, 2]", '["ok", 3]', "{a: b}"],
+    )
+    def test_ignores_a_list_that_is_not_strings(
+        self, tmp_path: Path, value: str
+    ) -> None:
+        content = textwrap.dedent(
+            f"""\
+            version: 2
+            updates:
+              - package-ecosystem: "github-actions"
+                directory: "/"
+                cooldown:
+                  default-days: 7
+                  exclude: {value}
+                  include: {value}
+            """
+        )
+        _write_dependabot(tmp_path, content)
+        result = resolve_cooldown(tmp_path)
+        assert result is not None
+        assert result.days == 7
+        assert result.exclude == ()
+        assert result.include == ()
+
+
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+class TestDependencyName:
+    """Names match Dependabot's ``github_dependency``."""
+
+    @pytest.mark.parametrize(
+        ("organization", "repository", "reference", "expected"),
+        [
+            pytest.param(
+                "lfreleng-actions",
+                "harden-runner-block-action",
+                SHA,
+                "lfreleng-actions/harden-runner-block-action",
+                id="action",
+            ),
+            pytest.param(
+                "lfreleng-actions",
+                "security-workflows/.github/workflows/openssf-scorecard.yaml",
+                SHA,
+                "lfreleng-actions/security-workflows/.github/workflows/"
+                "openssf-scorecard.yaml",
+                id="reusable-workflow-sha",
+            ),
+            pytest.param(
+                "org",
+                "repo/.github/workflows/ci.yml",
+                "v1",
+                "org/repo/.github/workflows/ci.yml",
+                id="reusable-workflow-tag",
+            ),
+            pytest.param(
+                "github",
+                "codeql-action/upload-sarif",
+                SHA,
+                "github/codeql-action/upload-sarif",
+                id="subdirectory-sha",
+            ),
+            pytest.param(
+                "github",
+                "codeql-action/upload-sarif",
+                "v3",
+                "github/codeql-action",
+                id="subdirectory-tag",
+            ),
+            pytest.param(
+                "org",
+                "repo",
+                "component/v1",
+                "org/repo@component/v1",
+                id="path-based-reference",
+            ),
+            pytest.param(
+                "org",
+                "repo/sub",
+                "releases/2.0",
+                "org/repo/sub@releases/2.0",
+                id="path-based-reference-subdirectory",
+            ),
+            pytest.param(
+                "org",
+                "repo",
+                "feature/topic",
+                "org/repo",
+                id="slash-reference-not-path-based",
+            ),
+        ],
+    )
+    def test_names(
+        self,
+        organization: str,
+        repository: str,
+        reference: str,
+        expected: str,
+    ) -> None:
+        assert dependency_name(organization, repository, reference) == expected
+
+
+class TestCooldownApplies:
+    """Matching follows ``ReleaseCooldownOptions#included?``."""
+
+    def test_no_lists_cools_everything(self) -> None:
+        assert cooldown_applies("actions/checkout", (), ())
+
+    @pytest.mark.parametrize(
+        ("name", "applies"),
+        [
+            ("lfreleng-actions/harden-runner-block-action", False),
+            (
+                "lfreleng-actions/security-workflows/.github/workflows/"
+                "openssf-scorecard.yaml",
+                False,
+            ),
+            ("github/codeql-action/upload-sarif", True),
+            ("LFRELENG-ACTIONS/tag-push-verify-action", True),
+        ],
+    )
+    def test_exclude(self, name: str, applies: bool) -> None:
+        assert cooldown_applies(name, ("lfreleng-actions/*",), ()) is applies
+
+    def test_include_limits_the_cooldown(self) -> None:
+        assert cooldown_applies("actions/checkout", (), ("actions/*",))
+        assert not cooldown_applies("github/codeql-action", (), ("actions/*",))
+
+    def test_path_based_reference_matches_full_call(self) -> None:
+        name = dependency_name("org", "repo", "component/v1")
+        assert not cooldown_applies(name, ("org/repo@component/*",), ())
+
+    def test_exclude_wins_over_include(self) -> None:
+        assert not cooldown_applies(
+            "actions/checkout", ("actions/checkout",), ("actions/*",)
+        )
+
+    @pytest.mark.parametrize("pattern", ["actions/[^c]*", "actions/[!c]*"])
+    def test_negated_bracket_in_either_list(self, pattern: str) -> None:
+        assert cooldown_applies("actions/checkout", (pattern,), ())
+        assert not cooldown_applies("actions/setup-python", (pattern,), ())
+        assert not cooldown_applies("actions/checkout", (), (pattern,))
+        assert cooldown_applies("actions/setup-python", (), (pattern,))
+
+
+class TestFnmatchRuby:
+    """Results agree with Ruby 3.3's ``File.fnmatch?`` with no flags."""
+
+    @pytest.mark.parametrize(
+        ("pattern", "name", "expected"),
+        [
+            ("lfreleng-actions/*", "lfreleng-actions/a/b.yaml", True),
+            ("Actions/*", "actions/checkout", False),
+            ("org/a\\-b", "org/a-b", True),
+            ("org/[]a]", "org/a", False),
+            ("org/[]a]", "org/]", False),
+            ("org/[!]", "org/x", True),
+            ("org/[z-a]", "org/m", False),
+            ("org/[z-a]", "org/a", True),
+            ("org/[ab", "org/[ab", False),
+            ("org/x\\", "org/x", True),
+            ("*", ".x/y", False),
+            (".*", ".x/y", True),
+        ],
+    )
+    def test_matches_ruby(
+        self, pattern: str, name: str, expected: bool
+    ) -> None:
+        assert fnmatch_ruby(name, pattern) is expected
+
+    def test_repeated_wildcards_do_not_backtrack(self) -> None:
+        pattern = "org/" + "*a" * 25 + "b"
+        name = "org/" + "a" * 60
+        started = time.monotonic()
+        assert not fnmatch_ruby(name, pattern)
+        assert fnmatch_ruby(name + "b", pattern)
+        assert time.monotonic() - started < 1
