@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # 🔍 GHA Workflow Linter
 
-[![GitHub Actions](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml/badge.svg)](https://github.com/modeseven-lfit/gha-workflow-linter/actions/workflows/build-test.yaml)
+[![GitHub Actions](https://github.com/lfreleng-actions/gha-workflow-linter/actions/workflows/build-test.yaml/badge.svg)](https://github.com/lfreleng-actions/gha-workflow-linter/actions/workflows/build-test.yaml)
 [![PyPI version](https://img.shields.io/pypi/v/gha-workflow-linter.svg)](https://pypi.org/project/gha-workflow-linter/)
 [![Python Support](https://img.shields.io/pypi/pyversions/gha-workflow-linter.svg)](https://devguide.python.org/versions/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -44,7 +44,7 @@ uv add gha-workflow-linter
 ### From Source
 
 ```bash
-git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
+git clone https://github.com/lfreleng-actions/gha-workflow-linter.git
 cd gha-workflow-linter
 uv pip install -e .
 ```
@@ -52,7 +52,7 @@ uv pip install -e .
 ### Development Installation
 
 ```bash
-git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
+git clone https://github.com/lfreleng-actions/gha-workflow-linter.git
 cd gha-workflow-linter
 uv sync --extra dev
 ```
@@ -1634,8 +1634,8 @@ Add to your `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: https://github.com/modeseven-lfit/gha-workflow-linter
-    rev: d86993e21bbcddcfa9dac63cd43213b6a58fa6fb  # frozen: v0.1.1
+  - repo: https://github.com/lfreleng-actions/gha-workflow-linter
+    rev: e01fa28ed7320e3e8ef23d987cca949230c9aedd  # frozen: v1.13.0
     hooks:
       - id: gha-workflow-linter
       # Offline; fails the commit on a high or medium stderr merge
@@ -1648,6 +1648,8 @@ repos:
 
 ### As a GitHub Action
 
+<!-- markdownlint-disable MD013 -->
+
 ```yaml
 name: Check GitHub Actions
 on: [push, pull_request]
@@ -1658,7 +1660,7 @@ jobs:
     steps:
       - uses: actions/checkout@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a
       - name: Check action calls (strict SHA pinning)
-        uses: modeseven-lfit/gha-workflow-linter@d86993e21bbcddcfa9dac63cd43213b6a58fa6fb
+        uses: lfreleng-actions/gha-workflow-linter@e01fa28ed7320e3e8ef23d987cca949230c9aedd  # v1.13.0
         with:
           path: .
           fail-on-error: true
@@ -1673,13 +1675,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4  # This would fail in strict mode above
       - name: Check action calls (allow tags/branches)
-        uses: modeseven-lfit/gha-workflow-linter@d86993e21bbcddcfa9dac63cd43213b6a58fa6fb
+        uses: lfreleng-actions/gha-workflow-linter@e01fa28ed7320e3e8ef23d987cca949230c9aedd  # v1.13.0
         with:
           path: .
           require-pinned-sha: false  # Allow @v4, @main, etc.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
+
+<!-- markdownlint-enable MD013 -->
 
 The Action installs its own uv and runs its own Python, so earlier
 steps of the job cannot choose either. It fails at once if the job sets
@@ -2356,7 +2360,7 @@ pipeline {
 # Using published image
 docker run --rm -v "$(pwd):/workspace" \
   -e GITHUB_TOKEN=$GITHUB_TOKEN \
-  ghcr.io/modeseven-lfit/gha-workflow-linter:latest lint /workspace
+  ghcr.io/lfreleng-actions/gha-workflow-linter:latest lint /workspace
 
 # Build local image
 docker build -t gha-workflow-linter .
@@ -2393,7 +2397,7 @@ docker build --build-arg VERSION=1.2.3 -t gha-workflow-linter .
 ### Setup Development Environment
 
 ```bash
-git clone https://github.com/modeseven-lfit/gha-workflow-linter.git
+git clone https://github.com/lfreleng-actions/gha-workflow-linter.git
 cd gha-workflow-linter
 uv sync --extra dev
 ```
@@ -2518,8 +2522,8 @@ on its own workflows:
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/modeseven-lfit/gha-workflow-linter
-    rev: d86993e21bbcddcfa9dac63cd43213b6a58fa6fb  # frozen: v0.1.1
+  - repo: https://github.com/lfreleng-actions/gha-workflow-linter
+    rev: e01fa28ed7320e3e8ef23d987cca949230c9aedd  # frozen: v1.13.0
     hooks:
       - id: gha-workflow-linter
 ```
@@ -2593,8 +2597,8 @@ Licensed under the Apache License 2.0. See the LICENSE file for details.
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/modeseven-lfit/gha-workflow-linter/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/modeseven-lfit/gha-workflow-linter/discussions)
+- **Issues**: [GitHub Issues](https://github.com/lfreleng-actions/gha-workflow-linter/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/lfreleng-actions/gha-workflow-linter/discussions)
 - **Documentation**: [Read the Docs](https://gha-workflow-linter.readthedocs.io)
 
 ## Acknowledgments
